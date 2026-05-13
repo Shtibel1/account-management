@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "concurrently \"npm run dev -w web\" \"npm run dev -w api\"",
     "build": "npm run build -w packages/shared-types && npm run build -w web && npm run build -w api",
+    "build:api": "npm run build -w api",
     "dev:web": "npm run dev -w web",
     "dev:api": "npm run dev -w api"
   },
