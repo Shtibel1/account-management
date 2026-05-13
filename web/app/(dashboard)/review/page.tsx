@@ -5,6 +5,7 @@ import { createClient } from '@/utils/supabase/client';
 import { Invoice } from '@invoice/shared-types';
 import { InvoiceTable } from '@/components/InvoiceTable/InvoiceTable';
 import { useToast } from '@/components/ui/Toast';
+import { Loader2, RefreshCw } from 'lucide-react';
 
 const STATUS_LABELS: Record<string, string> = {
   review:   'מוכן לבדיקה',
@@ -17,19 +18,22 @@ export default function ReviewPage() {
   const { toast } = useToast();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const prevStatuses = useRef<Record<string, string>>({});
 
-  const load = async () => {
+  const load = async (silent = false) => {
+    if (!silent) setRefreshing(true);
     const { data } = await supabase
       .from('invoices')
       .select('*')
       .order('created_at', { ascending: false });
     setInvoices((data as Invoice[]) ?? []);
     setLoading(false);
+    setRefreshing(false);
   };
 
   useEffect(() => {
-    load();
+    load(true);
 
     const channel = supabase
       .channel('invoices-status')
@@ -40,7 +44,6 @@ export default function ReviewPage() {
           const updated = payload.new as Invoice;
           const prev = prevStatuses.current[updated.id];
 
-          // הצג toast רק כשסטטוס השתנה ממשהו ל-review/approved/error
           if (prev && prev !== updated.status && STATUS_LABELS[updated.status]) {
             const label = STATUS_LABELS[updated.status];
             const type = updated.status === 'error' ? 'error' : 'success';
@@ -65,7 +68,6 @@ export default function ReviewPage() {
     return () => { supabase.removeChannel(channel); };
   }, []);
 
-  // שמור סטטוסים נוכחיים לצורך השוואה
   useEffect(() => {
     invoices.forEach((inv) => {
       if (!prevStatuses.current[inv.id]) {
@@ -75,16 +77,30 @@ export default function ReviewPage() {
   }, [invoices]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-w-6xl">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-gray-900">בדיקה ואישור חשבוניות</h1>
-        <button onClick={load} className="text-sm text-primary-600 hover:underline">רענן</button>
+        <div>
+          <h2 className="text-2xl font-bold text-slate-900">בדיקה ואישור</h2>
+          <p className="text-sm text-slate-500 mt-1">
+            {invoices.length > 0 ? `${invoices.length} חשבוניות במערכת` : 'אין חשבוניות עדיין'}
+          </p>
+        </div>
+        <button
+          onClick={() => load()}
+          disabled={refreshing}
+          className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700 transition-colors px-3 py-1.5 rounded-lg hover:bg-slate-100"
+        >
+          <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+          רענן
+        </button>
       </div>
 
       {loading ? (
-        <div className="text-center py-16 text-gray-400">טוען...</div>
+        <div className="flex items-center justify-center py-24 text-slate-400">
+          <Loader2 className="h-7 w-7 animate-spin" />
+        </div>
       ) : (
-        <InvoiceTable invoices={invoices} onExported={load} />
+        <InvoiceTable invoices={invoices} onExported={() => load()} />
       )}
     </div>
   );

@@ -19,12 +19,24 @@ export async function approveInvoice(id: string, validatedData: object) {
   return res.json();
 }
 
+export class MissingMappingsError extends Error {
+  constructor(public readonly missing: string[]) {
+    super('מיפויים חסרים');
+  }
+}
+
 export async function exportInvoices(ids: string[]) {
   const res = await fetch(`${API_URL}/api/export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ids }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    if (res.status === 422 && body?.missing?.length) {
+      throw new MissingMappingsError(body.missing as string[]);
+    }
+    throw new Error(body?.error ?? 'שגיאה בייצוא');
+  }
   return res.blob();
 }

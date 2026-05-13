@@ -76,12 +76,25 @@ export async function runExtractionPipeline(
 
 function computeConfidence(data: ExtractedData | null): number {
   if (!data) return 0;
-  const fields: (keyof ExtractedData)[] = [
-    'supplier_name', 'supplier_vat_id', 'invoice_date',
-    'amount_before_vat', 'vat_amount', 'total_amount',
+
+  // שדות חובה (משקל גבוה יותר)
+  const critical: (keyof ExtractedData)[] = [
+    'supplier_name', 'invoice_date', 'total_amount',
   ];
-  const filled = fields.filter((f) => data[f] != null).length;
-  const base = filled / fields.length;
-  const penalty = (data.validation_flags.math_ok ? 0 : 0.2) + (data.validation_flags.vat_id_ok ? 0 : 0.1);
+  // שדות משניים
+  const secondary: (keyof ExtractedData)[] = [
+    'supplier_vat_id', 'invoice_number', 'amount_before_vat', 'vat_amount', 'expense_category',
+  ];
+
+  const criticalScore = critical.filter((f) => data[f] != null).length / critical.length;
+  const secondaryScore = secondary.filter((f) => data[f] != null).length / secondary.length;
+  const base = criticalScore * 0.6 + secondaryScore * 0.4;
+
+  const flags = data.validation_flags;
+  let penalty = 0;
+  if (!flags.math_ok) penalty += 0.25;
+  if (!flags.vat_id_ok) penalty += 0.10;
+  if ((flags.warnings ?? []).length > 0) penalty += 0.05 * Math.min((flags.warnings ?? []).length, 2);
+
   return Math.max(0, Math.round((base - penalty) * 100) / 100);
 }

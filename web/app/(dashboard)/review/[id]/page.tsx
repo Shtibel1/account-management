@@ -6,7 +6,7 @@ import { createClient } from '@/utils/supabase/client';
 import { Invoice } from '@invoice/shared-types';
 import { ValidationForm } from '@/components/SplitPane/ValidationForm';
 import { ImageViewer } from '@/components/SplitPane/ImageViewer';
-import { ArrowRight, Loader2, Eye, EyeOff } from 'lucide-react';
+import { ArrowRight, Loader2, Eye, EyeOff, SlidersHorizontal } from 'lucide-react';
 
 export default function ReviewDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -31,68 +31,77 @@ export default function ReviewDetailPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <Loader2 className="h-8 w-8 animate-spin text-primary-500" />
+      <div className="flex items-center justify-center h-64 text-slate-400">
+        <Loader2 className="h-8 w-8 animate-spin" />
       </div>
     );
   }
 
   if (!invoice) {
-    return <div className="text-center py-16 text-gray-500">חשבונית לא נמצאה</div>;
+    return (
+      <div className="flex items-center justify-center h-64 text-slate-500">
+        חשבונית לא נמצאה
+      </div>
+    );
   }
 
   return (
     <div className="flex flex-col h-[calc(100vh-80px)]">
-      <div className="flex items-center gap-3 mb-4">
-        <button onClick={() => router.back()} className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700">
+      {/* Page header */}
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
+        <button
+          onClick={() => router.back()}
+          className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors"
+        >
           <ArrowRight className="h-4 w-4" /> חזור
         </button>
-        <h1 className="text-lg font-semibold text-gray-900">בדיקת חשבונית</h1>
+
+        <span className="text-slate-300">·</span>
+        <h1 className="text-base font-semibold text-slate-900 truncate max-w-xs">{invoice.file_name}</h1>
 
         {hasBboxes && (
-          <div className="mr-auto flex items-center gap-3">
-            {/* כיול אנכי — מוצג רק כשיש הדגשות פעילות */}
+          <div className="mr-auto flex items-center gap-3 flex-wrap">
             {(showAll || activeField) && (
-              <label className="flex items-center gap-2 text-xs text-gray-500">
-                כיול ↕
+              <label className="flex items-center gap-2 text-xs text-slate-500">
+                <SlidersHorizontal className="h-3.5 w-3.5" />
                 <input
                   type="range" min={-0.3} max={0.3} step={0.005}
                   value={yOffset}
                   onChange={(e) => setYOffset(parseFloat(e.target.value))}
-                  className="w-28 accent-primary-600"
+                  className="w-24 accent-blue-600"
                 />
-                <span className="w-10 text-center font-mono text-gray-600">
+                <span className="w-10 text-center font-mono text-slate-600 text-xs">
                   {yOffset > 0 ? '+' : ''}{Math.round(yOffset * 100)}%
                 </span>
-                <button onClick={() => setYOffset(0)} className="text-gray-400 hover:text-gray-600 underline">
+                <button onClick={() => setYOffset(0)} className="text-slate-400 hover:text-slate-600 underline text-xs">
                   אפס
                 </button>
               </label>
             )}
             <button
               onClick={() => setShowAll((v) => !v)}
-              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border transition-colors"
-              style={{
-                borderColor: showAll ? '#3b82f6' : '#d1d5db',
-                background: showAll ? '#eff6ff' : 'white',
-                color: showAll ? '#2563eb' : '#6b7280',
-              }}
+              className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border transition-colors ${
+                showAll
+                  ? 'border-blue-300 bg-blue-50 text-blue-700'
+                  : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'
+              }`}
             >
               {showAll ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-              {showAll ? 'הסתר כל השדות' : 'הצג כל השדות'}
+              {showAll ? 'הסתר שדות' : 'הצג כל השדות'}
             </button>
           </div>
         )}
       </div>
 
+      {/* Split pane */}
       <div className="flex-1 grid grid-cols-2 gap-4 min-h-0">
-        {/* צד שמאל — מסמך מקורי עם overlay */}
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden flex flex-col">
-          <div className="p-3 border-b border-gray-200 bg-gray-50 text-sm font-medium text-gray-700 flex items-center justify-between">
+        {/* Left — document viewer */}
+        <div className="card overflow-hidden flex flex-col">
+          <div className="px-4 py-3 border-b border-slate-100 bg-slate-50 text-sm font-medium text-slate-700 flex items-center justify-between">
             <span>מסמך מקורי</span>
             {hasBboxes && activeField && (
-              <span className="text-xs text-primary-600 font-normal">
-                מציג: {activeField.replace(/_/g, ' ')}
+              <span className="text-xs text-blue-600 font-normal">
+                {activeField.replace(/_/g, ' ')}
               </span>
             )}
           </div>
@@ -107,8 +116,8 @@ export default function ReviewDetailPage() {
           </div>
         </div>
 
-        {/* צד ימין — טופס אימות */}
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        {/* Right — validation form */}
+        <div className="card overflow-hidden">
           <ValidationForm
             invoice={invoice}
             onApproved={load}
