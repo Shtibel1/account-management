@@ -5,7 +5,8 @@ import { useParams, useRouter } from 'next/navigation';
 import { createClient } from '@/utils/supabase/client';
 import { Invoice } from '@invoice/shared-types';
 import { ValidationForm } from '@/components/SplitPane/ValidationForm';
-import { ArrowRight, Loader2 } from 'lucide-react';
+import { ImageViewer } from '@/components/SplitPane/ImageViewer';
+import { ArrowRight, Loader2, Eye, EyeOff } from 'lucide-react';
 
 export default function ReviewDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -13,6 +14,9 @@ export default function ReviewDetailPage() {
   const supabase = createClient();
   const [invoice, setInvoice] = useState<Invoice | null>(null);
   const [loading, setLoading] = useState(true);
+  const [activeField, setActiveField] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  const [yOffset, setYOffset] = useState(0);
 
   const load = async () => {
     const { data } = await supabase.from('invoices').select('*').eq('id', id).single();
@@ -21,6 +25,9 @@ export default function ReviewDetailPage() {
   };
 
   useEffect(() => { load(); }, [id]);
+
+  const bboxes = invoice?.validated_data?.bboxes ?? invoice?.extracted_data?.bboxes;
+  const hasBboxes = bboxes && Object.values(bboxes).some(Boolean);
 
   if (loading) {
     return (
@@ -41,35 +48,69 @@ export default function ReviewDetailPage() {
           <ArrowRight className="h-4 w-4" /> חזור
         </button>
         <h1 className="text-lg font-semibold text-gray-900">בדיקת חשבונית</h1>
+
+        {hasBboxes && (
+          <div className="mr-auto flex items-center gap-3">
+            {/* כיול אנכי — מוצג רק כשיש הדגשות פעילות */}
+            {(showAll || activeField) && (
+              <label className="flex items-center gap-2 text-xs text-gray-500">
+                כיול ↕
+                <input
+                  type="range" min={-0.05} max={0.05} step={0.005}
+                  value={yOffset}
+                  onChange={(e) => setYOffset(parseFloat(e.target.value))}
+                  className="w-20 accent-primary-600"
+                />
+                <button onClick={() => setYOffset(0)} className="text-gray-400 hover:text-gray-600 text-xs underline">
+                  אפס
+                </button>
+              </label>
+            )}
+            <button
+              onClick={() => setShowAll((v) => !v)}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border transition-colors"
+              style={{
+                borderColor: showAll ? '#3b82f6' : '#d1d5db',
+                background: showAll ? '#eff6ff' : 'white',
+                color: showAll ? '#2563eb' : '#6b7280',
+              }}
+            >
+              {showAll ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+              {showAll ? 'הסתר כל השדות' : 'הצג כל השדות'}
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 grid grid-cols-2 gap-4 min-h-0">
-        {/* צד שמאל — מסמך מקורי */}
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          <div className="p-3 border-b border-gray-200 bg-gray-50 text-sm font-medium text-gray-700">
-            מסמך מקורי
-          </div>
-          <div className="h-full overflow-auto p-2">
-            {invoice.file_url.match(/\.pdf$/i) ? (
-              <iframe
-                src={invoice.file_url}
-                className="w-full h-full rounded"
-                title="חשבונית מקורית"
-              />
-            ) : (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={invoice.file_url}
-                alt="חשבונית מקורית"
-                className="w-full h-auto rounded object-contain"
-              />
+        {/* צד שמאל — מסמך מקורי עם overlay */}
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden flex flex-col">
+          <div className="p-3 border-b border-gray-200 bg-gray-50 text-sm font-medium text-gray-700 flex items-center justify-between">
+            <span>מסמך מקורי</span>
+            {hasBboxes && activeField && (
+              <span className="text-xs text-primary-600 font-normal">
+                מציג: {activeField.replace(/_/g, ' ')}
+              </span>
             )}
+          </div>
+          <div className="flex-1 overflow-hidden">
+            <ImageViewer
+              fileUrl={invoice.file_url}
+              bboxes={bboxes}
+              activeField={activeField}
+              showAll={showAll}
+              yOffset={yOffset}
+            />
           </div>
         </div>
 
         {/* צד ימין — טופס אימות */}
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          <ValidationForm invoice={invoice} onApproved={() => { load(); }} />
+          <ValidationForm
+            invoice={invoice}
+            onApproved={load}
+            onFieldFocus={hasBboxes ? setActiveField : undefined}
+          />
         </div>
       </div>
     </div>

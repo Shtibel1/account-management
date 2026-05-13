@@ -9,17 +9,24 @@ const TOOL_DEFINITION: Anthropic.Tool = {
   input_schema: {
     type: 'object',
     properties: {
-      supplier_name:     { type: 'string',  description: 'שם הספק / ספק השירות' },
-      supplier_vat_id:   { type: 'string',  description: 'מספר עוסק מורשה / ח.פ. (9 ספרות)' },
-      invoice_number:    { type: 'string',  description: 'מספר חשבונית' },
-      invoice_date:      { type: 'string',  description: 'תאריך החשבונית בפורמט YYYY-MM-DD' },
-      amount_before_vat: { type: 'number',  description: 'סכום לפני מע"מ בשקלים' },
-      vat_amount:        { type: 'number',  description: 'סכום המע"מ בשקלים' },
-      total_amount:      { type: 'number',  description: 'סה"כ לתשלום בשקלים' },
+      supplier_name:     { type: 'string', description: 'שם הספק / ספק השירות' },
+      supplier_name_bbox: { '$ref': '#/$defs/bbox' },
+      supplier_vat_id:   { type: 'string', description: 'מספר עוסק מורשה / ח.פ. (9 ספרות)' },
+      supplier_vat_id_bbox: { '$ref': '#/$defs/bbox' },
+      invoice_number:    { type: 'string', description: 'מספר חשבונית' },
+      invoice_number_bbox: { '$ref': '#/$defs/bbox' },
+      invoice_date:      { type: 'string', description: 'תאריך החשבונית בפורמט YYYY-MM-DD' },
+      invoice_date_bbox: { '$ref': '#/$defs/bbox' },
+      amount_before_vat: { type: 'number', description: 'סכום לפני מע"מ = total - vat' },
+      amount_before_vat_bbox: { '$ref': '#/$defs/bbox' },
+      vat_amount:        { type: 'number', description: 'סכום המע"מ בשקלים' },
+      vat_amount_bbox:   { '$ref': '#/$defs/bbox' },
+      total_amount:      { type: 'number', description: 'סה"כ לתשלום בשקלים' },
+      total_amount_bbox: { '$ref': '#/$defs/bbox' },
       expense_category: {
         type: 'string',
-        description: `קטגוריית ההוצאה — בחר את המתאימה ביותר מהרשימה:
-- "ציוד משרדי": נייר, עטים, מדפסות, מחשבים, ריהוט משרדי, חנות נוחות/סופר לצרכי משרד
+        description: `קטגוריית ההוצאה — בחר את המתאימה ביותר:
+- "ציוד משרדי": נייר, עטים, מדפסות, מחשבים, ריהוט משרדי, חנות נוחות/סופר
 - "שכ\"ד": שכר דירה, ליסינג, דמי שכירות
 - "תקשורת": טלפון, סלולרי, אינטרנט, שליחויות, דואר
 - "שיווק ופרסום": פרסום, גוגל, עיצוב, הדפסה שיווקית
@@ -27,7 +34,19 @@ const TOOL_DEFINITION: Anthropic.Tool = {
 - "אחזקה": תיקונים, ניקיון, אחזקת ציוד ומבנה
 - "שירותים מקצועיים": עו"ד, רו"ח, יועצים, חברות תוכנה
 - "חשמל ומים": חשמל, מים, גז, ארנונה
-- "אחר": כל מה שלא מתאים לקטגוריות לעיל`,
+- "אחר": כל מה שלא מתאים`,
+      },
+      expense_category_bbox: { '$ref': '#/$defs/bbox' },
+    },
+    $defs: {
+      bbox: {
+        type: 'object',
+        description: 'מיקום בתמונה. x1,y1 = פינה עליונה-שמאלית, x2,y2 = תחתונה-ימנית. ערכים 0-1 יחסית לגודל המלא של התמונה — (0,0) הוא הפיקסל הקיצוני ביותר למעלה-שמאל, כולל שוליים לבנים. אל תחשב מהתוכן הנראה בלבד.',
+        properties: {
+          x1: { type: 'number' }, y1: { type: 'number' },
+          x2: { type: 'number' }, y2: { type: 'number' },
+        },
+        required: ['x1', 'y1', 'x2', 'y2'],
       },
     },
     required: [],
@@ -88,6 +107,11 @@ export async function extractInvoiceData(
 
   const raw = toolUse.input as Record<string, unknown>;
 
+  const bbox = (key: string) => {
+    const b = raw[`${key}_bbox`] as { x1: number; y1: number; x2: number; y2: number } | undefined;
+    return b && typeof b.x1 === 'number' ? b : undefined;
+  };
+
   return {
     supplier_name:     (raw.supplier_name as string) ?? null,
     supplier_vat_id:   (raw.supplier_vat_id as string) ?? null,
@@ -98,5 +122,15 @@ export async function extractInvoiceData(
     total_amount:      (raw.total_amount as number) ?? null,
     expense_category:  (raw.expense_category as string) ?? null,
     validation_flags: { math_ok: true, vat_id_ok: true, fields_missing: [] },
+    bboxes: {
+      supplier_name:     bbox('supplier_name'),
+      supplier_vat_id:   bbox('supplier_vat_id'),
+      invoice_number:    bbox('invoice_number'),
+      invoice_date:      bbox('invoice_date'),
+      amount_before_vat: bbox('amount_before_vat'),
+      vat_amount:        bbox('vat_amount'),
+      total_amount:      bbox('total_amount'),
+      expense_category:  bbox('expense_category'),
+    },
   };
 }

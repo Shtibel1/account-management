@@ -9,7 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@invoice/shared-types": "*",
+    "@invoice/shared-types": "file:../packages/shared-types",
     "@supabase/ssr": "^0.6.0",
     "@supabase/supabase-js": "^2.45.0",
     "next": "16.2.6",

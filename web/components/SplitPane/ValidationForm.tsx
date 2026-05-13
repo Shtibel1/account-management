@@ -15,9 +15,10 @@ const EXPENSE_CATEGORIES = [
 interface Props {
   invoice: Invoice;
   onApproved: () => void;
+  onFieldFocus?: (field: string | null) => void;
 }
 
-export function ValidationForm({ invoice, onApproved }: Props) {
+export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const initial = invoice.validated_data ?? invoice.extracted_data;
   const [data, setData] = useState<Partial<ExtractedData>>(initial ?? {});
   const [saving, setSaving] = useState(false);
@@ -81,40 +82,40 @@ export function ValidationForm({ invoice, onApproved }: Props) {
       ))}
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        <Field label="שם ספק" error={fieldError('supplier_name')}>
-          <input className={inputClass(fieldError('supplier_name'))} value={data.supplier_name ?? ''} onChange={(e) => set('supplier_name', e.target.value)} />
+        <Field label="שם ספק" error={fieldError('supplier_name')} fieldKey="supplier_name" onFieldFocus={onFieldFocus}>
+          <input className={inputClass(fieldError('supplier_name'))} value={data.supplier_name ?? ''} onChange={(e) => set('supplier_name', e.target.value)} onFocus={() => onFieldFocus?.('supplier_name')} onBlur={() => onFieldFocus?.(null)} />
         </Field>
 
-        <Field label="ח.פ. / עוסק מורשה" error={fieldError('supplier_vat_id') || !(flags?.vat_id_ok ?? true)}>
-          <input className={inputClass(fieldError('supplier_vat_id') || !(flags?.vat_id_ok ?? true))} value={data.supplier_vat_id ?? ''} onChange={(e) => set('supplier_vat_id', e.target.value)} />
+        <Field label="ח.פ. / עוסק מורשה" error={fieldError('supplier_vat_id') || !(flags?.vat_id_ok ?? true)} fieldKey="supplier_vat_id" onFieldFocus={onFieldFocus}>
+          <input className={inputClass(fieldError('supplier_vat_id') || !(flags?.vat_id_ok ?? true))} value={data.supplier_vat_id ?? ''} onChange={(e) => set('supplier_vat_id', e.target.value)} onFocus={() => onFieldFocus?.('supplier_vat_id')} onBlur={() => onFieldFocus?.(null)} />
           {!(flags?.vat_id_ok ?? true) && <p className="text-xs text-red-600 mt-1">מספר עוסק לא תקין (חייב להיות 9 ספרות)</p>}
         </Field>
 
-        <Field label="מספר חשבונית" error={fieldError('invoice_number')}>
-          <input className={inputClass(fieldError('invoice_number'))} value={data.invoice_number ?? ''} onChange={(e) => set('invoice_number', e.target.value)} />
+        <Field label="מספר חשבונית" error={fieldError('invoice_number')} fieldKey="invoice_number" onFieldFocus={onFieldFocus}>
+          <input className={inputClass(fieldError('invoice_number'))} value={data.invoice_number ?? ''} onChange={(e) => set('invoice_number', e.target.value)} onFocus={() => onFieldFocus?.('invoice_number')} onBlur={() => onFieldFocus?.(null)} />
         </Field>
 
-        <Field label="תאריך חשבונית" error={fieldError('invoice_date')}>
-          <input type="date" className={inputClass(fieldError('invoice_date'))} value={data.invoice_date ?? ''} onChange={(e) => set('invoice_date', e.target.value)} />
+        <Field label="תאריך חשבונית" error={fieldError('invoice_date')} fieldKey="invoice_date" onFieldFocus={onFieldFocus}>
+          <input type="date" className={inputClass(fieldError('invoice_date'))} value={data.invoice_date ?? ''} onChange={(e) => set('invoice_date', e.target.value)} onFocus={() => onFieldFocus?.('invoice_date')} onBlur={() => onFieldFocus?.(null)} />
         </Field>
 
         <div className="grid grid-cols-3 gap-3">
-          <Field label="לפני מע״מ" error={mathError}>
-            <input type="number" step="0.01" className={inputClass(mathError)} value={data.amount_before_vat ?? ''} onChange={(e) => set('amount_before_vat', parseFloat(e.target.value))} />
+          <Field label="לפני מע״מ" error={mathError} fieldKey="amount_before_vat" onFieldFocus={onFieldFocus}>
+            <input type="number" step="0.01" className={inputClass(mathError)} value={data.amount_before_vat ?? ''} onChange={(e) => set('amount_before_vat', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('amount_before_vat')} onBlur={() => onFieldFocus?.(null)} />
           </Field>
-          <Field label='מע"מ' error={mathError}>
-            <input type="number" step="0.01" className={inputClass(mathError)} value={data.vat_amount ?? ''} onChange={(e) => set('vat_amount', parseFloat(e.target.value))} />
+          <Field label='מע"מ' error={mathError} fieldKey="vat_amount" onFieldFocus={onFieldFocus}>
+            <input type="number" step="0.01" className={inputClass(mathError)} value={data.vat_amount ?? ''} onChange={(e) => set('vat_amount', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('vat_amount')} onBlur={() => onFieldFocus?.(null)} />
           </Field>
-          <Field label="סה״כ לתשלום" error={mathError}>
-            <input type="number" step="0.01" className={inputClass(mathError)} value={data.total_amount ?? ''} onChange={(e) => set('total_amount', parseFloat(e.target.value))} />
+          <Field label="סה״כ לתשלום" error={mathError} fieldKey="total_amount" onFieldFocus={onFieldFocus}>
+            <input type="number" step="0.01" className={inputClass(mathError)} value={data.total_amount ?? ''} onChange={(e) => set('total_amount', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('total_amount')} onBlur={() => onFieldFocus?.(null)} />
           </Field>
         </div>
         {mathError && (
           <p className="text-xs text-red-600">שגיאה חשבונית: לפני מע"מ + מע"מ ≠ סה"כ</p>
         )}
 
-        <Field label="קטגוריית הוצאה" error={fieldError('expense_category')}>
-          <select className={inputClass(fieldError('expense_category'))} value={data.expense_category ?? ''} onChange={(e) => set('expense_category', e.target.value)}>
+        <Field label="קטגוריית הוצאה" error={fieldError('expense_category')} fieldKey="expense_category" onFieldFocus={onFieldFocus}>
+          <select className={inputClass(fieldError('expense_category'))} value={data.expense_category ?? ''} onChange={(e) => set('expense_category', e.target.value)} onFocus={() => onFieldFocus?.('expense_category')} onBlur={() => onFieldFocus?.(null)}>
             <option value="">בחר קטגוריה...</option>
             {EXPENSE_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
@@ -135,9 +136,17 @@ export function ValidationForm({ invoice, onApproved }: Props) {
   );
 }
 
-function Field({ label, error, children }: { label: string; error: boolean; children: React.ReactNode }) {
+function Field({ label, error, fieldKey, onFieldFocus, children }: {
+  label: string; error: boolean;
+  fieldKey?: string;
+  onFieldFocus?: (field: string | null) => void;
+  children: React.ReactNode;
+}) {
   return (
-    <div>
+    <div
+      onMouseEnter={() => fieldKey && onFieldFocus?.(fieldKey)}
+      onMouseLeave={() => onFieldFocus?.(null)}
+    >
       <label className={clsx('block text-sm font-medium mb-1', error ? 'text-red-600' : 'text-gray-700')}>
         {label} {error && <span className="text-red-500">*</span>}
       </label>

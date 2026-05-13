@@ -9,7 +9,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@invoice/shared-types": "*",
+    "@invoice/shared-types": "file:../packages/shared-types",
     "@anthropic-ai/sdk": "^0.30.0",
     "@langchain/langgraph": "^0.2.0",
     "@langchain/anthropic": "^0.3.0",
