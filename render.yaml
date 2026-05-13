@@ -3,8 +3,8 @@ services:
     name: invoice-api
     runtime: node
     rootDir: api
-    buildCommand: npm install && npm run build
-    startCommand: node dist/index.js
+    buildCommand: npm install
+    startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
