@@ -56,12 +56,15 @@ export default function ReviewDetailPage() {
               <label className="flex items-center gap-2 text-xs text-gray-500">
                 כיול ↕
                 <input
-                  type="range" min={-0.05} max={0.05} step={0.005}
+                  type="range" min={-0.3} max={0.3} step={0.005}
                   value={yOffset}
                   onChange={(e) => setYOffset(parseFloat(e.target.value))}
-                  className="w-20 accent-primary-600"
+                  className="w-28 accent-primary-600"
                 />
-                <button onClick={() => setYOffset(0)} className="text-gray-400 hover:text-gray-600 text-xs underline">
+                <span className="w-10 text-center font-mono text-gray-600">
+                  {yOffset > 0 ? '+' : ''}{Math.round(yOffset * 100)}%
+                </span>
+                <button onClick={() => setYOffset(0)} className="text-gray-400 hover:text-gray-600 underline">
                   אפס
                 </button>
               </label>
