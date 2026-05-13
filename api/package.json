@@ -1,0 +1,27 @@
+{
+  "name": "@invoice/api",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@invoice/shared-types": "*",
+    "@anthropic-ai/sdk": "^0.30.0",
+    "@langchain/langgraph": "^0.2.0",
+    "@langchain/anthropic": "^0.3.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "@fastify/cors": "^10.0.0",
+    "@fastify/multipart": "^9.0.0",
+    "fastify": "^5.0.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
