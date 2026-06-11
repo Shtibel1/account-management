@@ -1,0 +1,53 @@
+@import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    direction: rtl;
+  }
+
+  body {
+    @apply font-sans text-slate-800 bg-slate-100 antialiased;
+    direction: rtl;
+  }
+
+  * { box-sizing: border-box; }
+}
+
+@layer components {
+  .card {
+    @apply bg-white rounded-2xl border border-slate-200 shadow-sm;
+  }
+
+  .input-base {
+    @apply w-full border border-slate-300 rounded-xl px-3 py-2.5 text-sm
+           bg-white placeholder:text-slate-400
+           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500
+           transition-colors;
+  }
+
+  .input-error {
+    @apply border-red-400 bg-red-50 focus:ring-red-400 focus:border-red-400;
+  }
+
+}
+
+@layer utilities {
+  .sidebar-item {
+    @apply flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium
+           text-slate-400 hover:text-white hover:bg-white/10
+           transition-all duration-150 cursor-pointer;
+  }
+  .sidebar-item-active {
+    @apply bg-white/15 text-white;
+  }
+}
+
+/* Scrollbar עדין */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { @apply bg-slate-300 rounded-full; }
+::-webkit-scrollbar-thumb:hover { @apply bg-slate-400; }

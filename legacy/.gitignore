@@ -35,8 +35,3 @@ Thumbs.db
 
 # Misc
 *.pem
-
-# Local mock DB and uploads
-mock_db.json
-public/uploads/
-

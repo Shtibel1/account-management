@@ -1,32 +1,26 @@
 {
-  "name": "invoice-validator-fullstack",
-  "version": "1.0.0",
+  "name": "@invoice/web",
+  "version": "0.0.1",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3001",
+    "dev": "next dev --port 3000",
     "build": "next build",
-    "start": "next start -p 3001",
+    "start": "next start",
     "lint": "next lint"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.30.0",
-    "@langchain/anthropic": "^0.3.0",
-    "@langchain/google-genai": "^0.1.0",
-    "@langchain/langgraph": "^0.2.0",
-    "@langchain/openai": "^0.3.0",
+    "@invoice/shared-types": "file:../packages/shared-types",
     "@supabase/ssr": "^0.6.0",
     "@supabase/supabase-js": "^2.45.0",
-    "clsx": "^2.1.1",
-    "date-fns": "^3.6.0",
-    "dotenv": "^16.4.5",
-    "lucide-react": "^0.439.0",
     "next": "16.2.6",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "react-dropzone": "^14.2.3",
     "react-pdf": "^9.1.0",
-    "xlsx": "^0.18.5",
-    "zod": "^3.23.8"
+    "lucide-react": "^0.439.0",
+    "clsx": "^2.1.1",
+    "date-fns": "^3.6.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
