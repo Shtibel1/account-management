@@ -66,6 +66,29 @@ export async function uploadInvoices(clientId: string, files: File[]) {
     }
     const serverResponse = await res.json();
     
+    // 4. Initiate client-side asynchronous dispatch to trigger pipeline processing
+    if (serverResponse.results && Array.isArray(serverResponse.results)) {
+      for (const result of serverResponse.results) {
+        if (result.status === 'success' && result.id && result.fileUrl) {
+          const uf = uploadedFiles.find((f) => f.fileName === result.fileName);
+          const mimeType = uf ? uf.mimeType : 'application/pdf';
+
+          // Trigger processing asynchronously (fire-and-forget)
+          fetch(`${API_URL}/api/invoices/${result.id}/process`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileUrl: result.fileUrl,
+              mimeType,
+              tenantId: clientId,
+            }),
+          }).catch((err) => {
+            console.error(`[Frontend API] Failed to trigger processing for invoice ${result.id}:`, err);
+          });
+        }
+      }
+    }
+
     // Combine results
     const combinedResults = [...results, ...(serverResponse.results || [])];
     return {
