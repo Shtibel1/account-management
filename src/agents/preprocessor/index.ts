@@ -37,7 +37,7 @@ async function detectInvoiceSplits(
 
   try {
     const response = await anthropic.messages.create({
-      model: 'claude-3-5-haiku-20241022',
+      model: 'claude-3-haiku-20240307',
       max_tokens: 1024,
       system: systemPrompt,
       messages: [
@@ -177,18 +177,20 @@ export async function preprocessInvoice(
       pageCount = pdfPageCount;
       console.log(`[Preprocessor] 📊 PDF has ${pdfPageCount} pages. Running page-by-page OCR in batches...`);
 
-      // Run OCR in batches of 5 pages
-      const allPageTexts: string[] = [];
+      // Run OCR in batches of 5 pages in parallel
+      const batchPromises: Promise<string[]>[] = [];
       const batchSize = 5;
       for (let i = 0; i < pdfPageCount; i += batchSize) {
         const pagesToRequest = [];
         for (let j = i; j < Math.min(i + batchSize, pdfPageCount); j++) {
           pagesToRequest.push(j + 1);
         }
-        console.log(`[Preprocessor]   Fetching OCR for pages: ${pagesToRequest.join('-')}`);
-        const textParts = await runOcrForPageRange(base64Data, apiKey, pagesToRequest);
-        allPageTexts.push(...textParts);
+        console.log(`[Preprocessor]   Scheduling OCR batch for pages: ${pagesToRequest.join('-')}`);
+        batchPromises.push(runOcrForPageRange(base64Data, apiKey, pagesToRequest));
       }
+
+      const batchResults = await Promise.all(batchPromises);
+      const allPageTexts = batchResults.flat();
 
       rawOcrText = allPageTexts.join('\n\n');
       pageTexts = allPageTexts;
