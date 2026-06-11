@@ -147,10 +147,10 @@ const graph = new StateGraph<any>({
     };
     updatedMetrics.estimatedCostUsd = calculateEstimatedCost(updatedMetrics);
 
-    console.log(`[Supervisor] Preprocessed invoice. OCR ops: ${updatedMetrics.ocrOpCount}, cost: $${updatedMetrics.estimatedCostUsd}`);
+    console.log(`[Supervisor] ⚙️ Preprocessing complete. OCR Ops: ${updatedMetrics.ocrOpCount}, Cost: $${updatedMetrics.estimatedCostUsd}`);
 
     if (splits && splits.length > 1) {
-      console.log(`[Supervisor] PDF split detected. Splitting into ${splits.length} parts...`);
+      console.log(`[Supervisor] ✂️ Multi-invoice PDF detected. Splitting into ${splits.length} parts...`);
       try {
         const response = await fetch(state.fileUrl);
         if (!response.ok) {
@@ -194,6 +194,8 @@ const graph = new StateGraph<any>({
           if (uploadErr || !uploadData) {
             throw new Error(`Failed to upload split PDF part ${idx + 1}: ${uploadErr?.message}`);
           }
+
+          console.log(`[Supervisor]   - Part ${idx + 1}/${splits.length} split and uploaded to Storage.`);
 
           const { data: signedData, error: signErr } = await supabase.storage
             .from('raw-invoices')
@@ -244,6 +246,7 @@ const graph = new StateGraph<any>({
               continue;
             }
 
+            console.log(`[Supervisor]   - Triggered child pipeline for part ${idx + 1}: ${newInvoice.id}`);
             runOrchestrationPipeline(newInvoice.id, splitFileUrl, 'application/pdf', state.tenantId).catch((err) => {
               console.error(`LangGraph Pipeline failed for split invoice ${newInvoice.id}:`, err);
             });
@@ -273,7 +276,7 @@ const graph = new StateGraph<any>({
     const isRetry = state.extractedData !== null;
     const useVision = state.useVisionFallback || isRetry;
     
-    console.log(`[Supervisor] Extracting data. Retry: ${isRetry}, useVision: ${useVision}`);
+    console.log(`[Supervisor] 🔍 Extracting invoice fields (Retry: ${isRetry}, Vision Mode: ${useVision})`);
 
     const { extractedData, inputTokens, outputTokens } = await extractInvoiceData(
       state.rawOcrText,
@@ -290,7 +293,7 @@ const graph = new StateGraph<any>({
     };
     updatedMetrics.estimatedCostUsd = calculateEstimatedCost(updatedMetrics);
 
-    console.log(`[Supervisor] Extracted invoice data. LLM Input tokens: ${updatedMetrics.inputTokens}, Output tokens: ${updatedMetrics.outputTokens}, Total cost: $${updatedMetrics.estimatedCostUsd}`);
+    console.log(`[Supervisor] 📄 Extraction complete. LLM Cost: $${(updatedMetrics.estimatedCostUsd - (updatedMetrics.ocrOpCount * 0.0015)).toFixed(4)} (Total cost: $${updatedMetrics.estimatedCostUsd})`);
 
     return { 
       extractedData,
@@ -319,7 +322,7 @@ const graph = new StateGraph<any>({
     const data = state.extractedData;
     const confidence = computeConfidence(data);
     
-    console.log(`[Supervisor] Saving review state. Total Pipeline Cost: $${state.costMetrics.estimatedCostUsd}`);
+    console.log(`[Supervisor] 💾 Saving state: REQUIRES MANUAL REVIEW (Total Cost: $${state.costMetrics.estimatedCostUsd})`);
 
     await supabase.from('invoices').update({
       extracted_data: data,
@@ -340,7 +343,7 @@ const graph = new StateGraph<any>({
     const data = state.extractedData;
     const confidence = computeConfidence(data);
 
-    console.log(`[Supervisor] Saving success/approved state. Total Pipeline Cost: $${state.costMetrics.estimatedCostUsd}`);
+    console.log(`[Supervisor] ✅ Saving state: AUTO-APPROVED (Total Cost: $${state.costMetrics.estimatedCostUsd})`);
 
     await supabase.from('invoices').update({
       extracted_data: data,
@@ -355,7 +358,7 @@ const graph = new StateGraph<any>({
 
   // 8. Save Error node
   .addNode('save_error', async (state: PipelineState) => {
-    console.error(`[Supervisor] Saving error state. Total Pipeline Cost: $${state.costMetrics.estimatedCostUsd}. Error: ${state.error}`);
+    console.error(`[Supervisor] ❌ Saving state: ERROR (Total Cost: $${state.costMetrics.estimatedCostUsd}). Details: ${state.error}`);
     
     await supabase.from('invoices').update({
       status: 'error',

@@ -11,10 +11,11 @@ import { AlertTriangle, Download, ExternalLink, FileText, Loader2, X } from 'luc
 
 interface Props {
   invoices: Invoice[];
+  clients?: Record<string, string>;
   onExported?: () => void;
 }
 
-export function InvoiceTable({ invoices, onExported }: Props) {
+export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
   const [missingMappings, setMissingMappings] = useState<string[] | null>(null);
@@ -124,7 +125,9 @@ export function InvoiceTable({ invoices, onExported }: Props) {
                   onChange={toggleAll}
                 />
               </th>
+              <th className="p-4 text-right font-semibold text-slate-600 text-xs uppercase tracking-wide">לקוח</th>
               <th className="p-4 text-right font-semibold text-slate-600 text-xs uppercase tracking-wide">שם קובץ</th>
+              <th className="p-4 text-right font-semibold text-slate-600 text-xs uppercase tracking-wide">תאריך העלאה</th>
               <th className="p-4 text-right font-semibold text-slate-600 text-xs uppercase tracking-wide">ספק</th>
               <th className="p-4 text-right font-semibold text-slate-600 text-xs uppercase tracking-wide">תאריך</th>
               <th className="p-4 text-right font-semibold text-slate-600 text-xs uppercase tracking-wide">סה"כ</th>
@@ -149,6 +152,9 @@ export function InvoiceTable({ invoices, onExported }: Props) {
                       />
                     )}
                   </td>
+                  <td className="p-4 text-slate-700 font-medium">
+                    {clients[inv.client_id] || <span className="text-slate-400">—</span>}
+                  </td>
                   <td className="p-4">
                     <div className="flex items-center gap-2">
                       <FileText className="h-4 w-4 text-slate-400 shrink-0 self-start mt-0.5" />
@@ -161,6 +167,9 @@ export function InvoiceTable({ invoices, onExported }: Props) {
                         )}
                       </div>
                     </div>
+                  </td>
+                  <td className="p-4 text-slate-500 tabular-nums">
+                    {inv.created_at ? format(new Date(inv.created_at), 'dd/MM/yyyy') : <span className="text-slate-400">—</span>}
                   </td>
                   <td className="p-4 text-slate-700">{data?.supplier_name ?? <span className="text-slate-400">—</span>}</td>
                   <td className="p-4 text-slate-500 tabular-nums">

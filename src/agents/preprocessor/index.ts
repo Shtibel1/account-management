@@ -52,7 +52,7 @@ async function detectInvoiceSplits(
     const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
     const result = JSON.parse(cleanText);
     if (result && Array.isArray(result.splits)) {
-      console.log('[Preprocessor] AI split detection succeeded:', result.splits);
+      console.log(`[Preprocessor] 🤖 AI split detection succeeded. Identified ${result.splits.length} parts:`, JSON.stringify(result.splits));
       return result.splits;
     }
   } catch (err) {
@@ -123,7 +123,7 @@ export async function preprocessInvoice(
   splits?: { start_page: number; end_page: number }[];
   pageTexts?: string[];
 }> {
-  console.log(`[Preprocessor] Starting Google Cloud Vision OCR for URL: ${fileUrl}, mimeType: ${mimeType}`);
+  console.log(`[Preprocessor] 📄 Starting OCR preprocessing for file URL: ${fileUrl} (${mimeType})`);
 
   const apiKey = process.env.GOOGLE_CLOUD_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) {
@@ -175,7 +175,7 @@ export async function preprocessInvoice(
       pageTexts = [rawOcrText];
     } else {
       pageCount = pdfPageCount;
-      console.log(`[Preprocessor] PDF has ${pdfPageCount} pages. Running OCR on all pages.`);
+      console.log(`[Preprocessor] 📊 PDF has ${pdfPageCount} pages. Running page-by-page OCR in batches...`);
 
       // Run OCR in batches of 5 pages
       const allPageTexts: string[] = [];
@@ -185,7 +185,7 @@ export async function preprocessInvoice(
         for (let j = i; j < Math.min(i + batchSize, pdfPageCount); j++) {
           pagesToRequest.push(j + 1);
         }
-        console.log(`[Preprocessor] Fetching OCR for page range: ${pagesToRequest.join('-')}`);
+        console.log(`[Preprocessor]   Fetching OCR for pages: ${pagesToRequest.join('-')}`);
         const textParts = await runOcrForPageRange(base64Data, apiKey, pagesToRequest);
         allPageTexts.push(...textParts);
       }

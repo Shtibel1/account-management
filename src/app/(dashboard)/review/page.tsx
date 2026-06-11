@@ -19,10 +19,22 @@ export default function ReviewPage() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [clients, setClients] = useState<Record<string, string>>({});
   const prevStatuses = useRef<Record<string, string>>({});
 
   const load = async (silent = false) => {
     if (!silent) setRefreshing(true);
+    
+    // Fetch client list to map client_id to client names
+    const { data: clientsData } = await supabase
+      .from('clients')
+      .select('id, name');
+    const clientMap: Record<string, string> = {};
+    (clientsData || []).forEach((c) => {
+      clientMap[c.id] = c.name;
+    });
+    setClients(clientMap);
+
     const { data } = await supabase
       .from('invoices')
       .select('*')
@@ -100,7 +112,7 @@ export default function ReviewPage() {
           <Loader2 className="h-7 w-7 animate-spin" />
         </div>
       ) : (
-        <InvoiceTable invoices={invoices} onExported={() => load()} />
+        <InvoiceTable invoices={invoices} clients={clients} onExported={() => load()} />
       )}
     </div>
   );
