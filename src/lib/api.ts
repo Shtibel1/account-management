@@ -139,3 +139,41 @@ export async function exportInvoices(ids: string[]) {
   }
   return res.blob();
 }
+
+export async function splitInvoice(
+  id: string,
+  splits: { startPage: number; endPage: number }[],
+  tenantId: string
+) {
+  const res = await fetch(`${API_URL}/api/invoices/${id}/split`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ splits }),
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || 'שגיאה בפיצול הקובץ');
+  }
+
+  const data = await res.json();
+
+  // Trigger background process for each split part
+  if (data.invoices && Array.isArray(data.invoices)) {
+    for (const inv of data.invoices) {
+      fetch(`${API_URL}/api/invoices/${inv.id}/process`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileUrl: inv.fileUrl,
+          mimeType: inv.mimeType || 'application/pdf',
+          tenantId,
+        }),
+      }).catch((err) => {
+        console.error(`[Frontend API] Failed to trigger processing for split invoice ${inv.id}:`, err);
+      });
+    }
+  }
+
+  return data;
+}
