@@ -5,6 +5,28 @@ import { extractInvoiceData } from '../extraction';
 import { validateInvoice } from '../validation';
 import { approvalNode } from '../approval';
 import { supabase } from '@/lib/supabase';
+import { PDFDocument } from 'pdf-lib';
+
+async function splitPdfBuffer(
+  fileBuffer: Buffer,
+  startPage: number,
+  endPage: number
+): Promise<Buffer> {
+  const originalDoc = await PDFDocument.load(fileBuffer);
+  const newDoc = await PDFDocument.create();
+  
+  const pagesToCopy = [];
+  for (let i = startPage - 1; i <= endPage - 1; i++) {
+    pagesToCopy.push(i);
+  }
+  
+  const copiedPages = await newDoc.copyPages(originalDoc, pagesToCopy);
+  copiedPages.forEach((page) => newDoc.addPage(page));
+  
+  const pdfBytes = await newDoc.save();
+  return Buffer.from(pdfBytes);
+}
+
 
 // Helper to compute confidence (Legacy calculation method)
 export function computeConfidence(data: ExtractedData | null): number {
@@ -118,7 +140,7 @@ const graph = new StateGraph<any>({
 
   // 2. Preprocess node (Deterministic OCR Extraction)
   .addNode('preprocess', async (state: PipelineState) => {
-    const { rawOcrText, ocrMetadata, ocrOpCount } = await preprocessInvoice(state.fileUrl, state.mimeType);
+    const { rawOcrText, ocrMetadata, ocrOpCount, splits, pageTexts } = await preprocessInvoice(state.fileUrl, state.mimeType);
     const updatedMetrics = {
       ...state.costMetrics,
       ocrOpCount: state.costMetrics.ocrOpCount + ocrOpCount,
@@ -126,6 +148,118 @@ const graph = new StateGraph<any>({
     updatedMetrics.estimatedCostUsd = calculateEstimatedCost(updatedMetrics);
 
     console.log(`[Supervisor] Preprocessed invoice. OCR ops: ${updatedMetrics.ocrOpCount}, cost: $${updatedMetrics.estimatedCostUsd}`);
+
+    if (splits && splits.length > 1) {
+      console.log(`[Supervisor] PDF split detected. Splitting into ${splits.length} parts...`);
+      try {
+        const response = await fetch(state.fileUrl);
+        if (!response.ok) {
+          throw new Error(`Failed to download original invoice file: ${response.statusText}`);
+        }
+        const fileBuffer = Buffer.from(await response.arrayBuffer());
+
+        const { data: currentInvoice, error: fetchInvErr } = await supabase
+          .from('invoices')
+          .select('file_name')
+          .eq('id', state.invoiceId)
+          .single();
+
+        if (fetchInvErr || !currentInvoice) {
+          throw new Error(`Failed to fetch current invoice: ${fetchInvErr?.message}`);
+        }
+
+        const originalFileName = currentInvoice.file_name || 'invoice.pdf';
+        const lastDot = originalFileName.lastIndexOf('.');
+        const ext = lastDot !== -1 ? originalFileName.substring(lastDot) : '.pdf';
+        const nameWithoutExt = lastDot !== -1 ? originalFileName.substring(0, lastDot) : originalFileName;
+
+        let primaryFileUrl = state.fileUrl;
+        let primaryFileName = originalFileName;
+        let primaryRawOcrText = rawOcrText;
+        let primaryOcrMetadata = ocrMetadata;
+
+        for (let idx = 0; idx < splits.length; idx++) {
+          const split = splits[idx];
+          const splitBuffer = await splitPdfBuffer(fileBuffer, split.start_page, split.end_page);
+          const splitFileName = `${nameWithoutExt}_חלק_${idx + 1}${ext}`;
+          const uploadPath = `${state.tenantId}/${Date.now()}_${splitFileName}`;
+
+          const { data: uploadData, error: uploadErr } = await supabase.storage
+            .from('raw-invoices')
+            .upload(uploadPath, splitBuffer, {
+              contentType: 'application/pdf',
+              upsert: true,
+            });
+
+          if (uploadErr || !uploadData) {
+            throw new Error(`Failed to upload split PDF part ${idx + 1}: ${uploadErr?.message}`);
+          }
+
+          const { data: signedData, error: signErr } = await supabase.storage
+            .from('raw-invoices')
+            .createSignedUrl(uploadPath, 60 * 60 * 24 * 365);
+
+          if (signErr || !signedData?.signedUrl) {
+            throw new Error(`Failed to create signed URL for split PDF part ${idx + 1}: ${signErr?.message}`);
+          }
+
+          const splitFileUrl = signedData.signedUrl;
+          const splitPageTexts = pageTexts ? pageTexts.slice(split.start_page - 1, split.end_page) : [];
+          const splitRawOcrText = splitPageTexts.join('\n\n');
+          const splitPageCount = split.end_page - split.start_page + 1;
+          const splitOcrMetadata = {
+            pageCount: splitPageCount,
+            detectedLanguages: ocrMetadata?.detectedLanguages || ['he'],
+            confidence: ocrMetadata?.confidence || 0.95,
+          };
+
+          if (idx === 0) {
+            primaryFileUrl = splitFileUrl;
+            primaryFileName = splitFileName;
+            primaryRawOcrText = splitRawOcrText;
+            primaryOcrMetadata = splitOcrMetadata;
+
+            await supabase
+              .from('invoices')
+              .update({
+                file_url: splitFileUrl,
+                file_name: splitFileName,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', state.invoiceId);
+          } else {
+            const { data: newInvoice, error: insertErr } = await supabase
+              .from('invoices')
+              .insert({
+                client_id: state.tenantId,
+                file_url: splitFileUrl,
+                file_name: splitFileName,
+                status: 'processing',
+              })
+              .select()
+              .single();
+
+            if (insertErr || !newInvoice) {
+              console.error(`[Supervisor] Failed to insert split invoice part ${idx + 1}:`, insertErr);
+              continue;
+            }
+
+            runOrchestrationPipeline(newInvoice.id, splitFileUrl, 'application/pdf', state.tenantId).catch((err) => {
+              console.error(`LangGraph Pipeline failed for split invoice ${newInvoice.id}:`, err);
+            });
+          }
+        }
+
+        return {
+          fileUrl: primaryFileUrl,
+          rawOcrText: primaryRawOcrText,
+          ocrMetadata: primaryOcrMetadata,
+          costMetrics: updatedMetrics,
+        };
+      } catch (err) {
+        console.error('[Supervisor] Splitting PDF failed, proceeding with original PDF:', err);
+      }
+    }
 
     return {
       rawOcrText,

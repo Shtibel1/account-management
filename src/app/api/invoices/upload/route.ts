@@ -22,59 +22,26 @@ function sanitizeStorageFilename(fileName: string): string {
 
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData();
-    const clientId = formData.get('clientId') as string;
-    const files = formData.getAll('files') as File[];
+    const body = await request.json();
+    const { clientId, files } = body as {
+      clientId: string;
+      files: { filePath: string; fileName: string; mimeType: string }[];
+    };
 
     if (!clientId) {
       return NextResponse.json({ error: 'Missing clientId' }, { status: 400 });
     }
 
     if (!files || files.length === 0) {
-      return NextResponse.json({ error: 'No files uploaded' }, { status: 400 });
+      return NextResponse.json({ error: 'No files specified' }, { status: 400 });
     }
 
     const results: { fileName: string; status: 'success' | 'error'; id?: string; error?: string }[] = [];
 
     for (const file of files) {
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const fileName = file.name;
-      const mimeType = file.type;
-      const sanitizedName = sanitizeStorageFilename(fileName);
-      const filePath = `${clientId}/${Date.now()}_${sanitizedName}`;
+      const { filePath, fileName, mimeType } = file;
 
-      // 1. Upload to Supabase Storage Bucket
-      const { error: storageErr } = await supabase.storage
-        .from('raw-invoices')
-        .upload(filePath, buffer, { contentType: mimeType, upsert: false });
-
-      if (storageErr) {
-        console.error('Storage upload failed:', storageErr);
-        const errMsg = `Storage upload failed: ${storageErr.message || String(storageErr)}`;
-
-        // Record failure in database
-        const { data: invoice, error: dbErr } = await supabase
-          .from('invoices')
-          .insert({
-            client_id: clientId,
-            file_url: '',
-            file_name: fileName,
-            status: 'error',
-            error_message: errMsg,
-          })
-          .select()
-          .single();
-
-        results.push({
-          fileName,
-          status: 'error',
-          id: invoice?.id,
-          error: errMsg + (dbErr ? `. Also DB insert failed: ${dbErr.message}` : ''),
-        });
-        continue;
-      }
-
-      // 2. Generate signed URL valid for 1 year
+      // 1. Generate signed URL valid for 1 year
       const { data: signedData, error: signErr } = await supabase.storage
         .from('raw-invoices')
         .createSignedUrl(filePath, 60 * 60 * 24 * 365);
@@ -107,7 +74,7 @@ export async function POST(request: Request) {
 
       const fileUrl = signedData.signedUrl;
 
-      // 3. Insert Invoice record in database
+      // 2. Insert Invoice record in database
       const { data: invoice, error: dbErr } = await supabase
         .from('invoices')
         .insert({
@@ -135,7 +102,7 @@ export async function POST(request: Request) {
         id: invoice.id,
       });
 
-      // 4. Trigger LangGraph flow asynchronously (non-blocking)
+      // 3. Trigger LangGraph flow asynchronously (non-blocking)
       runOrchestrationPipeline(invoice.id, fileUrl, mimeType, clientId).catch((err) => {
         console.error(`LangGraph Pipeline failed for invoice ${invoice.id}:`, err);
       });
