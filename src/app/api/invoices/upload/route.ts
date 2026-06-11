@@ -37,6 +37,7 @@ export async function POST(request: Request) {
     }
 
     const results: { fileName: string; status: 'success' | 'error'; id?: string; error?: string }[] = [];
+    const pipelinePromises: Promise<any>[] = [];
 
     for (const file of files) {
       const { filePath, fileName, mimeType } = file;
@@ -102,13 +103,21 @@ export async function POST(request: Request) {
         id: invoice.id,
       });
 
-      // 3. Trigger LangGraph flow asynchronously (non-blocking)
-      runOrchestrationPipeline(invoice.id, fileUrl, mimeType, clientId).catch((err) => {
-        console.error(`LangGraph Pipeline failed for invoice ${invoice.id}:`, err);
-      });
+      // 3. Trigger and await LangGraph flow synchronously
+      pipelinePromises.push(
+        runOrchestrationPipeline(invoice.id, fileUrl, mimeType, clientId).catch((err) => {
+          console.error(`LangGraph Pipeline failed for invoice ${invoice.id}:`, err);
+        })
+      );
+    }
+
+    // Await all pipelines (and any of their child splits) to finish/pause before responding
+    if (pipelinePromises.length > 0) {
+      await Promise.all(pipelinePromises);
     }
 
     return NextResponse.json({ results, count: results.length }, { status: 201 });
+
   } catch (err) {
     console.error('Upload handler crashed:', err);
     return NextResponse.json(

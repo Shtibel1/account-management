@@ -178,6 +178,8 @@ const graph = new StateGraph<any>({
         let primaryRawOcrText = rawOcrText;
         let primaryOcrMetadata = ocrMetadata;
 
+        const childPromises: Promise<any>[] = [];
+
         for (let idx = 0; idx < splits.length; idx++) {
           const split = splits[idx];
           const splitBuffer = await splitPdfBuffer(fileBuffer, split.start_page, split.end_page);
@@ -247,10 +249,18 @@ const graph = new StateGraph<any>({
             }
 
             console.log(`[Supervisor]   - Triggered child pipeline for part ${idx + 1}: ${newInvoice.id}`);
-            runOrchestrationPipeline(newInvoice.id, splitFileUrl, 'application/pdf', state.tenantId).catch((err) => {
-              console.error(`LangGraph Pipeline failed for split invoice ${newInvoice.id}:`, err);
-            });
+            childPromises.push(
+              runOrchestrationPipeline(newInvoice.id, splitFileUrl, 'application/pdf', state.tenantId).catch((err) => {
+                console.error(`LangGraph Pipeline failed for split invoice ${newInvoice.id}:`, err);
+              })
+            );
           }
+        }
+
+        if (childPromises.length > 0) {
+          console.log(`[Supervisor] Awaiting ${childPromises.length} child pipelines to finish/pause...`);
+          await Promise.all(childPromises);
+          console.log(`[Supervisor] All child pipelines finished/paused.`);
         }
 
         return {
