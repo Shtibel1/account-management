@@ -101,8 +101,22 @@ export default function MappingsPage() {
             throw new Error('הקובץ ריק');
           }
 
-          // Read headers (first row)
-          const headers = rawData[0].map(h => String(h || '').trim());
+          // Read headers dynamically by scanning the first 10 rows for any known column header
+          let headerRowIndex = 0;
+          for (let i = 0; i < Math.min(rawData.length, 10); i++) {
+            const row = rawData[i];
+            if (!row) continue;
+            const hasHeader = row.some(cell => {
+              const str = String(cell || '').trim();
+              return str === 'שם הספק' || str === 'שם ספק' || str === 'מספר כרטיס' || str === 'מספר ספק' || str === 'מספר' || str === 'מספר תיק מע"מ' || str === 'ח.פ';
+            });
+            if (hasHeader) {
+              headerRowIndex = i;
+              break;
+            }
+          }
+
+          const headers = rawData[headerRowIndex].map(h => String(h || '').trim());
 
           // Map column indices
           const colIndex = {
@@ -119,7 +133,7 @@ export default function MappingsPage() {
           }
 
           const parsedRows: Partial<AccountMapping>[] = [];
-          for (let i = 1; i < rawData.length; i++) {
+          for (let i = headerRowIndex + 1; i < rawData.length; i++) {
             const row = rawData[i];
             if (!row || row.length === 0) continue;
 
