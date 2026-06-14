@@ -70,7 +70,10 @@ try {
 ### 1. Self-Documenting Files
 - After completing a task or coding a feature, if any file layouts, dependencies, environment variables, or databases changes occurred, the agent **MUST** update [PROJECT_CONTEXT.md](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/PROJECT_CONTEXT.md) and related markdown documents in the `docs/` folder to reflect the changes.
 
-### 2. Git Commit Protocol (Conventional Commits)
+### 2. Database Synchronization
+- If any database tables, columns, constraints, or schemas are modified in Supabase, the agent **MUST** run `npm run db:pull-types` to regenerate `src/shared/supabase-types.ts`, and commit the changes.
+
+### 3. Git Commit Protocol (Conventional Commits)
 All commit messages must follow the [Conventional Commits](https://www.conventionalcommits.org/) specification:
 - `feat:` for new features (e.g. `feat: implement Hashavshevet exporter`).
 - `fix:` for bug fixes (e.g. `fix: correct math check tolerance in validation`).
@@ -78,7 +81,7 @@ All commit messages must follow the [Conventional Commits](https://www.conventio
 - `refactor:` for code restructuring that doesn't change functionality.
 - `test:` for adding or modifying tests.
 
-### 3. Automatic Push to GitHub
+### 4. Automatic Push to GitHub
 - Once the implementation is complete, linted, type-checked, and manual verification is successful:
   1. Stage the files (`git add .`).
   2. Commit with a conventional commit message (`git commit -m "..."`).
