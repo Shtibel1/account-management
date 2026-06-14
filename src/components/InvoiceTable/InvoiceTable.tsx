@@ -1,18 +1,36 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { Invoice } from '@/shared/types';
 import { StatusBadge } from '@/components/ui/Badge';
 import { exportInvoices, MissingMappingsError } from '@/lib/api';
 import { useToast } from '@/components/ui/Toast';
 import { format } from 'date-fns';
-import { AlertTriangle, Download, ExternalLink, FileText, Loader2, X } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Loader2, X } from 'lucide-react';
 
 interface Props {
   invoices: Invoice[];
   clients?: Record<string, string>;
   onExported?: () => void;
+}
+
+function getPageNumbers(currentPage: number, totalPages: number) {
+  const pages: (number | string)[] = [];
+  if (totalPages <= 5) {
+    for (let i = 1; i <= totalPages; i++) {
+      pages.push(i);
+    }
+  } else {
+    if (currentPage <= 3) {
+      pages.push(1, 2, 3, 4, '...', totalPages);
+    } else if (currentPage >= totalPages - 2) {
+      pages.push(1, '...', totalPages - 3, totalPages - 2, totalPages - 1, totalPages);
+    } else {
+      pages.push(1, '...', currentPage - 1, currentPage, currentPage + 1, '...', totalPages);
+    }
+  }
+  return pages;
 }
 
 export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
@@ -23,6 +41,13 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const { toast } = useToast();
 
+  const [currentPage, setCurrentPage] = useState(1);
+  const ITEMS_PER_PAGE = 10;
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [clientFilter, statusFilter]);
+
   const uniqueClientIds = Array.from(new Set(invoices.map((i) => i.client_id)));
 
   const filteredInvoices = invoices.filter((inv) => {
@@ -30,6 +55,13 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
     const matchStatus = statusFilter === 'all' || inv.status === statusFilter;
     return matchClient && matchStatus;
   });
+
+  const totalItems = filteredInvoices.length;
+  const totalPages = Math.ceil(totalItems / ITEMS_PER_PAGE);
+  const safeCurrentPage = Math.min(currentPage, Math.max(1, totalPages));
+  const startIndex = (safeCurrentPage - 1) * ITEMS_PER_PAGE;
+  const endIndex = startIndex + ITEMS_PER_PAGE;
+  const paginatedInvoices = filteredInvoices.slice(startIndex, endIndex);
 
   const approved = filteredInvoices.filter((i) => i.status === 'approved');
 
@@ -204,7 +236,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
                 </td>
               </tr>
             ) : (
-              filteredInvoices.map((inv) => {
+              paginatedInvoices.map((inv) => {
               const data = inv.validated_data ?? inv.extracted_data;
               const isSelectable = inv.status === 'approved';
               return (
@@ -236,7 +268,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
                     </div>
                   </td>
                   <td className="p-4 text-slate-500 tabular-nums">
-                    {inv.created_at ? format(new Date(inv.created_at), 'dd/MM/yyyy') : <span className="text-slate-400">—</span>}
+                    {inv.created_at ? format(new Date(inv.created_at), 'dd/MM/yyyy HH:mm') : <span className="text-slate-400">—</span>}
                   </td>
                   <td className="p-4 text-slate-700">{data?.supplier_name ?? <span className="text-slate-400">—</span>}</td>
                   <td className="p-4 text-slate-500 tabular-nums">
@@ -270,6 +302,89 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
             }))}
           </tbody>
         </table>
+        {/* Pagination controls */}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between border-t border-slate-200 bg-white px-4 py-3 sm:px-6" style={{ direction: 'rtl' }}>
+            {/* Mobile layout */}
+            <div className="flex flex-1 justify-between sm:hidden">
+              <button
+                onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
+                disabled={safeCurrentPage === 1}
+                className="relative inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                הקודם
+              </button>
+              <button
+                onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
+                disabled={safeCurrentPage === totalPages}
+                className="relative ml-3 inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                הבא
+              </button>
+            </div>
+
+            {/* Desktop layout */}
+            <div className="hidden sm:flex sm:flex-1 sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm text-slate-700 gap-1 flex items-center">
+                  מציג
+                  <span className="font-semibold">{startIndex + 1}</span>
+                  עד
+                  <span className="font-semibold">{Math.min(endIndex, totalItems)}</span>
+                  מתוך
+                  <span className="font-semibold">{totalItems}</span>
+                  תוצאות
+                </p>
+              </div>
+              <div>
+                <nav className="isolate inline-flex -space-x-px rounded-md shadow-sm gap-1" aria-label="Pagination">
+                  <button
+                    onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
+                    disabled={safeCurrentPage === 1}
+                    className="relative inline-flex items-center rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:bg-slate-50 focus:z-20 focus:outline-offset-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <span className="sr-only">הקודם</span>
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
+                  {/* Page numbers */}
+                  {getPageNumbers(safeCurrentPage, totalPages).map((page, index) => {
+                    if (page === '...') {
+                      return (
+                        <span
+                          key={`ellipsis-${index}`}
+                          className="relative inline-flex items-center px-3 py-2 text-sm font-semibold text-slate-500 focus:outline-offset-0"
+                        >
+                          ...
+                        </span>
+                      );
+                    }
+                    return (
+                      <button
+                        key={page}
+                        onClick={() => setCurrentPage(page as number)}
+                        className={`relative inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold transition-all ${
+                          safeCurrentPage === page
+                            ? 'bg-blue-600 text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600'
+                            : 'text-slate-900 border border-slate-200 bg-white hover:bg-slate-50 focus:outline-offset-0'
+                        }`}
+                      >
+                        {page}
+                      </button>
+                    );
+                  })}
+                  <button
+                    onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
+                    disabled={safeCurrentPage === totalPages}
+                    className="relative inline-flex items-center rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:bg-slate-50 focus:z-20 focus:outline-offset-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <span className="sr-only">הבא</span>
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                </nav>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
