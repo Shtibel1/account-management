@@ -4,7 +4,8 @@ import { useEffect, useState, useRef } from 'react';
 import { createClient } from '@/utils/supabase/client';
 import { AccountMapping, Client, MappingType } from '@/shared/types';
 import { Button } from '@/components/ui/Button';
-import { Plus, Trash2, Info, Upload, Loader2, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Plus, Trash2, Info, Upload, Loader2, X, ChevronLeft, ChevronRight, Users, Tag } from 'lucide-react';
+import clsx from 'clsx';
 
 function getPageNumbers(currentPage: number, totalPages: number) {
   const pages: (number | string)[] = [];
@@ -35,6 +36,12 @@ export default function MappingsPage() {
   const [type, setType] = useState<MappingType>('supplier');
   const [key, setKey] = useState('');
   const [code, setCode] = useState('');
+  const [activeTab, setActiveTab] = useState<'supplier' | 'category'>('supplier');
+
+  // Sync type with active tab
+  useEffect(() => {
+    setType(activeTab);
+  }, [activeTab]);
   
   // Extra fields for suppliers
   const [supplierNumber, setSupplierNumber] = useState('');
@@ -416,214 +423,247 @@ export default function MappingsPage() {
         </div>
       )}
 
-      {/* Tables layout: stacked vertically */}
-      <div className="space-y-6">
-        {/* Suppliers Table */}
-        <div className="card overflow-hidden">
-          <div className="px-4 py-3.5 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3" style={{ direction: 'rtl' }}>
-            <div>
-              <p className="font-semibold text-slate-900">ספקים</p>
-              <p className="text-xs text-slate-500 mt-0.5">פרטי ספקים ומיפוי כרטיסים</p>
-            </div>
-            
-            {/* Search Input */}
-            <div className="relative w-full sm:w-64">
-              <input
-                type="text"
-                placeholder="חיפוש ספק, ח.פ., קוד..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full text-sm border border-slate-200 rounded-lg bg-white pl-8 pr-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-right font-medium"
-              />
-              {searchQuery && (
-                <button
-                  onClick={() => setSearchQuery('')}
-                  className="absolute inset-y-0 left-2.5 flex items-center text-slate-400 hover:text-slate-600"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              )}
-            </div>
-          </div>
-          <table className="w-full text-sm text-right">
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-100">
-                <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">שם ספק</th>
-                <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">מספר ספק</th>
-                <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">מספר תיק מע"מ (ח.פ.)</th>
-                <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">מספר כרטיס (קוד)</th>
-                <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">שם הוצאה ברירת מחדל</th>
-                <th className="px-4 py-2.5 w-10"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {paginatedSuppliers.map((m) => (
-                <tr key={m.id} className="hover:bg-slate-50/60 transition-colors group">
-                  <td className="px-4 py-3 text-slate-900 font-medium">{m.key}</td>
-                  <td className="px-4 py-3 text-slate-600 font-mono">{m.supplier_number || '-'}</td>
-                  <td className="px-4 py-3 text-slate-600 font-mono">{m.vat_id || '-'}</td>
-                  <td className="px-4 py-3">
-                    <code className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded text-xs font-mono">{m.account_code}</code>
-                  </td>
-                  <td className="px-4 py-3 text-slate-600">
-                    {m.expense_category ? (
-                      <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-xs">
-                        {m.expense_category}
-                      </span>
-                    ) : '-'}
-                  </td>
-                  <td className="px-4 py-3 text-center">
-                    <button
-                      onClick={() => handleDelete(m.id)}
-                      className="text-slate-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {paginatedSuppliers.length === 0 && (
-                <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-slate-400">
-                    {searchQuery ? 'לא נמצאו ספקים העונים לחיפוש' : 'אין מיפוי ספקים מוגדר'}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-
-          {/* Pagination controls */}
-          {totalPages > 1 && (
-            <div className="flex items-center justify-between border-t border-slate-200 bg-white px-4 py-3 sm:px-6" style={{ direction: 'rtl' }}>
-              {/* Mobile layout */}
-              <div className="flex flex-1 justify-between sm:hidden">
-                <button
-                  onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
-                  disabled={safeCurrentPage === 1}
-                  className="relative inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  הקודם
-                </button>
-                <button
-                  onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
-                  disabled={safeCurrentPage === totalPages}
-                  className="relative ml-3 inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  הבא
-                </button>
-              </div>
-
-              {/* Desktop layout */}
-              <div className="hidden sm:flex sm:flex-1 sm:items-center sm:justify-between">
-                <div>
-                  <p className="text-sm text-slate-700 gap-1 flex items-center">
-                    מציג
-                    <span className="font-semibold">{startIndex + 1}</span>
-                    עד
-                    <span className="font-semibold">{Math.min(endIndex, totalItems)}</span>
-                    מתוך
-                    <span className="font-semibold">{totalItems}</span>
-                    תוצאות
-                  </p>
-                </div>
-                <div>
-                  <nav className="isolate inline-flex -space-x-px rounded-md shadow-sm gap-1" aria-label="Pagination">
-                    <button
-                      onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
-                      disabled={safeCurrentPage === 1}
-                      className="relative inline-flex items-center rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:bg-slate-50 focus:z-20 focus:outline-offset-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                    >
-                      <span className="sr-only">הקודם</span>
-                      <ChevronRight className="h-4 w-4" />
-                    </button>
-                    {/* Page numbers */}
-                    {getPageNumbers(safeCurrentPage, totalPages).map((page, index) => {
-                      if (page === '...') {
-                        return (
-                          <span
-                            key={`ellipsis-${index}`}
-                            className="relative inline-flex items-center px-3 py-2 text-sm font-semibold text-slate-500 focus:outline-offset-0"
-                          >
-                            ...
-                          </span>
-                        );
-                      }
-                      return (
-                        <button
-                          key={page}
-                          onClick={() => setCurrentPage(page as number)}
-                          className={`relative inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold transition-all ${
-                            safeCurrentPage === page
-                              ? 'bg-blue-600 text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600'
-                              : 'text-slate-900 border border-slate-200 bg-white hover:bg-slate-50 focus:outline-offset-0'
-                          }`}
-                        >
-                          {page}
-                        </button>
-                      );
-                    })}
-                    <button
-                      onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
-                      disabled={safeCurrentPage === totalPages}
-                      className="relative inline-flex items-center rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:bg-slate-50 focus:z-20 focus:outline-offset-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                    >
-                      <span className="sr-only">הבא</span>
-                      <ChevronLeft className="h-4 w-4" />
-                    </button>
-                  </nav>
-                </div>
-              </div>
-            </div>
+      {/* Tabs Selection */}
+      <div className="flex border-b border-slate-200" style={{ direction: 'rtl' }}>
+        <button
+          onClick={() => setActiveTab('supplier')}
+          className={clsx(
+            'flex items-center gap-2 px-6 py-3 border-b-2 font-medium text-sm transition-all focus:outline-none',
+            activeTab === 'supplier'
+              ? 'border-blue-600 text-blue-600 font-semibold'
+              : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
           )}
-        </div>
-
-        {/* Expense Categories Table */}
-        <div className="card overflow-hidden">
-          <div className="px-4 py-3.5 border-b border-slate-100 bg-slate-50/50">
-            <p className="font-semibold text-slate-900">קטגוריות הוצאה</p>
-            <p className="text-xs text-slate-500 mt-0.5">שם קטגוריה 🡨 קוד סעיף הוצאה</p>
-          </div>
-          <table className="w-full text-sm text-right">
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-100">
-                <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">שם קטגוריה</th>
-                <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">קוד חשבון</th>
-                <th className="px-4 py-2.5 w-10"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {categoryMappings.map((m) => (
-                <tr key={m.id} className="hover:bg-slate-50/60 transition-colors group">
-                  <td className="px-4 py-3 text-slate-700">{m.key}</td>
-                  <td className="px-4 py-3">
-                    <code className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded text-xs font-mono">{m.account_code || 'לא הוגדר'}</code>
-                  </td>
-                  <td className="px-4 py-3">
-                    <button
-                      onClick={() => handleDelete(m.id)}
-                      className="text-slate-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {categoryMappings.length === 0 && (
-                <tr>
-                  <td colSpan={3} className="px-4 py-8 text-center text-slate-400 text-sm">
-                    <div className="space-y-2">
-                      <p>אין מיפויים עדיין</p>
-                      {selectedClient && (
-                        <SeedCategoriesButton clientId={selectedClient} onDone={() => loadMappings(selectedClient)} />
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+        >
+          <Users className="h-4 w-4" />
+          <span>ספקים ({supplierMappings.length})</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('category')}
+          className={clsx(
+            'flex items-center gap-2 px-6 py-3 border-b-2 font-medium text-sm transition-all focus:outline-none',
+            activeTab === 'category'
+              ? 'border-blue-600 text-blue-600 font-semibold'
+              : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+          )}
+        >
+          <Tag className="h-4 w-4" />
+          <span>קטגוריות הוצאה ({categoryMappings.length})</span>
+        </button>
       </div>
+
+      {/* Tables layout */}
+      <div className="space-y-6">
+        {activeTab === 'supplier' && (
+          /* Suppliers Table */
+          <div className="card overflow-hidden">
+            <div className="px-4 py-3.5 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3" style={{ direction: 'rtl' }}>
+              <div>
+                <p className="font-semibold text-slate-900">ספקים</p>
+                <p className="text-xs text-slate-500 mt-0.5">פרטי ספקים ומיפוי כרטיסים</p>
+              </div>
+              
+              {/* Search Input */}
+              <div className="relative w-full sm:w-64">
+                <input
+                  type="text"
+                  placeholder="חיפוש ספק, ח.פ., קוד..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full text-sm border border-slate-200 rounded-lg bg-white pl-8 pr-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-right font-medium"
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery('')}
+                    className="absolute inset-y-0 left-2.5 flex items-center text-slate-400 hover:text-slate-600"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+            <table className="w-full text-sm text-right">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-100">
+                  <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">שם ספק</th>
+                  <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">מספר ספק</th>
+                  <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">מספר תיק מע"מ (ח.פ.)</th>
+                  <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">מספר כרטיס (קוד)</th>
+                  <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">שם הוצאה ברירת מחדל</th>
+                  <th className="px-4 py-2.5 w-10"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {paginatedSuppliers.map((m) => (
+                  <tr key={m.id} className="hover:bg-slate-50/60 transition-colors group">
+                    <td className="px-4 py-3 text-slate-900 font-medium">{m.key}</td>
+                    <td className="px-4 py-3 text-slate-600 font-mono">{m.supplier_number || '-'}</td>
+                    <td className="px-4 py-3 text-slate-600 font-mono">{m.vat_id || '-'}</td>
+                    <td className="px-4 py-3">
+                      <code className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded text-xs font-mono">{m.account_code}</code>
+                    </td>
+                    <td className="px-4 py-3 text-slate-600">
+                      {m.expense_category ? (
+                        <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-xs">
+                          {m.expense_category}
+                        </span>
+                      ) : '-'}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <button
+                        onClick={() => handleDelete(m.id)}
+                        className="text-slate-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {paginatedSuppliers.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-12 text-center text-slate-400">
+                      {searchQuery ? 'לא נמצאו ספקים העונים לחיפוש' : 'אין מיפוי ספקים מוגדר'}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+
+            {/* Pagination controls */}
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between border-t border-slate-200 bg-white px-4 py-3 sm:px-6" style={{ direction: 'rtl' }}>
+                {/* Mobile layout */}
+                <div className="flex flex-1 justify-between sm:hidden">
+                  <button
+                    onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
+                    disabled={safeCurrentPage === 1}
+                    className="relative inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    הקודם
+                  </button>
+                  <button
+                    onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
+                    disabled={safeCurrentPage === totalPages}
+                    className="relative ml-3 inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    הבא
+                  </button>
+                </div>
+
+                {/* Desktop layout */}
+                <div className="hidden sm:flex sm:flex-1 sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm text-slate-700 gap-1 flex items-center">
+                      מציג
+                      <span className="font-semibold">{startIndex + 1}</span>
+                      עד
+                      <span className="font-semibold">{Math.min(endIndex, totalItems)}</span>
+                      מתוך
+                      <span className="font-semibold">{totalItems}</span>
+                      תוצאות
+                    </p>
+                  </div>
+                  <div>
+                    <nav className="isolate inline-flex -space-x-px rounded-md shadow-sm gap-1" aria-label="Pagination">
+                      <button
+                        onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
+                        disabled={safeCurrentPage === 1}
+                        className="relative inline-flex items-center rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:bg-slate-50 focus:z-20 focus:outline-offset-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      >
+                        <span className="sr-only">הקודם</span>
+                        <ChevronRight className="h-4 w-4" />
+                      </button>
+                      {/* Page numbers */}
+                      {getPageNumbers(safeCurrentPage, totalPages).map((page, index) => {
+                        if (page === '...') {
+                          return (
+                            <span
+                              key={`ellipsis-${index}`}
+                              className="relative inline-flex items-center px-3 py-2 text-sm font-semibold text-slate-500 focus:outline-offset-0"
+                            >
+                              ...
+                            </span>
+                          );
+                        }
+                        return (
+                          <button
+                            key={page}
+                            onClick={() => setCurrentPage(page as number)}
+                            className={`relative inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold transition-all ${
+                              safeCurrentPage === page
+                                ? 'bg-blue-600 text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600'
+                                : 'text-slate-900 border border-slate-200 bg-white hover:bg-slate-50 focus:outline-offset-0'
+                            }`}
+                          >
+                            {page}
+                          </button>
+                        );
+                      })}
+                      <button
+                        onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
+                        disabled={safeCurrentPage === totalPages}
+                        className="relative inline-flex items-center rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:bg-slate-50 focus:z-20 focus:outline-offset-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      >
+                        <span className="sr-only">הבא</span>
+                        <ChevronLeft className="h-4 w-4" />
+                      </button>
+                    </nav>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'category' && (
+          /* Expense Categories Table */
+          <div className="card overflow-hidden">
+            <div className="px-4 py-3.5 border-b border-slate-100 bg-slate-50/50">
+              <p className="font-semibold text-slate-900">קטגוריות הוצאה</p>
+              <p className="text-xs text-slate-500 mt-0.5">שם קטגוריה 🡨 קוד סעיף הוצאה</p>
+            </div>
+            <table className="w-full text-sm text-right">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-100">
+                  <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">שם קטגוריה</th>
+                  <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">קוד חשבון</th>
+                  <th className="px-4 py-2.5 w-10"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {categoryMappings.map((m) => (
+                  <tr key={m.id} className="hover:bg-slate-50/60 transition-colors group">
+                    <td className="px-4 py-3 text-slate-700">{m.key}</td>
+                    <td className="px-4 py-3">
+                      <code className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded text-xs font-mono">{m.account_code || 'לא הוגדר'}</code>
+                    </td>
+                    <td className="px-4 py-3">
+                      <button
+                        onClick={() => handleDelete(m.id)}
+                        className="text-slate-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {categoryMappings.length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="px-4 py-8 text-center text-slate-400 text-sm">
+                      <div className="space-y-2">
+                        <p>אין מיפויים עדיין</p>
+                        {selectedClient && (
+                          <SeedCategoriesButton clientId={selectedClient} onDone={() => loadMappings(selectedClient)} />
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
     </div>
   );
 }
