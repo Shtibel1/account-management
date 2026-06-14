@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { BboxMap, FieldBbox } from '@/shared/types';
 import { Document, Page, pdfjs } from 'react-pdf';
+import { RotateCw } from 'lucide-react';
 
 // Import react-pdf styles for correct page layouts
 import 'react-pdf/dist/Page/AnnotationLayer.css';
@@ -34,6 +35,7 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
   const containerRef = useRef<HTMLDivElement>(null);
   const [numPages, setNumPages] = useState<number | null>(null);
   const [pageSizes, setPageSizes] = useState<Record<number, { w: number; h: number }>>({});
+  const [rotation, setRotation] = useState(0); // 0, 90, 180, 270
 
   const isPdf = fileUrl.toLowerCase().includes('.pdf') || fileUrl.includes('content-type=application%2Fpdf');
 
@@ -189,6 +191,8 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
     );
   };
 
+  const isRotated90 = rotation === 90 || rotation === 270;
+
   return (
     <div
       ref={containerRef}
@@ -196,6 +200,18 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
       className="relative w-full h-full overflow-auto bg-gray-100 flex flex-col items-center p-4 gap-4"
       style={{ direction: 'ltr' }}
     >
+      {/* Floating Toolbar */}
+      <div className="sticky top-2 self-end z-10 mr-2 -mb-10 pointer-events-none">
+        <button
+          onClick={() => setRotation((r) => (r + 90) % 360)}
+          className="pointer-events-auto flex items-center gap-1.5 px-3 py-2 bg-white/95 hover:bg-white text-slate-700 text-xs font-semibold rounded-xl border border-slate-200 shadow-md hover:shadow-lg transition-all backdrop-blur-sm select-none"
+          title="סובב מסמך 90 מעלות"
+        >
+          <RotateCw className="h-3.5 w-3.5" />
+          סובב מסמך
+        </button>
+      </div>
+
       {isPdf ? (
         <Document
           file={fileUrl}
@@ -207,12 +223,27 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
           {Array.from(new Array(numPages ?? 0), (el, index) => {
             const pageNum = index + 1;
             const pageSize = pageSizes[pageNum] || { w: 0, h: 0 };
+            
+            // Layout margin adjustments to swap aspect ratios smoothly inside scroll bounds
+            const pageStyle: React.CSSProperties = {
+              direction: 'ltr',
+              transform: `rotate(${rotation}deg)`,
+              transformOrigin: 'center center',
+              transition: 'transform 0.2s ease-in-out',
+              ...(isRotated90 && pageSize.w > 0 && pageSize.h > 0 ? {
+                marginTop: `${(pageSize.w - pageSize.h) / 2}px`,
+                marginBottom: `${(pageSize.w - pageSize.h) / 2}px`,
+                marginLeft: `${(pageSize.h - pageSize.w) / 2}px`,
+                marginRight: `${(pageSize.h - pageSize.w) / 2}px`,
+              } : {})
+            };
+
             return (
               <div
                 key={pageNum}
                 className="relative bg-white shadow-md border border-slate-200 rounded max-w-full"
                 dir="ltr"
-                style={{ direction: 'ltr' }}
+                style={pageStyle}
               >
                 <Page
                   pageNumber={pageNum}
@@ -226,17 +257,39 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
           })}
         </Document>
       ) : (
-        <div className="relative inline-block bg-white shadow-md border border-slate-200 rounded max-w-full" dir="ltr" style={{ direction: 'ltr' }}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={fileUrl}
-            alt="חשבונית מקורית"
-            className="block max-w-full h-auto rounded select-none"
-            draggable={false}
-            onLoad={updateSizes}
-          />
-          {renderOverlayForPage(1, pageSizes[1] || { w: 0, h: 0 })}
-        </div>
+        (() => {
+          const imgPageSize = pageSizes[1] || { w: 0, h: 0 };
+          const imgStyle: React.CSSProperties = {
+            direction: 'ltr',
+            transform: `rotate(${rotation}deg)`,
+            transformOrigin: 'center center',
+            transition: 'transform 0.2s ease-in-out',
+            ...(isRotated90 && imgPageSize.w > 0 && imgPageSize.h > 0 ? {
+              marginTop: `${(imgPageSize.w - imgPageSize.h) / 2}px`,
+              marginBottom: `${(imgPageSize.w - imgPageSize.h) / 2}px`,
+              marginLeft: `${(imgPageSize.h - imgPageSize.w) / 2}px`,
+              marginRight: `${(imgPageSize.h - imgPageSize.w) / 2}px`,
+            } : {})
+          };
+
+          return (
+            <div
+              className="relative inline-block bg-white shadow-md border border-slate-200 rounded max-w-full"
+              dir="ltr"
+              style={imgStyle}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={fileUrl}
+                alt="חשבונית מקורית"
+                className="block max-w-full h-auto rounded select-none"
+                draggable={false}
+                onLoad={updateSizes}
+              />
+              {renderOverlayForPage(1, imgPageSize)}
+            </div>
+          );
+        })()
       )}
     </div>
   );

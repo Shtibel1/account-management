@@ -25,14 +25,14 @@ function findExactBbox(value: string | number | null, ocrWords: OcrWord[]): Fiel
   );
 
   if (singleMatches.length > 0) {
-    const xs = singleMatches.flatMap((m) => [m.bbox.x1, m.bbox.x2]);
-    const ys = singleMatches.flatMap((m) => [m.bbox.y1, m.bbox.y2]);
+    // Return only the first match to avoid merging multiple separate occurrences of a single word into a giant box
+    const firstMatch = singleMatches[0];
     return {
-      x1: Math.min(...xs),
-      y1: Math.min(...ys),
-      x2: Math.max(...xs),
-      y2: Math.max(...ys),
-      page: singleMatches[0].page,
+      x1: firstMatch.bbox.x1,
+      y1: firstMatch.bbox.y1,
+      x2: firstMatch.bbox.x2,
+      y2: firstMatch.bbox.y2,
+      page: firstMatch.page,
     };
   }
 
