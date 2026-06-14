@@ -64,7 +64,10 @@ function checkMath(data: ExtractedData): boolean {
 
 function checkVatId(vatId: string | null): boolean {
   if (!vatId) return true;
-  const digits = vatId.replace(/\D/g, '');
+  let digits = vatId.replace(/\D/g, '');
+  if (digits.length === 8) {
+    digits = '0' + digits;
+  }
   if (digits.length !== 9) return false;
 
   // Israeli Luhn checksum algorithm
@@ -92,8 +95,16 @@ export async function validateInvoice(
   const { data: corrected, warnings: edgeWarnings } = runEdgeCaseHandlers(data);
   const warnings = [...edgeWarnings];
 
+  // Apply leading-zero padding to any extracted VAT ID if it has 8 digits
+  if (corrected.supplier_vat_id) {
+    let clean = corrected.supplier_vat_id.replace(/\D/g, '');
+    if (clean.length === 8) {
+      corrected.supplier_vat_id = '0' + clean;
+    }
+  }
+
   // 1.5 Fetch mapping if supplier name is known to override/fill the VAT ID
-  const invoiceVatId = data.supplier_vat_id || null;
+  const invoiceVatId = corrected.supplier_vat_id || null;
   let supplierTableVatId: string | null = null;
   let webSearchVatId: string | null = null;
 
@@ -109,7 +120,14 @@ export async function validateInvoice(
         .maybeSingle();
 
       if (!mappingErr && mapping && mapping.vat_id) {
-        supplierTableVatId = mapping.vat_id;
+        const rawVat = mapping.vat_id;
+        // Pad the mapping vat_id if it's 8 digits
+        let cleanTableVat = rawVat.replace(/\D/g, '');
+        if (cleanTableVat.length === 8) {
+          supplierTableVatId = '0' + cleanTableVat;
+        } else {
+          supplierTableVatId = rawVat;
+        }
       }
     } catch (err) {
       console.error('Failed to query account_mappings for supplier VAT ID fallback:', err);
@@ -117,7 +135,16 @@ export async function validateInvoice(
 
     // 1.5.2 Web Search Lookup
     try {
-      webSearchVatId = await searchVatIdByName(corrected.supplier_name);
+      const searchResult = await searchVatIdByName(corrected.supplier_name);
+      if (searchResult) {
+        // Pad the web search vat_id if it's 8 digits
+        let cleanWeb = searchResult.replace(/\D/g, '');
+        if (cleanWeb.length === 8) {
+          webSearchVatId = '0' + cleanWeb;
+        } else {
+          webSearchVatId = searchResult;
+        }
+      }
     } catch (err) {
       console.error('Failed to search web for supplier VAT ID:', err);
     }

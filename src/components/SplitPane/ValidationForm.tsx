@@ -194,13 +194,36 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
     data.amount_before_vat != null && data.vat_amount != null && data.total_amount != null &&
     Math.abs((data.amount_before_vat + data.vat_amount) - data.total_amount) > 1;
 
+  const checkVatId = (vatId: string | null): boolean => {
+    if (!vatId) return true;
+    let digits = vatId.replace(/\D/g, '');
+    if (digits.length === 8) {
+      digits = '0' + digits;
+    }
+    if (digits.length !== 9) return false;
+
+    // Israeli Luhn checksum algorithm
+    let sum = 0;
+    for (let i = 0; i < 9; i++) {
+      let d = parseInt(digits[i]);
+      if (i % 2 === 1) {
+        d *= 2;
+        if (d > 9) d -= 9;
+      }
+      sum += d;
+    }
+    return sum % 10 === 0;
+  };
+
+  const isVatIdOk = checkVatId(data.supplier_vat_id ?? null);
+
   const hasInvoiceTabError =
     fieldError('supplier_name') ||
     fieldError('invoice_number') ||
     fieldError('invoice_date') ||
     fieldError('expense_category') ||
     fieldError('supplier_vat_id') ||
-    !(flags?.vat_id_ok ?? true) ||
+    !isVatIdOk ||
     (supplierStatus === 'unknown' && !supplierCode.trim()) ||
     mathError ||
     !mathOk ||
@@ -233,7 +256,33 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
           account_code: categoryCode.trim(),
         });
       }
-      await approveInvoice(invoice.id, data);
+
+      // Ensure the validated data has the correct, dynamic validation_flags before saving
+      const updatedData = { ...data };
+      if (updatedData.validation_flags) {
+        const vatIdOk = checkVatId(updatedData.supplier_vat_id ?? null);
+        const mathOk = !mathError;
+        
+        let ruleViolations = [...(updatedData.validation_flags.rule_violations || [])];
+        if (vatIdOk) {
+          ruleViolations = ruleViolations.filter(
+            (v) => !v.includes('checksum') && !v.includes('תקין')
+          );
+        } else {
+          if (!ruleViolations.some(v => v.includes('checksum'))) {
+            ruleViolations.push('ח.פ. / עוסק מורשה אינו תקין לפי בדיקת checksum');
+          }
+        }
+
+        updatedData.validation_flags = {
+          ...updatedData.validation_flags,
+          vat_id_ok: vatIdOk,
+          math_ok: mathOk,
+          rule_violations: ruleViolations,
+        };
+      }
+
+      await approveInvoice(invoice.id, updatedData);
       toast('החשבונית אושרה בהצלחה', 'success');
       onApproved();
     } catch (e: any) {
@@ -437,16 +486,16 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
               </div>
             )}
 
-            <Field label="ח.פ. / עוסק מורשה" error={fieldError('supplier_vat_id') || !(flags?.vat_id_ok ?? true)} fieldKey="supplier_vat_id" onFieldFocus={onFieldFocus}>
+            <Field label="ח.פ. / עוסק מורשה" error={fieldError('supplier_vat_id') || !isVatIdOk} fieldKey="supplier_vat_id" onFieldFocus={onFieldFocus}>
               <input
-                className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', (fieldError('supplier_vat_id') || !(flags?.vat_id_ok ?? true)) && 'input-error')}
+                className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', (fieldError('supplier_vat_id') || !isVatIdOk) && 'input-error')}
                 value={data.supplier_vat_id ?? ''}
                 onChange={(e) => set('supplier_vat_id', e.target.value)}
                 onFocus={() => onFieldFocus?.('supplier_vat_id')}
                 onBlur={() => onFieldFocus?.(null)}
                 disabled={isReadOnly}
               />
-              {!(flags?.vat_id_ok ?? true) && (
+              {!isVatIdOk && (
                 <p className="text-xs text-red-600 mt-1">מספר עוסק לא תקין (חייב להיות 9 ספרות)</p>
               )}
 
