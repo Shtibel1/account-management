@@ -154,13 +154,8 @@ export async function validateInvoice(
     }
   }
 
-  // 5. Compute manual review trigger
-  const requiresManualReview =
-    !mathOk ||
-    !vatIdOk ||
-    missingFields.length > 0 ||
-    duplicateFound ||
-    ruleViolations.length > 0;
+  // 5. Compute manual review trigger (Forced to true so all invoices always go to manual review first)
+  const requiresManualReview = true;
 
   const validationResult: ValidationResult = {
     math_ok: mathOk,
