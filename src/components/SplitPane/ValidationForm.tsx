@@ -23,7 +23,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const initial = invoice.validated_data ?? invoice.extracted_data;
   const [data, setData] = useState<Partial<ExtractedData>>(initial ?? {});
   const [saving, setSaving] = useState(false);
-  const [activeFormTab, setActiveFormTab] = useState<'invoice' | 'amounts' | 'bank'>('invoice');
+  const [activeFormTab, setActiveFormTab] = useState<'invoice' | 'bank'>('invoice');
   const [rejecting, setRejecting] = useState(false);
   const [error, setError] = useState('');
   const [categories, setCategories] = useState<string[]>([]);
@@ -154,9 +154,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
     fieldError('expense_category') ||
     fieldError('supplier_vat_id') ||
     !(flags?.vat_id_ok ?? true) ||
-    (supplierStatus === 'unknown' && !supplierCode.trim());
-
-  const hasAmountsTabError =
+    (supplierStatus === 'unknown' && !supplierCode.trim()) ||
     mathError ||
     !mathOk ||
     fieldError('amount_before_vat') ||
@@ -273,25 +271,8 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
           )}
         >
           <FileText className="h-3.5 w-3.5" />
-          <span>פרטי חשבונית</span>
+          <span>חשבונית וסכומים</span>
           {hasInvoiceTabError && (
-            <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-          )}
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveFormTab('amounts')}
-          className={clsx(
-            'flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border transition-all duration-200 focus:outline-none',
-            activeFormTab === 'amounts'
-              ? 'bg-blue-600 border-blue-600 text-white shadow-sm'
-              : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50 hover:text-slate-800'
-          )}
-        >
-          <Calculator className="h-3.5 w-3.5" />
-          <span>סכומים</span>
-          {hasAmountsTabError && (
             <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
           )}
         </button>
@@ -325,7 +306,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                       <CheckCircle2 className="h-3 w-3" /> ספק מוכר
                     </span>
                   : supplierStatus === 'unknown'
-                  ? <span className="flex items-center gap-1 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full font-medium">
+                  ? <span className="flex items-center gap-1 text-xs text-amber-700 bg-amber-50 border border-emerald-200 px-2 py-0.5 rounded-full font-medium">
                       <AlertTriangle className="h-3 w-3" /> ספק חדש
                     </span>
                   : null
@@ -494,6 +475,19 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
               </Field>
             </div>
 
+            <div className="grid grid-cols-3 gap-3">
+              <Field label="לפני מע״מ" error={mathError} fieldKey="amount_before_vat" onFieldFocus={onFieldFocus}>
+                <input type="number" step="0.01" className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', mathError && 'input-error')} value={data.amount_before_vat ?? ''} onChange={(e) => set('amount_before_vat', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('amount_before_vat')} onBlur={() => onFieldFocus?.(null)} disabled={isReadOnly} />
+              </Field>
+              <Field label='מע"מ' error={mathError} fieldKey="vat_amount" onFieldFocus={onFieldFocus}>
+                <input type="number" step="0.01" className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', mathError && 'input-error')} value={data.vat_amount ?? ''} onChange={(e) => set('vat_amount', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('vat_amount')} onBlur={() => onFieldFocus?.(null)} disabled={isReadOnly} />
+              </Field>
+              <Field label="סה״כ לתשלום" error={mathError} fieldKey="total_amount" onFieldFocus={onFieldFocus}>
+                <input type="number" step="0.01" className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', mathError && 'input-error')} value={data.total_amount ?? ''} onChange={(e) => set('total_amount', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('total_amount')} onBlur={() => onFieldFocus?.(null)} disabled={isReadOnly} />
+              </Field>
+            </div>
+            {mathError && <p className="text-xs text-red-600">שגיאה: לפני מע"מ + מע"מ ≠ סה"כ</p>}
+
             <Field label="קטגוריית הוצאה" error={fieldError('expense_category')} fieldKey="expense_category" onFieldFocus={onFieldFocus}>
               <select
                 className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', fieldError('expense_category') && 'input-error')}
@@ -520,23 +514,6 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                 />
               </div>
             )}
-          </div>
-        )}
-
-        {activeFormTab === 'amounts' && (
-          <div className="space-y-4 animate-in fade-in duration-200">
-            <div className="grid grid-cols-3 gap-3">
-              <Field label="לפני מע״מ" error={mathError} fieldKey="amount_before_vat" onFieldFocus={onFieldFocus}>
-                <input type="number" step="0.01" className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', mathError && 'input-error')} value={data.amount_before_vat ?? ''} onChange={(e) => set('amount_before_vat', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('amount_before_vat')} onBlur={() => onFieldFocus?.(null)} disabled={isReadOnly} />
-              </Field>
-              <Field label='מע"מ' error={mathError} fieldKey="vat_amount" onFieldFocus={onFieldFocus}>
-                <input type="number" step="0.01" className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', mathError && 'input-error')} value={data.vat_amount ?? ''} onChange={(e) => set('vat_amount', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('vat_amount')} onBlur={() => onFieldFocus?.(null)} disabled={isReadOnly} />
-              </Field>
-              <Field label="סה״כ לתשלום" error={mathError} fieldKey="total_amount" onFieldFocus={onFieldFocus}>
-                <input type="number" step="0.01" className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', mathError && 'input-error')} value={data.total_amount ?? ''} onChange={(e) => set('total_amount', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('total_amount')} onBlur={() => onFieldFocus?.(null)} disabled={isReadOnly} />
-              </Field>
-            </div>
-            {mathError && <p className="text-xs text-red-600">שגיאה: לפני מע"מ + מע"מ ≠ סה"כ</p>}
           </div>
         )}
 
