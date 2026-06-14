@@ -49,6 +49,7 @@ export interface ValidationResult {
   rule_violations: string[];
   warnings: string[];
   requires_manual_review: boolean;
+  not_an_invoice?: boolean;
 }
 
 export interface Client {

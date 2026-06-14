@@ -41,7 +41,7 @@ export function InvoiceTable({ invoices, onExported }: Props) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `יומן_${format(new Date(), 'yyyyMMdd_HHmm')}.txt`;
+      a.download = 'movein.dat';
       a.click();
       URL.revokeObjectURL(url);
       setSelected(new Set());

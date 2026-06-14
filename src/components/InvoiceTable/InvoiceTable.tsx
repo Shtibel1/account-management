@@ -52,7 +52,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `יומן_${format(new Date(), 'yyyyMMdd_HHmm')}.txt`;
+      a.download = 'movein.dat';
       a.click();
       URL.revokeObjectURL(url);
       setSelected(new Set());
@@ -256,7 +256,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
                   </td>
                   <td className="p-4"><StatusBadge status={inv.status} /></td>
                   <td className="p-4">
-                    {(inv.status === 'review' || inv.status === 'approved') && (
+                    {(inv.status !== 'processing') && (
                       <Link
                         href={`/review/${inv.id}`}
                         className="flex items-center gap-1 text-blue-600 hover:text-blue-700 opacity-0 group-hover:opacity-100 transition-opacity text-xs font-medium"

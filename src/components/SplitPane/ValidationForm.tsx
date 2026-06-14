@@ -140,7 +140,8 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
 
   const isApproved = invoice.status === 'approved';
   const isRejected = invoice.status === 'rejected';
-  const isReadOnly = isApproved || isRejected || invoice.status === 'exported';
+  const isError = invoice.status === 'error';
+  const isReadOnly = isApproved || isRejected || isError || invoice.status === 'exported';
 
   const isApproveDisabled =
     saving ||
@@ -371,6 +372,11 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             {isRejected && (
               <span className="text-rose-700 bg-rose-50 border-rose-200 flex items-center gap-2 px-3 py-1 rounded-full border">
                 <XCircle className="h-4 w-4" /> חשבונית זו לא אושרה
+              </span>
+            )}
+            {isError && (
+              <span className="text-red-700 bg-red-50 border-red-200 flex items-center gap-2 px-3 py-1 rounded-full border">
+                <XCircle className="h-4 w-4 shrink-0" /> {invoice.error_message || 'המסמך לא זוהה כחשבונית'}
               </span>
             )}
             {invoice.status === 'exported' && (

@@ -26,6 +26,7 @@ export const ValidationResultSchema = z.object({
   rule_violations: z.array(z.string()),
   warnings: z.array(z.string()),
   requires_manual_review: z.boolean(),
+  not_an_invoice: z.boolean().optional(),
 });
 
 export const ExtractedDataSchema = z.object({

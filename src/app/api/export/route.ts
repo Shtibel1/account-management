@@ -85,7 +85,7 @@ export async function POST(request: Request) {
     // 6. Return the file buffer as download attachment
     const headers = new Headers();
     headers.set('Content-Type', 'text/plain; charset=utf-8');
-    headers.set('Content-Disposition', `attachment; filename="movein_${Date.now()}.txt"`);
+    headers.set('Content-Disposition', `attachment; filename="movein.dat"`);
 
     return new Response(new Uint8Array(buffer), {
       status: 200,

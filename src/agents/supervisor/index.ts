@@ -344,7 +344,8 @@ const graph = new StateGraph<any>({
       state.extractedData,
       state.tenantRules
     );
-    return { extractedData: validated, validationResult };
+    const errorMsg = validationResult.not_an_invoice ? 'המסמך לא זוהה כחשבונית' : null;
+    return { extractedData: validated, validationResult, error: errorMsg };
   })
 
   // 5. Save review node (Interrupt point before approval)
@@ -390,11 +391,18 @@ const graph = new StateGraph<any>({
   .addNode('save_error', async (state: PipelineState) => {
     console.error(`[Supervisor] ❌ Saving state: ERROR (Total Cost: $${state.costMetrics.estimatedCostUsd}). Details: ${state.error}`);
     
-    await supabase.from('invoices').update({
+    const updateData: any = {
       status: 'error',
       error_message: state.error || 'Unknown error occurred in pipeline',
       updated_at: new Date().toISOString(),
-    }).eq('id', state.invoiceId);
+    };
+
+    if (state.extractedData) {
+      updateData.extracted_data = state.extractedData;
+      updateData.validated_data = state.extractedData;
+    }
+
+    await supabase.from('invoices').update(updateData).eq('id', state.invoiceId);
 
     return { status: 'error' };
   })
@@ -409,6 +417,11 @@ const graph = new StateGraph<any>({
   .addConditionalEdges('validate', (state: PipelineState) => {
     const result = state.validationResult;
     if (!result) return 'save_error';
+
+    // Route to exception/error if not an invoice
+    if (result.not_an_invoice) {
+      return 'save_error';
+    }
 
     // Mathematical retry loop
     if (!result.math_ok && state.retryCount < 1) {

@@ -154,7 +154,14 @@ export async function validateInvoice(
     }
   }
 
-  // 5. Compute manual review trigger (Forced to true so all invoices always go to manual review first)
+  // 5. Detect if the document is not an invoice at all (missing all key structural fields)
+  const notAnInvoice =
+    !corrected.supplier_name &&
+    !corrected.invoice_number &&
+    !corrected.total_amount &&
+    !corrected.amount_before_vat;
+
+  // 6. Compute manual review trigger (Forced to true so all invoices always go to manual review first)
   const requiresManualReview = true;
 
   const validationResult: ValidationResult = {
@@ -165,6 +172,7 @@ export async function validateInvoice(
     rule_violations: ruleViolations,
     warnings,
     requires_manual_review: requiresManualReview,
+    not_an_invoice: notAnInvoice,
   };
 
   return {

@@ -61,7 +61,7 @@ export async function exportRoutes(app: FastifyInstance) {
 
     return reply
       .header('Content-Type', 'text/plain; charset=utf-8')
-      .header('Content-Disposition', `attachment; filename="movein_${Date.now()}.txt"`)
+      .header('Content-Disposition', 'attachment; filename="movein.dat"')
       .send(buffer);
   });
 }
