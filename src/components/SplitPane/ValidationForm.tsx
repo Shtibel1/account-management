@@ -39,6 +39,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   );
   const [isSearchingWeb, setIsSearchingWeb] = useState(false);
   const [showVatDetails, setShowVatDetails] = useState(false);
+  const [lastAutofilledVat, setLastAutofilledVat] = useState<string | null>(null);
 
   useEffect(() => {
     if (!invoice.client_id) return;
@@ -155,10 +156,15 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
 
   // Autofill VAT ID if web search finds a result and the field is currently blank
   useEffect(() => {
-    if (webSearchVat && !data.supplier_vat_id) {
-      setData((prev) => ({ ...prev, supplier_vat_id: webSearchVat }));
+    if (!webSearchVat) {
+      setLastAutofilledVat(null);
+      return;
     }
-  }, [webSearchVat, data.supplier_vat_id]);
+    if (webSearchVat && !data.supplier_vat_id && webSearchVat !== lastAutofilledVat) {
+      setData((prev) => ({ ...prev, supplier_vat_id: webSearchVat }));
+      setLastAutofilledVat(webSearchVat);
+    }
+  }, [webSearchVat, data.supplier_vat_id, lastAutofilledVat]);
 
   const originalSupplierName = invoice.extracted_data?.supplier_name || '';
 
@@ -194,13 +200,15 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
     data.amount_before_vat != null && data.vat_amount != null && data.total_amount != null &&
     Math.abs((data.amount_before_vat + data.vat_amount) - data.total_amount) > 1;
 
-  const checkVatId = (vatId: string | null): boolean => {
-    if (!vatId) return true;
+  const getVatIdError = (vatId: string | null): string | null => {
+    if (!vatId) return null;
     let digits = vatId.replace(/\D/g, '');
     if (digits.length === 8) {
       digits = '0' + digits;
     }
-    if (digits.length !== 9) return false;
+    if (digits.length !== 9) {
+      return 'חייב להיות 9 ספרות';
+    }
 
     // Israeli Luhn checksum algorithm
     let sum = 0;
@@ -212,10 +220,23 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
       }
       sum += d;
     }
-    return sum % 10 === 0;
+    if (sum % 10 !== 0) {
+      return 'מספר עוסק לא תקין (ספרת ביקורת שגויה)';
+    }
+    return null;
   };
 
-  const isVatIdOk = checkVatId(data.supplier_vat_id ?? null);
+  const checkVatId = (vatId: string | null): boolean => {
+    return !getVatIdError(vatId);
+  };
+
+  const vatIdErrorText = getVatIdError(data.supplier_vat_id ?? null);
+  const isVatIdOk = !vatIdErrorText;
+
+  const isDateEmpty = !data.invoice_date;
+  const isAmountBeforeVatEmpty = data.amount_before_vat == null || isNaN(data.amount_before_vat);
+  const isVatAmountEmpty = data.vat_amount == null || isNaN(data.vat_amount);
+  const isTotalAmountEmpty = data.total_amount == null || isNaN(data.total_amount);
 
   const hasInvoiceTabError =
     fieldError('supplier_name') ||
@@ -229,11 +250,19 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
     !mathOk ||
     fieldError('amount_before_vat') ||
     fieldError('vat_amount') ||
-    fieldError('total_amount');
+    fieldError('total_amount') ||
+    isDateEmpty ||
+    isAmountBeforeVatEmpty ||
+    isVatAmountEmpty ||
+    isTotalAmountEmpty;
 
   const hasBankData = !!(data.bank_name || data.bank_branch_name || data.bank_branch_code || data.bank_account);
 
   const handleApprove = async () => {
+    if (isDateEmpty || isAmountBeforeVatEmpty || isVatAmountEmpty || isTotalAmountEmpty) {
+      setError('יש למלא את כל שדות החובה: תאריך חשבונית, לפני מע״מ, מע"מ, וסה״כ לתשלום.');
+      return;
+    }
     setSaving(true); setError('');
     try {
       const originalName = invoice.extracted_data?.supplier_name;
@@ -324,7 +353,11 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
     rejecting ||
     mathError ||
     supplierStatus === 'loading' ||
-    (supplierStatus === 'unknown' && !supplierCode.trim());
+    (supplierStatus === 'unknown' && !supplierCode.trim()) ||
+    isDateEmpty ||
+    isAmountBeforeVatEmpty ||
+    isVatAmountEmpty ||
+    isTotalAmountEmpty;
 
   return (
     <div className="h-full flex flex-col" style={{ direction: 'rtl' }}>
@@ -495,8 +528,11 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                 onBlur={() => onFieldFocus?.(null)}
                 disabled={isReadOnly}
               />
-              {!isVatIdOk && (
-                <p className="text-xs text-red-600 mt-1">מספר עוסק לא תקין (חייב להיות 9 ספרות)</p>
+              {fieldError('supplier_vat_id') && !data.supplier_vat_id && (
+                <p className="text-xs text-red-600 mt-1">ח.פ. הוא שדה חובה</p>
+              )}
+              {vatIdErrorText && (
+                <p className="text-xs text-red-600 mt-1">{vatIdErrorText}</p>
               )}
 
               {/* Composed VAT ID Sources Feedback Indicator */}
@@ -610,12 +646,12 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                 />
               </Field>
 
-              <Field label="תאריך חשבונית" error={fieldError('invoice_date')} fieldKey="invoice_date" onFieldFocus={onFieldFocus}>
+              <Field label="תאריך חשבונית" error={fieldError('invoice_date') || isDateEmpty} fieldKey="invoice_date" onFieldFocus={onFieldFocus}>
                 <input
                   type="date"
-                  className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', fieldError('invoice_date') && 'input-error')}
+                  className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', (fieldError('invoice_date') || isDateEmpty) && 'input-error')}
                   value={data.invoice_date ?? ''}
-                  onChange={(e) => set('invoice_date', e.target.value)}
+                  onChange={(e) => set('invoice_date', e.target.value || null)}
                   onFocus={() => onFieldFocus?.('invoice_date')}
                   onBlur={() => onFieldFocus?.(null)}
                   disabled={isReadOnly}
@@ -624,14 +660,41 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             </div>
 
             <div className="grid grid-cols-3 gap-3">
-              <Field label="לפני מע״מ" error={mathError} fieldKey="amount_before_vat" onFieldFocus={onFieldFocus}>
-                <input type="number" step="0.01" className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', mathError && 'input-error')} value={data.amount_before_vat ?? ''} onChange={(e) => set('amount_before_vat', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('amount_before_vat')} onBlur={() => onFieldFocus?.(null)} disabled={isReadOnly} />
+              <Field label="לפני מע״מ" error={mathError || isAmountBeforeVatEmpty} fieldKey="amount_before_vat" onFieldFocus={onFieldFocus}>
+                <input
+                  type="number"
+                  step="0.01"
+                  className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', (mathError || isAmountBeforeVatEmpty) && 'input-error')}
+                  value={data.amount_before_vat ?? ''}
+                  onChange={(e) => set('amount_before_vat', e.target.value === '' ? null : parseFloat(e.target.value))}
+                  onFocus={() => onFieldFocus?.('amount_before_vat')}
+                  onBlur={() => onFieldFocus?.(null)}
+                  disabled={isReadOnly}
+                />
               </Field>
-              <Field label='מע"מ' error={mathError} fieldKey="vat_amount" onFieldFocus={onFieldFocus}>
-                <input type="number" step="0.01" className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', mathError && 'input-error')} value={data.vat_amount ?? ''} onChange={(e) => set('vat_amount', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('vat_amount')} onBlur={() => onFieldFocus?.(null)} disabled={isReadOnly} />
+              <Field label='מע"מ' error={mathError || isVatAmountEmpty} fieldKey="vat_amount" onFieldFocus={onFieldFocus}>
+                <input
+                  type="number"
+                  step="0.01"
+                  className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', (mathError || isVatAmountEmpty) && 'input-error')}
+                  value={data.vat_amount ?? ''}
+                  onChange={(e) => set('vat_amount', e.target.value === '' ? null : parseFloat(e.target.value))}
+                  onFocus={() => onFieldFocus?.('vat_amount')}
+                  onBlur={() => onFieldFocus?.(null)}
+                  disabled={isReadOnly}
+                />
               </Field>
-              <Field label="סה״כ לתשלום" error={mathError} fieldKey="total_amount" onFieldFocus={onFieldFocus}>
-                <input type="number" step="0.01" className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', mathError && 'input-error')} value={data.total_amount ?? ''} onChange={(e) => set('total_amount', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('total_amount')} onBlur={() => onFieldFocus?.(null)} disabled={isReadOnly} />
+              <Field label="סה״כ לתשלום" error={mathError || isTotalAmountEmpty} fieldKey="total_amount" onFieldFocus={onFieldFocus}>
+                <input
+                  type="number"
+                  step="0.01"
+                  className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', (mathError || isTotalAmountEmpty) && 'input-error')}
+                  value={data.total_amount ?? ''}
+                  onChange={(e) => set('total_amount', e.target.value === '' ? null : parseFloat(e.target.value))}
+                  onFocus={() => onFieldFocus?.('total_amount')}
+                  onBlur={() => onFieldFocus?.(null)}
+                  disabled={isReadOnly}
+                />
               </Field>
             </div>
             {mathError && <p className="text-xs text-red-600">שגיאה: לפני מע"מ + מע"מ ≠ סה"כ</p>}
