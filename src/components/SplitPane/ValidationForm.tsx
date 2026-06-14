@@ -32,6 +32,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const [categoryMappingKeys, setCategoryMappingKeys] = useState<string[] | null>(null);
   const [supplierCode, setSupplierCode] = useState('');
   const [categoryCode, setCategoryCode] = useState('');
+  const [isInitialized, setIsInitialized] = useState(false);
 
   const [webSearchVat, setWebSearchVat] = useState<string | null>(
     initial?.validation_flags?.vat_id_sources?.web_search ?? null
@@ -62,6 +63,39 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
         setCategoryMappingKeys(dbCategories);
       });
   }, [invoice.client_id]);
+
+  // Initialize form fields for known/Various Suppliers once mappings are loaded
+  useEffect(() => {
+    if (supplierMappingKeys === null || isInitialized) return;
+
+    const originalName = invoice.extracted_data?.supplier_name;
+    const mapping = dbMappings.find(
+      (m) => m.mapping_type === 'supplier' && m.key === originalName
+    );
+
+    if (mapping) {
+      if (mapping.account_code === '3499') {
+        setData((prev) => ({
+          ...prev,
+          supplier_name: 'ספקים שונים',
+        }));
+        setSupplierCode('3499');
+      } else {
+        setData((prev) => ({
+          ...prev,
+          supplier_name: mapping.key,
+        }));
+        setSupplierCode(mapping.account_code);
+      }
+    } else {
+      setData((prev) => ({
+        ...prev,
+        supplier_name: 'ספקים שונים',
+      }));
+      setSupplierCode('3499');
+    }
+    setIsInitialized(true);
+  }, [dbMappings, supplierMappingKeys, invoice.extracted_data?.supplier_name, isInitialized]);
 
   useEffect(() => {
     if (!data.supplier_name) return;
@@ -126,9 +160,22 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
     }
   }, [webSearchVat, data.supplier_vat_id]);
 
+  const originalSupplierName = invoice.extracted_data?.supplier_name || '';
+
+  const originalSupplierMapping = dbMappings.find(
+    (m) => m.mapping_type === 'supplier' && m.key === originalSupplierName
+  );
+
+  const isVariousSuppliers = supplierMappingKeys !== null && (
+    !originalSupplierMapping || originalSupplierMapping.account_code === '3499'
+  );
+
+  const isKnownSupplier = supplierMappingKeys !== null &&
+    !!originalSupplierMapping && originalSupplierMapping.account_code !== '3499';
+
   const supplierStatus: SupplierStatus = supplierMappingKeys === null
     ? 'loading'
-    : (initial?.supplier_name && supplierMappingKeys.includes(initial.supplier_name) ? 'known' : 'unknown');
+    : isKnownSupplier ? 'known' : 'unknown';
 
   const categoryStatus: 'known' | 'unknown' | 'loading' = categoryMappingKeys === null
     ? 'loading'
@@ -166,11 +213,15 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const handleApprove = async () => {
     setSaving(true); setError('');
     try {
-      if (supplierStatus === 'unknown' && supplierCode.trim() && initial?.supplier_name) {
+      const originalName = invoice.extracted_data?.supplier_name;
+      const mappingExists = dbMappings.some(
+        (m) => m.mapping_type === 'supplier' && m.key === originalName
+      );
+      if (supplierStatus === 'unknown' && supplierCode.trim() && originalName && !mappingExists) {
         await supabase.from('account_mappings').insert({
           client_id: invoice.client_id,
           mapping_type: 'supplier',
-          key: initial.supplier_name,
+          key: originalName,
           account_code: supplierCode.trim(),
         });
       }
@@ -302,12 +353,25 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             <Field label="שם ספק" error={fieldError('supplier_name')} fieldKey="supplier_name" onFieldFocus={onFieldFocus}
               badge={
                 supplierStatus === 'known'
-                  ? <span className="flex items-center gap-1 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full font-medium">
-                      <CheckCircle2 className="h-3 w-3" /> ספק מוכר
+                  ? <span className="flex items-center gap-1 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full font-medium animate-in fade-in duration-200">
+                      <CheckCircle2 className="h-3 w-3" /> ספק מוכר {originalSupplierMapping && `(קוד: ${originalSupplierMapping.account_code})`}
                     </span>
                   : supplierStatus === 'unknown'
-                  ? <span className="flex items-center gap-1 text-xs text-amber-700 bg-amber-50 border border-emerald-200 px-2 py-0.5 rounded-full font-medium">
-                      <AlertTriangle className="h-3 w-3" /> ספק חדש
+                  ? <span className={clsx(
+                      "flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium border animate-in fade-in duration-200",
+                      originalSupplierMapping
+                        ? "text-indigo-700 bg-indigo-50 border-indigo-200"
+                        : "text-amber-700 bg-amber-50 border-amber-200"
+                    )}>
+                      {originalSupplierMapping ? (
+                        <>
+                          <CheckCircle2 className="h-3 w-3" /> ספקים שונים
+                        </>
+                      ) : (
+                        <>
+                          <AlertTriangle className="h-3 w-3" /> ספק חדש
+                        </>
+                      )}
                     </span>
                   : null
               }
@@ -321,14 +385,49 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                 disabled={isReadOnly}
               />
             </Field>
+
+            {/* Original Supplier Name Card */}
+            {isVariousSuppliers && originalSupplierName && (
+              <div className="flex flex-col gap-1.5 p-3 bg-blue-50/40 border border-blue-100/70 rounded-xl text-xs text-blue-800 animate-in fade-in duration-200">
+                <div className="flex items-center gap-1.5 font-semibold">
+                  <FileText className="h-3.5 w-3.5 text-blue-600 shrink-0" />
+                  <span>שם הספק המקורי שזוהה בחשבונית:</span>
+                </div>
+                <div className="bg-white border border-blue-200/60 px-2.5 py-1.5 rounded-lg font-mono font-medium text-slate-800 break-all animate-in zoom-in-95 duration-200">
+                  {originalSupplierName}
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  {originalSupplierMapping
+                    ? "ספק זה מוגדר תחת חשבון 'ספקים שונים'. שם הספק הוחלף ל-'ספקים שונים' בקוד 3499."
+                    : "ספק זה אינו מוגדר במערכת. שם הספק הוחלף ל-'ספקים שונים' ויוגדר עם קוד חשבון 3499."}
+                </p>
+              </div>
+            )}
+
             {supplierStatus === 'unknown' && !isReadOnly && (
-              <div className="flex items-center gap-2 -mt-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg animate-in fade-in duration-200">
-                <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />
-                <label className="text-xs text-amber-800 shrink-0 font-semibold">קוד חשבון ספק:</label>
+              <div className={clsx(
+                "flex items-center gap-2 -mt-2 px-3 py-2 border rounded-lg animate-in fade-in duration-200",
+                supplierCode.trim() 
+                  ? "bg-emerald-50/30 border-emerald-100" 
+                  : "bg-amber-50 border-amber-200"
+              )}>
+                {supplierCode.trim() ? (
+                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
+                ) : (
+                  <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+                )}
+                <label className={clsx(
+                  "text-xs shrink-0 font-semibold",
+                  supplierCode.trim() ? "text-emerald-800" : "text-amber-800"
+                )}>
+                  קוד חשבון ספק:
+                </label>
                 <input
                   className={clsx(
                     "input-base py-1 text-sm font-mono flex-1 disabled:opacity-75 disabled:bg-slate-50/80",
-                    !supplierCode.trim() && "border-amber-300 focus:ring-amber-500/20 focus:border-amber-500 bg-amber-50/10"
+                    supplierCode.trim()
+                      ? "border-emerald-200 focus:ring-emerald-500/20 focus:border-emerald-500 bg-white"
+                      : "border-amber-300 focus:ring-amber-500/20 focus:border-amber-500 bg-amber-50/10"
                   )}
                   placeholder="חובה להזין קוד ספק לאישור (לדוג׳ 2340)"
                   value={supplierCode}
