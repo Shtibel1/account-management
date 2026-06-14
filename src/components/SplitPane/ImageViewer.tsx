@@ -80,7 +80,7 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
         className="absolute inset-0 pointer-events-none"
         width={imgSize.w}
         height={imgSize.h}
-        style={{ top: 0, left: 0 }}
+        style={{ top: 0, left: 0, direction: 'ltr' }}
       >
         {fieldsToShow.map((field) => {
           const b = bboxes[field] as FieldBbox | undefined;
@@ -113,13 +113,14 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
   return (
     <div
       ref={containerRef}
+      dir="ltr"
       className="relative w-full h-full overflow-auto bg-gray-100 flex items-start justify-center p-2"
       style={{ direction: 'ltr' }}
     >
       {isPdf ? (
         <iframe src={fileUrl} className="w-full h-full rounded" title="חשבונית" />
       ) : (
-        <div className="relative inline-block">
+        <div className="relative inline-block" dir="ltr" style={{ direction: 'ltr' }}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           {/* block מסיר את ה-baseline gap של inline images */}
           <img
