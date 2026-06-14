@@ -166,6 +166,11 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
           const bboxPage = b.page ?? 1;
           if (bboxPage !== pageNum) return null;
 
+          // Skip rendering bounding boxes with zero width/height or invalid zeros to avoid line artifacts
+          if ((b.x1 === 0 && b.y1 === 0 && b.x2 === 0 && b.y2 === 0) || b.x1 === b.x2 || b.y1 === b.y2) {
+            return null;
+          }
+
           const color = FIELD_COLORS[field] ?? '#6b7280';
           const x = b.x1 * size.w;
           const y = (b.y1 + yOffset) * size.h;

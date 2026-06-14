@@ -7,6 +7,44 @@ import { approvalNode } from '../approval';
 import { supabase } from '@/lib/supabase';
 import { PDFDocument } from 'pdf-lib';
 
+function parseNumber(text: string): number | null {
+  const clean = text.replace(/[^0-9.]/g, '');
+  const val = parseFloat(clean);
+  return isNaN(val) ? null : val;
+}
+
+function parseDateParts(text: string): { day: number; month: number; year: number } | null {
+  const clean = text.replace(/[^0-9/.-]/g, '');
+  const parts = clean.split(/[/.-]/).map((p) => parseInt(p, 10)).filter((p) => !isNaN(p));
+  if (parts.length === 3) {
+    if (parts[0] > 1000) {
+      return { year: parts[0], month: parts[1], day: parts[2] };
+    }
+    let year = parts[2];
+    if (year < 100) year += 2000;
+    return { day: parts[0], month: parts[1], year };
+  }
+  return null;
+}
+
+function datesMatch(a: string, b: string): boolean {
+  const da = parseDateParts(a);
+  const db = parseDateParts(b);
+  if (da && db) {
+    return da.day === db.day && da.month === db.month && da.year === db.year;
+  }
+  return false;
+}
+
+function numbersMatch(a: string, b: string): boolean {
+  const na = parseNumber(a);
+  const nb = parseNumber(b);
+  if (na !== null && nb !== null) {
+    return na === nb;
+  }
+  return false;
+}
+
 function cleanTextForMatching(text: string): string {
   return text
     .replace(/[^a-zA-Z0-9א-ת]/g, '')
@@ -19,9 +57,21 @@ function findExactBbox(value: string | number | null, ocrWords: OcrWord[]): Fiel
   const cleanedTarget = cleanTextForMatching(targetStr);
   if (!cleanedTarget) return undefined;
 
-  // 1. First search for exact or partial matches in single words
+  // 1. First search for exact or partial matches in single words (including date/numeric value equivalence)
   const singleMatches = ocrWords.filter(
-    (w) => cleanTextForMatching(w.text).includes(cleanedTarget) || cleanedTarget.includes(cleanTextForMatching(w.text))
+    (w) => {
+      const cleanWord = cleanTextForMatching(w.text);
+      if (cleanWord.includes(cleanedTarget) || cleanedTarget.includes(cleanWord)) {
+        return true;
+      }
+      if (numbersMatch(w.text, targetStr)) {
+        return true;
+      }
+      if (datesMatch(w.text, targetStr)) {
+        return true;
+      }
+      return false;
+    }
   );
 
   if (singleMatches.length > 0) {
@@ -36,15 +86,14 @@ function findExactBbox(value: string | number | null, ocrWords: OcrWord[]): Fiel
     };
   }
 
-  // 2. If it's a multi-word value, search for phrase sequence matches
+  // 2. If it's a multi-word value, search for phrase sequence matches (order-independent window to handle RTL/LTR direction swapping)
   const targetTokens = targetStr.split(/\s+/).map(cleanTextForMatching).filter(Boolean);
   if (targetTokens.length > 1) {
     for (let i = 0; i <= ocrWords.length - targetTokens.length; i++) {
       let matchesAll = true;
-      for (let j = 0; j < targetTokens.length; j++) {
-        const ocrClean = cleanTextForMatching(ocrWords[i + j].text);
-        const targetClean = targetTokens[j];
-        if (!ocrClean.includes(targetClean) && !targetClean.includes(ocrClean)) {
+      const windowTokens = ocrWords.slice(i, i + targetTokens.length).map((w) => cleanTextForMatching(w.text));
+      for (const t of targetTokens) {
+        if (!windowTokens.some((wt) => wt.includes(t) || t.includes(wt))) {
           matchesAll = false;
           break;
         }
