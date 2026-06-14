@@ -142,6 +142,13 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const isRejected = invoice.status === 'rejected';
   const isReadOnly = isApproved || isRejected || invoice.status === 'exported';
 
+  const isApproveDisabled =
+    saving ||
+    rejecting ||
+    mathError ||
+    supplierStatus === 'loading' ||
+    (supplierStatus === 'unknown' && !supplierCode.trim());
+
   return (
     <div className="h-full flex flex-col" style={{ direction: 'rtl' }}>
       {/* Header */}
@@ -202,10 +209,13 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
         {supplierStatus === 'unknown' && !isReadOnly && (
           <div className="flex items-center gap-2 -mt-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg animate-in fade-in duration-200">
             <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />
-            <label className="text-xs text-amber-800 shrink-0">קוד חשבון ספק:</label>
+            <label className="text-xs text-amber-800 shrink-0 font-semibold">קוד חשבון ספק:</label>
             <input
-              className="input-base py-1 text-sm font-mono flex-1 disabled:opacity-75 disabled:bg-slate-50/80"
-              placeholder="לדוג׳ 2340 — ריק = יקושר ל'ספקים שונים' 3499"
+              className={clsx(
+                "input-base py-1 text-sm font-mono flex-1 disabled:opacity-75 disabled:bg-slate-50/80",
+                !supplierCode.trim() && "border-amber-300 focus:ring-amber-500/20 focus:border-amber-500 bg-amber-50/10"
+              )}
+              placeholder="חובה להזין קוד ספק לאישור (לדוג׳ 2340)"
               value={supplierCode}
               onChange={(e) => setSupplierCode(e.target.value)}
               disabled={isReadOnly}
@@ -380,7 +390,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             </button>
             <button
               onClick={handleApprove}
-              disabled={saving || rejecting || mathError}
+              disabled={isApproveDisabled}
               className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm rounded-xl shadow-sm transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
             >
               {saving ? 'מאשר...' : 'אשר חשבונית'}
