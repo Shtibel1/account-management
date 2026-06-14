@@ -34,56 +34,65 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
   const containerRef = useRef<HTMLDivElement>(null);
   const [numPages, setNumPages] = useState<number | null>(null);
   const [pageSizes, setPageSizes] = useState<Record<number, { w: number; h: number }>>({});
-  
-  const pageRefs = useRef<Record<number, HTMLElement | null>>({});
-  const observers = useRef<Record<number, ResizeObserver>>({});
 
   const isPdf = fileUrl.toLowerCase().includes('.pdf') || fileUrl.includes('content-type=application%2Fpdf');
 
-  // Set up resize observer for each page or image to get layout dimensions
-  const setPageRef = (pageNumber: number) => (el: HTMLElement | null) => {
-    pageRefs.current[pageNumber] = el;
-    
-    // Clean up existing observer for this page
-    if (observers.current[pageNumber]) {
-      observers.current[pageNumber].disconnect();
-      delete observers.current[pageNumber];
-    }
+  // central measurement trigger
+  const updateSizes = () => {
+    const container = containerRef.current;
+    if (!container) return;
 
-    if (!el) {
-      setPageSizes((prev) => {
-        const next = { ...prev };
-        delete next[pageNumber];
-        return next;
-      });
-      return;
-    }
+    // Find all PDF canvas elements or image element
+    const elements = container.querySelectorAll('.react-pdf__Page canvas, img');
+    if (elements.length === 0) return;
 
-    const updateSize = () => {
-      setPageSizes((prev) => {
-        if (prev[pageNumber]?.w === el.offsetWidth && prev[pageNumber]?.h === el.offsetHeight) {
-          return prev;
+    setPageSizes((prev) => {
+      let changed = false;
+      const next = { ...prev };
+
+      elements.forEach((el) => {
+        let pageNum = 1;
+        const pageWrapper = el.closest('.react-pdf__Page');
+        if (pageWrapper) {
+          const pageAttr = pageWrapper.getAttribute('data-page-number');
+          if (pageAttr) pageNum = parseInt(pageAttr, 10);
         }
-        return {
-          ...prev,
-          [pageNumber]: { w: el.offsetWidth, h: el.offsetHeight },
-        };
-      });
-    };
 
-    updateSize();
-    const ro = new ResizeObserver(updateSize);
-    ro.observe(el);
-    observers.current[pageNumber] = ro;
+        const w = (el as HTMLElement).offsetWidth;
+        const h = (el as HTMLElement).offsetHeight;
+
+        if (w > 0 && h > 0) {
+          if (prev[pageNum]?.w !== w || prev[pageNum]?.h !== h) {
+            next[pageNum] = { w, h };
+            changed = true;
+          }
+        }
+      });
+
+      return changed ? next : prev;
+    });
   };
 
-  // Cleanup observers on unmount
+  // Unified layout observer to handle client-side rendering size updates
   useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    updateSizes();
+
+    // ResizeObserver watches for browser resizing and layout reflows
+    const ro = new ResizeObserver(updateSizes);
+    ro.observe(container);
+
+    // MutationObserver detects when react-pdf finishes async page renders and inserts canvas tags
+    const mo = new MutationObserver(updateSizes);
+    mo.observe(container, { childList: true, subtree: true });
+
     return () => {
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-      Object.values(observers.current).forEach((ro) => ro.disconnect());
+      ro.disconnect();
+      mo.disconnect();
     };
-  }, []);
+  }, [fileUrl, numPages]);
 
   // Auto-scroll to center the active highlighted field in the viewport
   useEffect(() => {
@@ -95,7 +104,13 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
     if (!container) return;
 
     const pageNum = b.page ?? 1;
-    const pageElement = pageRefs.current[pageNum];
+    let pageElement: HTMLElement | null = null;
+    if (isPdf) {
+      pageElement = container.querySelector(`.react-pdf__Page[data-page-number="${pageNum}"] canvas`);
+    } else {
+      pageElement = container.querySelector('img');
+    }
+
     const size = pageSizes[pageNum];
     if (!pageElement || !size || size.h === 0) return;
 
@@ -119,7 +134,7 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
       top: Math.max(0, targetScrollTop),
       behavior: 'smooth',
     });
-  }, [activeField, bboxes, pageSizes, yOffset]);
+  }, [activeField, bboxes, pageSizes, yOffset, isPdf]);
 
   const onDocumentLoadSuccess = ({ numPages }: { numPages: number }) => {
     setNumPages(numPages);
@@ -203,7 +218,6 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
                   pageNumber={pageNum}
                   renderTextLayer={false}
                   renderAnnotationLayer={false}
-                  canvasRef={setPageRef(pageNum)}
                   className="max-w-full h-auto"
                 />
                 {renderOverlayForPage(pageNum, pageSize)}
@@ -215,11 +229,11 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
         <div className="relative inline-block bg-white shadow-md border border-slate-200 rounded max-w-full" dir="ltr" style={{ direction: 'ltr' }}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            ref={setPageRef(1)}
             src={fileUrl}
             alt="חשבונית מקורית"
             className="block max-w-full h-auto rounded select-none"
             draggable={false}
+            onLoad={updateSizes}
           />
           {renderOverlayForPage(1, pageSizes[1] || { w: 0, h: 0 })}
         </div>
