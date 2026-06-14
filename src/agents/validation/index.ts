@@ -88,7 +88,31 @@ export async function validateInvoice(
   rules: TenantRules
 ): Promise<{ data: ExtractedData; validationResult: ValidationResult }> {
   // 1. Run edge cases & auto-corrections
-  const { data: corrected, warnings } = runEdgeCaseHandlers(data);
+  const { data: corrected, warnings: edgeWarnings } = runEdgeCaseHandlers(data);
+  const warnings = [...edgeWarnings];
+
+  // 1.5 Fetch mapping if supplier name is known to override/fill the VAT ID
+  if (corrected.supplier_name) {
+    try {
+      const { data: mapping, error: mappingErr } = await supabase
+        .from('account_mappings')
+        .select('vat_id')
+        .eq('client_id', tenantId)
+        .eq('mapping_type', 'supplier')
+        .eq('key', corrected.supplier_name)
+        .maybeSingle();
+
+      if (!mappingErr && mapping && mapping.vat_id) {
+        if (corrected.supplier_vat_id !== mapping.vat_id) {
+          console.log(`[Validation] Correcting supplier_vat_id for "${corrected.supplier_name}" from "${corrected.supplier_vat_id}" to "${mapping.vat_id}" based on account mapping.`);
+          corrected.supplier_vat_id = mapping.vat_id;
+          warnings.push(`מספר ח.פ./עוסק מורשה עודכן אוטומטית ל-${mapping.vat_id} לפי הגדרות הספק המוכר`);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to query account_mappings for supplier VAT ID fallback:', err);
+    }
+  }
 
   // 2. Perform baseline structural checks
   const mathOk = checkMath(corrected);

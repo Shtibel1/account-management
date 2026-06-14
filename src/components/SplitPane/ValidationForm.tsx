@@ -57,12 +57,24 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   }, [invoice.client_id]);
 
   useEffect(() => {
-    if (!data.supplier_name || data.expense_category) return;
+    if (!data.supplier_name) return;
     const mapping = dbMappings.find(
       (m) => m.mapping_type === 'supplier' && m.key === data.supplier_name
     );
-    if (mapping?.expense_category) {
-      setData((prev) => ({ ...prev, expense_category: mapping.expense_category }));
+    if (mapping) {
+      setData((prev) => {
+        const next = { ...prev };
+        let updated = false;
+        if (mapping.expense_category && !prev.expense_category) {
+          next.expense_category = mapping.expense_category;
+          updated = true;
+        }
+        if (mapping.vat_id && prev.supplier_vat_id !== mapping.vat_id) {
+          next.supplier_vat_id = mapping.vat_id;
+          updated = true;
+        }
+        return updated ? next : prev;
+      });
     }
   }, [data.supplier_name, dbMappings]);
 
