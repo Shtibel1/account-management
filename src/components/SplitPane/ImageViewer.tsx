@@ -83,7 +83,7 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
   };
 
   return (
-    <div className="relative w-full h-full overflow-auto bg-gray-100 flex items-start justify-center p-2">
+    <div className="relative w-full h-full overflow-auto bg-gray-100 flex items-start justify-center p-2" style={{ direction: 'ltr' }}>
       {isPdf ? (
         <iframe src={fileUrl} className="w-full h-full rounded" title="חשבונית" />
       ) : (
