@@ -14,7 +14,7 @@ Welcome! This document serves as the source of truth for the codebase architectu
 - **AI Agent Pipeline:** LangGraph (`StateGraph` with a memory saver checkpointer).
 - **LLM Provider:** Anthropic SDK (Claude 3.5 Sonnet for extraction, Claude Haiku for invoice splitting).
 - **OCR Engine:** Google Cloud Vision API (Document Text Detection).
-- **PDF Manipulation:** `pdf-lib` (splitting/page management).
+- **PDF Manipulation & Rendering:** `pdf-lib` (splitting/page management) and `react-pdf` (client-side page canvas rendering).
 
 ---
 
