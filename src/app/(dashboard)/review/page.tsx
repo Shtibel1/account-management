@@ -8,9 +8,10 @@ import { useToast } from '@/components/ui/Toast';
 import { Loader2, RefreshCw } from 'lucide-react';
 
 const STATUS_LABELS: Record<string, string> = {
-  review:   'מוכן לבדיקה',
+  review:   'לבדיקה',
   approved: 'אושר',
-  error:    'שגיאה בעיבוד',
+  rejected: 'לא אושר',
+  error:    'חריג',
 };
 
 export default function ReviewPage() {

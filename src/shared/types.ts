@@ -1,4 +1,4 @@
-export type InvoiceStatus = 'processing' | 'review' | 'approved' | 'exported' | 'error';
+export type InvoiceStatus = 'processing' | 'review' | 'approved' | 'exported' | 'error' | 'rejected';
 
 export type MappingType = 'supplier' | 'category';
 

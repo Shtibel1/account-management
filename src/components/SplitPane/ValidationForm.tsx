@@ -5,7 +5,8 @@ import { ExtractedData, Invoice, AccountMapping } from '@/shared/types';
 import { approveInvoice } from '@/lib/api';
 import { createClient } from '@/utils/supabase/client';
 import clsx from 'clsx';
-import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
+import { useToast } from '@/components/ui/Toast';
 
 interface Props {
   invoice: Invoice;
@@ -17,9 +18,12 @@ type SupplierStatus = 'known' | 'unknown' | 'loading';
 
 export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const supabase = createClient();
+  const { toast } = useToast();
+  
   const initial = invoice.validated_data ?? invoice.extracted_data;
   const [data, setData] = useState<Partial<ExtractedData>>(initial ?? {});
   const [saving, setSaving] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
   const [error, setError] = useState('');
   const [categories, setCategories] = useState<string[]>([]);
   const [dbMappings, setDbMappings] = useState<AccountMapping[]>([]);
@@ -103,6 +107,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
         });
       }
       await approveInvoice(invoice.id, data);
+      toast('החשבונית אושרה בהצלחה', 'success');
       onApproved();
     } catch (e: any) {
       setError(e.message);
@@ -111,10 +116,34 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
     }
   };
 
+  const handleReject = async () => {
+    setRejecting(true); setError('');
+    try {
+      const { error: dbErr } = await supabase
+        .from('invoices')
+        .update({
+          status: 'rejected',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', invoice.id);
+
+      if (dbErr) throw dbErr;
+
+      toast('החשבונית סומנה כלא מאושרת', 'info');
+      onApproved();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setRejecting(false);
+    }
+  };
+
   const isApproved = invoice.status === 'approved';
+  const isRejected = invoice.status === 'rejected';
+  const isReadOnly = isApproved || isRejected || invoice.status === 'exported';
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col" style={{ direction: 'rtl' }}>
       {/* Header */}
       <div className="px-5 py-4 border-b border-slate-100 bg-white">
         <h2 className="font-semibold text-slate-900 truncate">{invoice.file_name}</h2>
@@ -151,44 +180,47 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
         <Field label="שם ספק" error={fieldError('supplier_name')} fieldKey="supplier_name" onFieldFocus={onFieldFocus}
           badge={
             supplierStatus === 'known'
-              ? <span className="flex items-center gap-1 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+              ? <span className="flex items-center gap-1 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full font-medium">
                   <CheckCircle2 className="h-3 w-3" /> ספק מוכר
                 </span>
               : supplierStatus === 'unknown'
-              ? <span className="flex items-center gap-1 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
+              ? <span className="flex items-center gap-1 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full font-medium">
                   <AlertTriangle className="h-3 w-3" /> ספק חדש
                 </span>
               : null
           }
         >
           <input
-            className={clsx('input-base', fieldError('supplier_name') && 'input-error')}
+            className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', fieldError('supplier_name') && 'input-error')}
             value={data.supplier_name ?? ''}
             onChange={(e) => set('supplier_name', e.target.value)}
             onFocus={() => onFieldFocus?.('supplier_name')}
             onBlur={() => onFieldFocus?.(null)}
+            disabled={isReadOnly}
           />
         </Field>
-        {supplierStatus === 'unknown' && (
-          <div className="flex items-center gap-2 -mt-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
+        {supplierStatus === 'unknown' && !isReadOnly && (
+          <div className="flex items-center gap-2 -mt-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg animate-in fade-in duration-200">
             <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />
             <label className="text-xs text-amber-800 shrink-0">קוד חשבון ספק:</label>
             <input
-              className="input-base py-1 text-sm font-mono flex-1"
+              className="input-base py-1 text-sm font-mono flex-1 disabled:opacity-75 disabled:bg-slate-50/80"
               placeholder="לדוג׳ 2340 — ריק = יקושר ל'ספקים שונים' 3499"
               value={supplierCode}
               onChange={(e) => setSupplierCode(e.target.value)}
+              disabled={isReadOnly}
             />
           </div>
         )}
 
         <Field label="ח.פ. / עוסק מורשה" error={fieldError('supplier_vat_id') || !(flags?.vat_id_ok ?? true)} fieldKey="supplier_vat_id" onFieldFocus={onFieldFocus}>
           <input
-            className={clsx('input-base', (fieldError('supplier_vat_id') || !(flags?.vat_id_ok ?? true)) && 'input-error')}
+            className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', (fieldError('supplier_vat_id') || !(flags?.vat_id_ok ?? true)) && 'input-error')}
             value={data.supplier_vat_id ?? ''}
             onChange={(e) => set('supplier_vat_id', e.target.value)}
             onFocus={() => onFieldFocus?.('supplier_vat_id')}
             onBlur={() => onFieldFocus?.(null)}
+            disabled={isReadOnly}
           />
           {!(flags?.vat_id_ok ?? true) && (
             <p className="text-xs text-red-600 mt-1">מספר עוסק לא תקין (חייב להיות 9 ספרות)</p>
@@ -198,60 +230,64 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
         <div className="grid grid-cols-2 gap-3">
           <Field label="מספר חשבונית" error={fieldError('invoice_number')} fieldKey="invoice_number" onFieldFocus={onFieldFocus}>
             <input
-              className={clsx('input-base', fieldError('invoice_number') && 'input-error')}
+              className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', fieldError('invoice_number') && 'input-error')}
               value={data.invoice_number ?? ''}
               onChange={(e) => set('invoice_number', e.target.value)}
               onFocus={() => onFieldFocus?.('invoice_number')}
               onBlur={() => onFieldFocus?.(null)}
+              disabled={isReadOnly}
             />
           </Field>
 
           <Field label="תאריך חשבונית" error={fieldError('invoice_date')} fieldKey="invoice_date" onFieldFocus={onFieldFocus}>
             <input
               type="date"
-              className={clsx('input-base', fieldError('invoice_date') && 'input-error')}
+              className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', fieldError('invoice_date') && 'input-error')}
               value={data.invoice_date ?? ''}
               onChange={(e) => set('invoice_date', e.target.value)}
               onFocus={() => onFieldFocus?.('invoice_date')}
               onBlur={() => onFieldFocus?.(null)}
+              disabled={isReadOnly}
             />
           </Field>
         </div>
 
         <div className="grid grid-cols-3 gap-3">
           <Field label="לפני מע״מ" error={mathError} fieldKey="amount_before_vat" onFieldFocus={onFieldFocus}>
-            <input type="number" step="0.01" className={clsx('input-base', mathError && 'input-error')} value={data.amount_before_vat ?? ''} onChange={(e) => set('amount_before_vat', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('amount_before_vat')} onBlur={() => onFieldFocus?.(null)} />
+            <input type="number" step="0.01" className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', mathError && 'input-error')} value={data.amount_before_vat ?? ''} onChange={(e) => set('amount_before_vat', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('amount_before_vat')} onBlur={() => onFieldFocus?.(null)} disabled={isReadOnly} />
           </Field>
           <Field label='מע"מ' error={mathError} fieldKey="vat_amount" onFieldFocus={onFieldFocus}>
-            <input type="number" step="0.01" className={clsx('input-base', mathError && 'input-error')} value={data.vat_amount ?? ''} onChange={(e) => set('vat_amount', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('vat_amount')} onBlur={() => onFieldFocus?.(null)} />
+            <input type="number" step="0.01" className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', mathError && 'input-error')} value={data.vat_amount ?? ''} onChange={(e) => set('vat_amount', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('vat_amount')} onBlur={() => onFieldFocus?.(null)} disabled={isReadOnly} />
           </Field>
           <Field label="סה״כ לתשלום" error={mathError} fieldKey="total_amount" onFieldFocus={onFieldFocus}>
-            <input type="number" step="0.01" className={clsx('input-base', mathError && 'input-error')} value={data.total_amount ?? ''} onChange={(e) => set('total_amount', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('total_amount')} onBlur={() => onFieldFocus?.(null)} />
+            <input type="number" step="0.01" className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', mathError && 'input-error')} value={data.total_amount ?? ''} onChange={(e) => set('total_amount', parseFloat(e.target.value))} onFocus={() => onFieldFocus?.('total_amount')} onBlur={() => onFieldFocus?.(null)} disabled={isReadOnly} />
           </Field>
         </div>
         {mathError && <p className="text-xs text-red-600 -mt-2">שגיאה: לפני מע"מ + מע"מ ≠ סה"כ</p>}
 
         <Field label="קטגוריית הוצאה" error={fieldError('expense_category')} fieldKey="expense_category" onFieldFocus={onFieldFocus}>
           <select
-            className={clsx('input-base', fieldError('expense_category') && 'input-error')}
+            className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', fieldError('expense_category') && 'input-error')}
             value={data.expense_category ?? ''}
             onChange={(e) => { set('expense_category', e.target.value); setCategoryCode(''); }}
             onFocus={() => onFieldFocus?.('expense_category')}
             onBlur={() => onFieldFocus?.(null)}
+            disabled={isReadOnly}
           >
             <option value="">בחר קטגוריה...</option>
             {categories.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
         </Field>
-        {categoryStatus === 'unknown' && data.expense_category && (
-          <div className="flex items-center gap-2 -mt-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
+        {categoryStatus === 'unknown' && data.expense_category && !isReadOnly && (
+          <div className="flex items-center gap-2 -mt-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg animate-in fade-in duration-200">
             <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />
             <label className="text-xs text-amber-800 shrink-0">קוד חשבון קטגוריה:</label>
             <input
-              className="input-base py-1 text-sm font-mono flex-1"
+              className="input-base py-1 text-sm font-mono flex-1 disabled:opacity-75 disabled:bg-slate-50/80"
               placeholder="לדוג׳ 4001 — ריק = ייצוא ייחסם"
               value={categoryCode}
               onChange={(e) => setCategoryCode(e.target.value)}
+              disabled={isReadOnly}
             />
           </div>
         )}
@@ -262,22 +298,24 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
           <div className="grid grid-cols-2 gap-3">
             <Field label="שם הבנק" error={false} fieldKey="bank_name" onFieldFocus={onFieldFocus}>
               <input
-                className="input-base"
+                className="input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed"
                 placeholder="למשל: הבינלאומי"
                 value={data.bank_name ?? ''}
                 onChange={(e) => set('bank_name', e.target.value)}
                 onFocus={() => onFieldFocus?.('bank_name')}
                 onBlur={() => onFieldFocus?.(null)}
+                disabled={isReadOnly}
               />
             </Field>
             <Field label="שם הסניף" error={false} fieldKey="bank_branch_name" onFieldFocus={onFieldFocus}>
               <input
-                className="input-base"
+                className="input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed"
                 placeholder="למשל: אשקלון"
                 value={data.bank_branch_name ?? ''}
                 onChange={(e) => set('bank_branch_name', e.target.value)}
                 onFocus={() => onFieldFocus?.('bank_branch_name')}
                 onBlur={() => onFieldFocus?.(null)}
+                disabled={isReadOnly}
               />
             </Field>
           </div>
@@ -285,22 +323,24 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
           <div className="grid grid-cols-2 gap-3">
             <Field label="מספר סניף" error={false} fieldKey="bank_branch_code" onFieldFocus={onFieldFocus}>
               <input
-                className="input-base font-mono"
+                className="input-base font-mono disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed"
                 placeholder="למשל: 109"
                 value={data.bank_branch_code ?? ''}
                 onChange={(e) => set('bank_branch_code', e.target.value)}
                 onFocus={() => onFieldFocus?.('bank_branch_code')}
                 onBlur={() => onFieldFocus?.(null)}
+                disabled={isReadOnly}
               />
             </Field>
             <Field label="מספר חשבון" error={false} fieldKey="bank_account" onFieldFocus={onFieldFocus}>
               <input
-                className="input-base font-mono"
+                className="input-base font-mono disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed"
                 placeholder="למשל: 566204"
                 value={data.bank_account ?? ''}
                 onChange={(e) => set('bank_account', e.target.value)}
                 onFocus={() => onFieldFocus?.('bank_account')}
                 onBlur={() => onFieldFocus?.(null)}
+                disabled={isReadOnly}
               />
             </Field>
           </div>
@@ -310,20 +350,43 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
       {/* Footer */}
       <div className="px-4 py-4 border-t border-slate-100 bg-white">
         {error && <p className="text-sm text-red-600 mb-3">{error}</p>}
-        <button
-          onClick={handleApprove}
-          disabled={saving || mathError || isApproved}
-          className={clsx(
-            'w-full py-3 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2',
-            isApproved
-              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 cursor-default'
-              : 'bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white shadow-sm'
-          )}
-        >
-          {isApproved
-            ? <><CheckCircle className="h-4 w-4" />אושר</>
-            : saving ? 'שומר...' : 'אשר חשבונית'}
-        </button>
+        
+        {isReadOnly ? (
+          <div className="w-full flex items-center justify-center p-3.5 rounded-xl border text-sm font-semibold">
+            {isApproved && (
+              <span className="text-emerald-700 bg-emerald-50 border-emerald-200 flex items-center gap-2 px-3 py-1 rounded-full border">
+                <CheckCircle className="h-4 w-4" /> חשבונית זו אושרה
+              </span>
+            )}
+            {isRejected && (
+              <span className="text-rose-700 bg-rose-50 border-rose-200 flex items-center gap-2 px-3 py-1 rounded-full border">
+                <XCircle className="h-4 w-4" /> חשבונית זו לא אושרה
+              </span>
+            )}
+            {invoice.status === 'exported' && (
+              <span className="text-slate-600 bg-slate-50 border-slate-200 flex items-center gap-2 px-3 py-1 rounded-full border">
+                <CheckCircle className="h-4 w-4" /> חשבונית זו כבר יוצאה
+              </span>
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleReject}
+              disabled={saving || rejecting}
+              className="flex-1 py-3 bg-white border border-rose-200 hover:bg-rose-50 text-rose-700 font-semibold text-sm rounded-xl transition-colors disabled:opacity-60 flex items-center justify-center gap-2 shadow-sm"
+            >
+              {rejecting ? 'פוסל...' : 'לא מאושר'}
+            </button>
+            <button
+              onClick={handleApprove}
+              disabled={saving || rejecting || mathError}
+              className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm rounded-xl shadow-sm transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
+            >
+              {saving ? 'מאשר...' : 'אשר חשבונית'}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -343,7 +406,7 @@ function Field({ label, error, fieldKey, onFieldFocus, badge, children }: {
       onMouseLeave={() => onFieldFocus?.(null)}
     >
       <div className="flex items-center justify-between mb-1.5">
-        <label className={clsx('text-sm font-medium', error ? 'text-red-600' : 'text-slate-700')}>
+        <label className={clsx('text-sm font-semibold', error ? 'text-red-600' : 'text-slate-700')}>
           {label}{error && <span className="text-red-500 mr-0.5">*</span>}
         </label>
         {badge}

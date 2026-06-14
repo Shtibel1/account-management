@@ -239,7 +239,16 @@ export default function ReviewDetailPage() {
 
       {/* Split pane */}
       <div className="flex-1 grid grid-cols-2 gap-4 min-h-0">
-        {/* Left — document viewer */}
+        {/* Right — validation form (places it on the right side in RTL) */}
+        <div className="card overflow-hidden">
+          <ValidationForm
+            invoice={invoice}
+            onApproved={load}
+            onFieldFocus={hasBboxes ? setActiveField : undefined}
+          />
+        </div>
+
+        {/* Left — document viewer (places it on the left side in RTL) */}
         <div className="card overflow-hidden flex flex-col">
           <div className="px-4 py-3 border-b border-slate-100 bg-slate-50 text-sm font-medium text-slate-700 flex items-center justify-between">
             <span>מסמך מקורי</span>
@@ -266,15 +275,6 @@ export default function ReviewDetailPage() {
               yOffset={yOffset}
             />
           </div>
-        </div>
-
-        {/* Right — validation form */}
-        <div className="card overflow-hidden">
-          <ValidationForm
-            invoice={invoice}
-            onApproved={load}
-            onFieldFocus={hasBboxes ? setActiveField : undefined}
-          />
         </div>
       </div>
 

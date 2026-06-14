@@ -153,10 +153,11 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
           >
             <option value="all">כל הסטטוסים</option>
             <option value="processing">מעבד...</option>
-            <option value="review">מוכן לבדיקה</option>
+            <option value="review">לבדיקה</option>
             <option value="approved">אושר</option>
+            <option value="rejected">לא אושר</option>
             <option value="exported">יוצא</option>
-            <option value="error">שגיאה</option>
+            <option value="error">חריג</option>
           </select>
         </div>
 
