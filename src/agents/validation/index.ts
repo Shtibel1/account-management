@@ -1,5 +1,6 @@
 import type { ExtractedData, TenantRules, ValidationResult } from '@/shared/types';
 import { supabase } from '@/lib/supabase';
+import { searchVatIdByName } from '@/utils/businessLookup';
 
 const REQUIRED_FIELDS: (keyof ExtractedData)[] = [
   'supplier_name',
@@ -92,7 +93,12 @@ export async function validateInvoice(
   const warnings = [...edgeWarnings];
 
   // 1.5 Fetch mapping if supplier name is known to override/fill the VAT ID
+  const invoiceVatId = data.supplier_vat_id || null;
+  let supplierTableVatId: string | null = null;
+  let webSearchVatId: string | null = null;
+
   if (corrected.supplier_name) {
+    // 1.5.1 Supplier Table Lookup
     try {
       const { data: mapping, error: mappingErr } = await supabase
         .from('account_mappings')
@@ -103,15 +109,31 @@ export async function validateInvoice(
         .maybeSingle();
 
       if (!mappingErr && mapping && mapping.vat_id) {
-        if (corrected.supplier_vat_id !== mapping.vat_id) {
-          console.log(`[Validation] Correcting supplier_vat_id for "${corrected.supplier_name}" from "${corrected.supplier_vat_id}" to "${mapping.vat_id}" based on account mapping.`);
-          corrected.supplier_vat_id = mapping.vat_id;
-          warnings.push(`מספר ח.פ./עוסק מורשה עודכן אוטומטית ל-${mapping.vat_id} לפי הגדרות הספק המוכר`);
-        }
+        supplierTableVatId = mapping.vat_id;
       }
     } catch (err) {
       console.error('Failed to query account_mappings for supplier VAT ID fallback:', err);
     }
+
+    // 1.5.2 Web Search Lookup
+    try {
+      webSearchVatId = await searchVatIdByName(corrected.supplier_name);
+    } catch (err) {
+      console.error('Failed to search web for supplier VAT ID:', err);
+    }
+  }
+
+  // Apply hierarchy to set the supplier_vat_id
+  if (supplierTableVatId) {
+    if (corrected.supplier_vat_id !== supplierTableVatId) {
+      console.log(`[Validation] Correcting supplier_vat_id for "${corrected.supplier_name}" from "${corrected.supplier_vat_id}" to "${supplierTableVatId}" based on account mapping.`);
+      corrected.supplier_vat_id = supplierTableVatId;
+      warnings.push(`מספר ח.פ./עוסק מורשה עודכן אוטומטית ל-${supplierTableVatId} לפי הגדרות הספק המוכר`);
+    }
+  } else if (!corrected.supplier_vat_id && webSearchVatId) {
+    console.log(`[Validation] Correcting supplier_vat_id for "${corrected.supplier_name}" to "${webSearchVatId}" based on web search.`);
+    corrected.supplier_vat_id = webSearchVatId;
+    warnings.push(`מספר ח.פ./עוסק מורשה עודכן אוטומטית ל-${webSearchVatId} לפי חיפוש באינטרנט`);
   }
 
   // 2. Perform baseline structural checks
@@ -197,6 +219,11 @@ export async function validateInvoice(
     warnings,
     requires_manual_review: requiresManualReview,
     not_an_invoice: notAnInvoice,
+    vat_id_sources: {
+      invoice: invoiceVatId,
+      supplier_table: supplierTableVatId,
+      web_search: webSearchVatId,
+    },
   };
 
   return {

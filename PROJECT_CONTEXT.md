@@ -89,4 +89,4 @@ Make sure the following environment variables are present in `.env.local`:
 
 ## 🤖 AI Agent Protocol & Operational Rules
 1. **Self-Documenting Updates:** After any code change, feature addition, or architectural refactor, the agent **MUST** update this `PROJECT_CONTEXT.md` file if there are any new directories, rules, tech stack additions, or flow modifications. Keep this document up-to-date and accurate.
-2. **Auto-Git Push:** Once a task is completed, fully verified, and the user's requirements are met, the agent **MUST** commit all changes and push them to GitHub.
+2. **Auto-Git Push & Versioning:** Once a task is completed, fully verified, and the user's requirements are met, the agent **MUST** run `npm run bump-version` to bump the project patch version and update the UI version display. After bumping, the agent must commit all changes (including the version files) and push them to GitHub.

@@ -4,7 +4,25 @@ import { useEffect, useState, useRef } from 'react';
 import { createClient } from '@/utils/supabase/client';
 import { AccountMapping, Client, MappingType } from '@/shared/types';
 import { Button } from '@/components/ui/Button';
-import { Plus, Trash2, Info, Upload, Loader2 } from 'lucide-react';
+import { Plus, Trash2, Info, Upload, Loader2, X, ChevronLeft, ChevronRight } from 'lucide-react';
+
+function getPageNumbers(currentPage: number, totalPages: number) {
+  const pages: (number | string)[] = [];
+  if (totalPages <= 5) {
+    for (let i = 1; i <= totalPages; i++) {
+      pages.push(i);
+    }
+  } else {
+    if (currentPage <= 3) {
+      pages.push(1, 2, 3, 4, '...', totalPages);
+    } else if (currentPage >= totalPages - 2) {
+      pages.push(1, '...', totalPages - 3, totalPages - 2, totalPages - 1, totalPages);
+    } else {
+      pages.push(1, '...', currentPage - 1, currentPage, currentPage + 1, '...', totalPages);
+    }
+  }
+  return pages;
+}
 
 export default function MappingsPage() {
   const supabase = createClient();
@@ -27,6 +45,14 @@ export default function MappingsPage() {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState('');
   const [categories, setCategories] = useState<string[]>([]);
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const ITEMS_PER_PAGE = 10;
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, selectedClient]);
 
   useEffect(() => {
     supabase.from('clients').select('*').order('name').then(({ data }) => {
@@ -239,6 +265,26 @@ export default function MappingsPage() {
   const supplierMappings = mappings.filter((m) => m.mapping_type === 'supplier');
   const categoryMappings = mappings.filter((m) => m.mapping_type === 'category');
 
+  // Filter supplier mappings by search query
+  const filteredSuppliers = supplierMappings.filter((m) => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase().trim();
+    return (
+      m.key.toLowerCase().includes(q) ||
+      (m.supplier_number && m.supplier_number.toLowerCase().includes(q)) ||
+      (m.vat_id && m.vat_id.toLowerCase().includes(q)) ||
+      (m.account_code && m.account_code.toLowerCase().includes(q)) ||
+      (m.expense_category && m.expense_category.toLowerCase().includes(q))
+    );
+  });
+
+  const totalItems = filteredSuppliers.length;
+  const totalPages = Math.ceil(totalItems / ITEMS_PER_PAGE);
+  const safeCurrentPage = Math.min(currentPage, Math.max(1, totalPages));
+  const startIndex = (safeCurrentPage - 1) * ITEMS_PER_PAGE;
+  const endIndex = startIndex + ITEMS_PER_PAGE;
+  const paginatedSuppliers = filteredSuppliers.slice(startIndex, endIndex);
+
   return (
     <div className="space-y-6 max-w-5xl">
       {/* Header */}
@@ -374,9 +420,30 @@ export default function MappingsPage() {
       <div className="space-y-6">
         {/* Suppliers Table */}
         <div className="card overflow-hidden">
-          <div className="px-4 py-3.5 border-b border-slate-100 bg-slate-50/50">
-            <p className="font-semibold text-slate-900">ספקים</p>
-            <p className="text-xs text-slate-500 mt-0.5">פרטי ספקים ומיפוי כרטיסים</p>
+          <div className="px-4 py-3.5 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3" style={{ direction: 'rtl' }}>
+            <div>
+              <p className="font-semibold text-slate-900">ספקים</p>
+              <p className="text-xs text-slate-500 mt-0.5">פרטי ספקים ומיפוי כרטיסים</p>
+            </div>
+            
+            {/* Search Input */}
+            <div className="relative w-full sm:w-64">
+              <input
+                type="text"
+                placeholder="חיפוש ספק, ח.פ., קוד..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full text-sm border border-slate-200 rounded-lg bg-white pl-8 pr-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-right font-medium"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="absolute inset-y-0 left-2.5 flex items-center text-slate-400 hover:text-slate-600"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
           </div>
           <table className="w-full text-sm text-right">
             <thead>
@@ -390,7 +457,7 @@ export default function MappingsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {supplierMappings.map((m) => (
+              {paginatedSuppliers.map((m) => (
                 <tr key={m.id} className="hover:bg-slate-50/60 transition-colors group">
                   <td className="px-4 py-3 text-slate-900 font-medium">{m.key}</td>
                   <td className="px-4 py-3 text-slate-600 font-mono">{m.supplier_number || '-'}</td>
@@ -415,15 +482,99 @@ export default function MappingsPage() {
                   </td>
                 </tr>
               ))}
-              {supplierMappings.length === 0 && (
+              {paginatedSuppliers.length === 0 && (
                 <tr>
                   <td colSpan={6} className="px-4 py-12 text-center text-slate-400">
-                    אין מיפוי ספקים מוגדר
+                    {searchQuery ? 'לא נמצאו ספקים העונים לחיפוש' : 'אין מיפוי ספקים מוגדר'}
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
+
+          {/* Pagination controls */}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between border-t border-slate-200 bg-white px-4 py-3 sm:px-6" style={{ direction: 'rtl' }}>
+              {/* Mobile layout */}
+              <div className="flex flex-1 justify-between sm:hidden">
+                <button
+                  onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
+                  disabled={safeCurrentPage === 1}
+                  className="relative inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  הקודם
+                </button>
+                <button
+                  onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
+                  disabled={safeCurrentPage === totalPages}
+                  className="relative ml-3 inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  הבא
+                </button>
+              </div>
+
+              {/* Desktop layout */}
+              <div className="hidden sm:flex sm:flex-1 sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm text-slate-700 gap-1 flex items-center">
+                    מציג
+                    <span className="font-semibold">{startIndex + 1}</span>
+                    עד
+                    <span className="font-semibold">{Math.min(endIndex, totalItems)}</span>
+                    מתוך
+                    <span className="font-semibold">{totalItems}</span>
+                    תוצאות
+                  </p>
+                </div>
+                <div>
+                  <nav className="isolate inline-flex -space-x-px rounded-md shadow-sm gap-1" aria-label="Pagination">
+                    <button
+                      onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
+                      disabled={safeCurrentPage === 1}
+                      className="relative inline-flex items-center rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:bg-slate-50 focus:z-20 focus:outline-offset-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      <span className="sr-only">הקודם</span>
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                    {/* Page numbers */}
+                    {getPageNumbers(safeCurrentPage, totalPages).map((page, index) => {
+                      if (page === '...') {
+                        return (
+                          <span
+                            key={`ellipsis-${index}`}
+                            className="relative inline-flex items-center px-3 py-2 text-sm font-semibold text-slate-500 focus:outline-offset-0"
+                          >
+                            ...
+                          </span>
+                        );
+                      }
+                      return (
+                        <button
+                          key={page}
+                          onClick={() => setCurrentPage(page as number)}
+                          className={`relative inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold transition-all ${
+                            safeCurrentPage === page
+                              ? 'bg-blue-600 text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600'
+                              : 'text-slate-900 border border-slate-200 bg-white hover:bg-slate-50 focus:outline-offset-0'
+                          }`}
+                        >
+                          {page}
+                        </button>
+                      );
+                    })}
+                    <button
+                      onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
+                      disabled={safeCurrentPage === totalPages}
+                      className="relative inline-flex items-center rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:bg-slate-50 focus:z-20 focus:outline-offset-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      <span className="sr-only">הבא</span>
+                      <ChevronLeft className="h-4 w-4" />
+                    </button>
+                  </nav>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Expense Categories Table */}

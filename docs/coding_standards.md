@@ -83,6 +83,7 @@ All commit messages must follow the [Conventional Commits](https://www.conventio
 
 ### 4. Automatic Push to GitHub
 - Once the implementation is complete, linted, type-checked, and manual verification is successful:
-  1. Stage the files (`git add .`).
-  2. Commit with a conventional commit message (`git commit -m "..."`).
-  3. Push to origin (`git push origin main` or current working branch).
+  1. Run `npm run bump-version` to increment the patch version and update `src/shared/version.json` and `package.json`.
+  2. Stage the files including the version changes (`git add .`).
+  3. Commit with a conventional commit message (`git commit -m "..."`).
+  4. Push to origin (`git push origin main` or current working branch).

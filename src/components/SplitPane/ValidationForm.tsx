@@ -32,6 +32,12 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const [supplierCode, setSupplierCode] = useState('');
   const [categoryCode, setCategoryCode] = useState('');
 
+  const [webSearchVat, setWebSearchVat] = useState<string | null>(
+    initial?.validation_flags?.vat_id_sources?.web_search ?? null
+  );
+  const [isSearchingWeb, setIsSearchingWeb] = useState(false);
+  const [showVatDetails, setShowVatDetails] = useState(false);
+
   useEffect(() => {
     if (!invoice.client_id) return;
 
@@ -77,6 +83,47 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
       });
     }
   }, [data.supplier_name, dbMappings]);
+
+  // Dynamic Gov.il API search on supplier name change (with debounce)
+  useEffect(() => {
+    if (!data.supplier_name || data.supplier_name.trim().length < 2) {
+      setWebSearchVat(null);
+      return;
+    }
+
+    if (data.supplier_name === initial?.supplier_name) {
+      setWebSearchVat(initial?.validation_flags?.vat_id_sources?.web_search ?? null);
+      return;
+    }
+
+    setIsSearchingWeb(true);
+    const delayDebounce = setTimeout(() => {
+      fetch(`/api/suppliers/search-vat?name=${encodeURIComponent(data.supplier_name!)}`)
+        .then((res) => {
+          if (!res.ok) throw new Error('API request failed');
+          return res.json();
+        })
+        .then((resData) => {
+          setWebSearchVat(resData.vatId || null);
+        })
+        .catch((err) => {
+          console.error('Failed to search VAT ID for name:', err);
+          setWebSearchVat(null);
+        })
+        .finally(() => {
+          setIsSearchingWeb(false);
+        });
+    }, 600);
+
+    return () => clearTimeout(delayDebounce);
+  }, [data.supplier_name, initial?.supplier_name, initial?.validation_flags?.vat_id_sources?.web_search]);
+
+  // Autofill VAT ID if web search finds a result and the field is currently blank
+  useEffect(() => {
+    if (webSearchVat && !data.supplier_vat_id) {
+      setData((prev) => ({ ...prev, supplier_vat_id: webSearchVat }));
+    }
+  }, [webSearchVat, data.supplier_vat_id]);
 
   const supplierStatus: SupplierStatus = supplierMappingKeys === null
     ? 'loading'
@@ -248,6 +295,111 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
           {!(flags?.vat_id_ok ?? true) && (
             <p className="text-xs text-red-600 mt-1">מספר עוסק לא תקין (חייב להיות 9 ספרות)</p>
           )}
+
+          {/* Composed VAT ID Sources Feedback Indicator */}
+          {(() => {
+            const hasInvoiceVat = !!invoice.extracted_data?.supplier_vat_id;
+            const matchingMapping = dbMappings.find(
+              (m) => m.mapping_type === 'supplier' && m.key === data.supplier_name
+            );
+            const tableVatId = matchingMapping?.vat_id || null;
+            const hasTableVat = !!tableVatId;
+            const hasWebSearchVat = !!webSearchVat;
+
+            return (
+              <div className="mt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowVatDetails(!showVatDetails)}
+                  className="flex items-center gap-2 px-3 py-1 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-full text-xs text-slate-600 transition-colors shadow-sm focus:outline-none"
+                >
+                  <span className="font-medium">מקורות זיהוי ח.פ:</span>
+                  <div className="flex gap-1.5 items-center">
+                    {/* Dot 1: Invoice */}
+                    <span
+                      className={clsx(
+                        "w-2 h-2 rounded-full transition-colors",
+                        hasInvoiceVat ? "bg-emerald-500" : "bg-rose-500"
+                      )}
+                      title="זיהוי מהחשבונית עצמה"
+                    />
+                    {/* Dot 2: Supplier Table */}
+                    <span
+                      className={clsx(
+                        "w-2 h-2 rounded-full transition-colors",
+                        hasTableVat ? "bg-emerald-500" : "bg-rose-500"
+                      )}
+                      title="זיהוי מטבלת הספקים"
+                    />
+                    {/* Dot 3: Web Search */}
+                    <span
+                      className={clsx(
+                        "w-2 h-2 rounded-full transition-colors",
+                        hasWebSearchVat ? "bg-emerald-500" : "bg-rose-500"
+                      )}
+                      title="חיפוש באינטרנט"
+                    />
+                  </div>
+                </button>
+
+                {/* Expanded details list */}
+                {showVatDetails && (
+                  <div className="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2 text-xs text-slate-700 animate-in slide-in-from-top-2 duration-200">
+                    <div className="flex items-center justify-between font-semibold text-slate-500 pb-1.5 border-b border-slate-200/60">
+                      <span>מקור זיהוי</span>
+                      <span>סטטוס / ערך</span>
+                    </div>
+
+                    {/* Invoice detail row */}
+                    <div className="flex items-center justify-between pt-1">
+                      <span className="flex items-center gap-1.5">
+                        <span className={clsx("w-2 h-2 rounded-full", hasInvoiceVat ? "bg-emerald-500" : "bg-rose-500")} />
+                        זיהוי מהחשבונית עצמה:
+                      </span>
+                      <span className="font-mono font-medium">
+                        {hasInvoiceVat ? invoice.extracted_data?.supplier_vat_id : "לא נמצא"}
+                      </span>
+                    </div>
+
+                    {/* Supplier table detail row */}
+                    <div className="flex items-center justify-between pt-1 border-t border-slate-200/40">
+                      <span className="flex items-center gap-1.5">
+                        <span className={clsx("w-2 h-2 rounded-full", hasTableVat ? "bg-emerald-500" : "bg-rose-500")} />
+                        זיהוי מטבלת ספקים:
+                      </span>
+                      <span className="font-mono font-medium flex items-center gap-1">
+                        {hasTableVat ? (
+                          <>
+                            {tableVatId}
+                            <span className="text-[10px] text-emerald-600 bg-emerald-50 border border-emerald-200 px-1 py-0.2 rounded font-normal">מוגדר</span>
+                          </>
+                        ) : (
+                          "לא מוגדר במערכת"
+                        )}
+                      </span>
+                    </div>
+
+                    {/* Web search detail row */}
+                    <div className="flex items-center justify-between pt-1 border-t border-slate-200/40">
+                      <span className="flex items-center gap-1.5">
+                        <span className={clsx("w-2 h-2 rounded-full", hasWebSearchVat ? "bg-emerald-500" : "bg-rose-500")} />
+                        חיפוש באינטרנט לפי שם:
+                      </span>
+                      <span className="font-mono font-medium">
+                        {isSearchingWeb ? (
+                          <span className="text-slate-400 animate-pulse">מחפש...</span>
+                        ) : hasWebSearchVat ? (
+                          webSearchVat
+                        ) : (
+                          "לא נמצא בחיפוש"
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </Field>
 
         <div className="grid grid-cols-2 gap-3">

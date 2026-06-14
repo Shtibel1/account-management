@@ -41,6 +41,12 @@ export interface TenantRules {
   duplicateInvoiceCheck: boolean;
 }
 
+export interface VatIdSources {
+  invoice: string | null;
+  supplier_table: string | null;
+  web_search: string | null;
+}
+
 export interface ValidationResult {
   math_ok: boolean;
   vat_id_ok: boolean;
@@ -50,6 +56,7 @@ export interface ValidationResult {
   warnings: string[];
   requires_manual_review: boolean;
   not_an_invoice?: boolean;
+  vat_id_sources?: VatIdSources;
 }
 
 export interface Client {

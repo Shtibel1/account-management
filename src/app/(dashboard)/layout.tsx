@@ -7,6 +7,7 @@ import { Logo } from '@/components/ui/Logo';
 import {
   Upload, ClipboardCheck, Users, BookOpen, LayoutDashboard,
 } from 'lucide-react';
+import versionData from '@/shared/version.json';
 
 const navItems = [
   { href: '/clients',  label: 'לקוחות',          icon: Users },
@@ -46,7 +47,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         {/* Footer */}
         <div className="px-5 py-4 border-t border-white/10">
-          <p className="text-xs text-slate-500">גרסה 1.0 · {new Date().getFullYear()}</p>
+          <p className="text-xs text-slate-500">גרסה {versionData.version} · {new Date().getFullYear()}</p>
         </div>
       </aside>
 
