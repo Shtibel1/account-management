@@ -32,6 +32,7 @@ function findExactBbox(value: string | number | null, ocrWords: OcrWord[]): Fiel
       y1: Math.min(...ys),
       x2: Math.max(...xs),
       y2: Math.max(...ys),
+      page: singleMatches[0].page,
     };
   }
 
@@ -57,6 +58,7 @@ function findExactBbox(value: string | number | null, ocrWords: OcrWord[]): Fiel
           y1: Math.min(...ys),
           x2: Math.max(...xs),
           y2: Math.max(...ys),
+          page: matchedSequence[0].page,
         };
       }
     }

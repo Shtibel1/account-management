@@ -2,7 +2,14 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { BboxMap, FieldBbox } from '@/shared/types';
-import clsx from 'clsx';
+import { Document, Page, pdfjs } from 'react-pdf';
+
+// Import react-pdf styles for correct page layouts
+import 'react-pdf/dist/Page/AnnotationLayer.css';
+import 'react-pdf/dist/Page/TextLayer.css';
+
+// Configure pdfjs worker to run on client
+pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 const FIELD_COLORS: Record<string, string> = {
   supplier_name:     '#3b82f6', // blue
@@ -24,37 +31,85 @@ interface Props {
 }
 
 export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0 }: Props) {
-  const imgRef = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [imgSize, setImgSize] = useState({ w: 0, h: 0 });
+  const [numPages, setNumPages] = useState<number | null>(null);
+  const [pageSizes, setPageSizes] = useState<Record<number, { w: number; h: number }>>({});
+  
+  const pageRefs = useRef<Record<number, HTMLElement | null>>({});
+  const observers = useRef<Record<number, ResizeObserver>>({});
+
   const isPdf = fileUrl.toLowerCase().includes('.pdf') || fileUrl.includes('content-type=application%2Fpdf');
 
+  // Set up resize observer for each page or image to get layout dimensions
+  const setPageRef = (pageNumber: number) => (el: HTMLElement | null) => {
+    pageRefs.current[pageNumber] = el;
+    
+    // Clean up existing observer for this page
+    if (observers.current[pageNumber]) {
+      observers.current[pageNumber].disconnect();
+      delete observers.current[pageNumber];
+    }
+
+    if (!el) {
+      setPageSizes((prev) => {
+        const next = { ...prev };
+        delete next[pageNumber];
+        return next;
+      });
+      return;
+    }
+
+    const updateSize = () => {
+      setPageSizes((prev) => {
+        if (prev[pageNumber]?.w === el.offsetWidth && prev[pageNumber]?.h === el.offsetHeight) {
+          return prev;
+        }
+        return {
+          ...prev,
+          [pageNumber]: { w: el.offsetWidth, h: el.offsetHeight },
+        };
+      });
+    };
+
+    updateSize();
+    const ro = new ResizeObserver(updateSize);
+    ro.observe(el);
+    observers.current[pageNumber] = ro;
+  };
+
+  // Cleanup observers on unmount
   useEffect(() => {
-    const img = imgRef.current;
-    if (!img) return;
-    const update = () => setImgSize({ w: img.offsetWidth, h: img.offsetHeight });
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(img);
-    return () => ro.disconnect();
+    return () => {
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      Object.values(observers.current).forEach((ro) => ro.disconnect());
+    };
   }, []);
 
   // Auto-scroll to center the active highlighted field in the viewport
   useEffect(() => {
-    if (!activeField || !bboxes || imgSize.h === 0) return;
+    if (!activeField || !bboxes) return;
     const b = bboxes[activeField as keyof BboxMap];
     if (!b) return;
 
     const container = containerRef.current;
     if (!container) return;
 
-    // Calculate vertical position of bounding box on image
-    const y1 = (b.y1 + yOffset) * imgSize.h;
-    const y2 = (b.y2 + yOffset) * imgSize.h;
+    const pageNum = b.page ?? 1;
+    const pageElement = pageRefs.current[pageNum];
+    const size = pageSizes[pageNum];
+    if (!pageElement || !size || size.h === 0) return;
+
+    const rect = pageElement.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const elementTop = rect.top - containerRect.top + container.scrollTop;
+
+    // Calculate vertical position of bounding box on the page/image
+    const y1 = (b.y1 + yOffset) * size.h;
+    const y2 = (b.y2 + yOffset) * size.h;
     const fieldCenter = (y1 + y2) / 2;
 
-    // Add padding (p-2 is 8px)
-    const absoluteCenter = fieldCenter + 8;
+    // Absolute center in the scroll container
+    const absoluteCenter = elementTop + fieldCenter;
 
     // Center in the container viewport
     const containerHeight = container.clientHeight;
@@ -64,10 +119,14 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
       top: Math.max(0, targetScrollTop),
       behavior: 'smooth',
     });
-  }, [activeField, bboxes, imgSize.h, yOffset]);
+  }, [activeField, bboxes, pageSizes, yOffset]);
 
-  const renderOverlay = () => {
-    if (!bboxes || imgSize.w === 0) return null;
+  const onDocumentLoadSuccess = ({ numPages }: { numPages: number }) => {
+    setNumPages(numPages);
+  };
+
+  const renderOverlayForPage = (pageNum: number, size: { w: number; h: number }) => {
+    if (!bboxes || size.w === 0) return null;
 
     const fieldsToShow = activeField
       ? ([activeField] as (keyof BboxMap)[])
@@ -78,18 +137,23 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
     return (
       <svg
         className="absolute inset-0 pointer-events-none"
-        width={imgSize.w}
-        height={imgSize.h}
+        width={size.w}
+        height={size.h}
         style={{ top: 0, left: 0, direction: 'ltr' }}
       >
         {fieldsToShow.map((field) => {
           const b = bboxes[field] as FieldBbox | undefined;
           if (!b) return null;
+
+          // Default to page 1 for legacy bboxes
+          const bboxPage = b.page ?? 1;
+          if (bboxPage !== pageNum) return null;
+
           const color = FIELD_COLORS[field] ?? '#6b7280';
-          const x = b.x1 * imgSize.w;
-          const y = (b.y1 + yOffset) * imgSize.h;
-          const w = (b.x2 - b.x1) * imgSize.w;
-          const h = (b.y2 - b.y1) * imgSize.h;
+          const x = b.x1 * size.w;
+          const y = (b.y1 + yOffset) * size.h;
+          const w = (b.x2 - b.x1) * size.w;
+          const h = (b.y2 - b.y1) * size.h;
           const isActive = field === activeField;
 
           return (
@@ -114,23 +178,50 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
     <div
       ref={containerRef}
       dir="ltr"
-      className="relative w-full h-full overflow-auto bg-gray-100 flex items-start justify-center p-2"
+      className="relative w-full h-full overflow-auto bg-gray-100 flex flex-col items-center p-4 gap-4"
       style={{ direction: 'ltr' }}
     >
       {isPdf ? (
-        <iframe src={fileUrl} className="w-full h-full rounded" title="חשבונית" />
+        <Document
+          file={fileUrl}
+          onLoadSuccess={onDocumentLoadSuccess}
+          loading={<div className="text-slate-400 py-4 text-center">טוען קובץ PDF...</div>}
+          error={<div className="text-rose-500 py-4 text-center">שגיאה בטעינת קובץ ה-PDF</div>}
+          className="flex flex-col items-center gap-4 w-full"
+        >
+          {Array.from(new Array(numPages ?? 0), (el, index) => {
+            const pageNum = index + 1;
+            const pageSize = pageSizes[pageNum] || { w: 0, h: 0 };
+            return (
+              <div
+                key={pageNum}
+                className="relative bg-white shadow-md border border-slate-200 rounded max-w-full"
+                dir="ltr"
+                style={{ direction: 'ltr' }}
+              >
+                <Page
+                  pageNumber={pageNum}
+                  renderTextLayer={false}
+                  renderAnnotationLayer={false}
+                  canvasRef={setPageRef(pageNum)}
+                  className="max-w-full h-auto"
+                />
+                {renderOverlayForPage(pageNum, pageSize)}
+              </div>
+            );
+          })}
+        </Document>
       ) : (
-        <div className="relative inline-block" dir="ltr" style={{ direction: 'ltr' }}>
+        <div className="relative inline-block bg-white shadow-md border border-slate-200 rounded max-w-full" dir="ltr" style={{ direction: 'ltr' }}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          {/* block מסיר את ה-baseline gap של inline images */}
           <img
-            ref={imgRef}
+            ref={setPageRef(1)}
             src={fileUrl}
             alt="חשבונית מקורית"
-            className="block max-w-full h-auto rounded shadow-sm select-none"
+            className="block max-w-full h-auto rounded select-none"
             draggable={false}
           />
-          {renderOverlay()}
+          {renderOverlayForPage(1, pageSizes[1] || { w: 0, h: 0 })}
         </div>
       )}
     </div>

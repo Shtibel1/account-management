@@ -2,13 +2,22 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import dynamic from 'next/dynamic';
 import { createClient } from '@/utils/supabase/client';
 import { Invoice } from '@/shared/types';
 import { ValidationForm } from '@/components/SplitPane/ValidationForm';
-import { ImageViewer } from '@/components/SplitPane/ImageViewer';
 import { ArrowRight, Loader2, Eye, EyeOff, SlidersHorizontal, Scissors } from 'lucide-react';
 import { splitInvoice } from '@/lib/api';
 import { useToast } from '@/components/ui/Toast';
+
+const ImageViewer = dynamic(() => import('@/components/SplitPane/ImageViewer').then((m) => m.ImageViewer), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center h-full text-slate-400">
+      טוען מציג מסמכים...
+    </div>
+  ),
+});
 
 interface SplitRange {
   startPage: number;

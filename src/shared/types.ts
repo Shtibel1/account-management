@@ -7,6 +7,7 @@ export interface FieldBbox {
   y1: number;
   x2: number;
   y2: number;
+  page?: number;
 }
 
 export type BboxMap = Partial<Record<
