@@ -25,6 +25,7 @@ interface Props {
 
 export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0 }: Props) {
   const imgRef = useRef<HTMLImageElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [imgSize, setImgSize] = useState({ w: 0, h: 0 });
   const isPdf = fileUrl.toLowerCase().includes('.pdf') || fileUrl.includes('content-type=application%2Fpdf');
 
@@ -37,6 +38,33 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
     ro.observe(img);
     return () => ro.disconnect();
   }, []);
+
+  // Auto-scroll to center the active highlighted field in the viewport
+  useEffect(() => {
+    if (!activeField || !bboxes || imgSize.h === 0) return;
+    const b = bboxes[activeField as keyof BboxMap];
+    if (!b) return;
+
+    const container = containerRef.current;
+    if (!container) return;
+
+    // Calculate vertical position of bounding box on image
+    const y1 = (b.y1 + yOffset) * imgSize.h;
+    const y2 = (b.y2 + yOffset) * imgSize.h;
+    const fieldCenter = (y1 + y2) / 2;
+
+    // Add padding (p-2 is 8px)
+    const absoluteCenter = fieldCenter + 8;
+
+    // Center in the container viewport
+    const containerHeight = container.clientHeight;
+    const targetScrollTop = absoluteCenter - containerHeight / 2;
+
+    container.scrollTo({
+      top: Math.max(0, targetScrollTop),
+      behavior: 'smooth',
+    });
+  }, [activeField, bboxes, imgSize.h, yOffset]);
 
   const renderOverlay = () => {
     if (!bboxes || imgSize.w === 0) return null;
@@ -83,7 +111,11 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
   };
 
   return (
-    <div className="relative w-full h-full overflow-auto bg-gray-100 flex items-start justify-center p-2" style={{ direction: 'ltr' }}>
+    <div
+      ref={containerRef}
+      className="relative w-full h-full overflow-auto bg-gray-100 flex items-start justify-center p-2"
+      style={{ direction: 'ltr' }}
+    >
       {isPdf ? (
         <iframe src={fileUrl} className="w-full h-full rounded" title="חשבונית" />
       ) : (

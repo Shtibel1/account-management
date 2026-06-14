@@ -1,4 +1,4 @@
-import type { OcrMetadata } from '@/shared/types';
+import type { OcrMetadata, OcrWord } from '@/shared/types';
 import { PDFDocument } from 'pdf-lib';
 import Anthropic from '@anthropic-ai/sdk';
 
@@ -63,11 +63,53 @@ async function detectInvoiceSplits(
   return [{ start_page: 1, end_page: pageTexts.length }];
 }
 
+function extractWordsFromPage(pageRes: any, pageIndex: number): OcrWord[] {
+  const words: OcrWord[] = [];
+  const fullTextAnnotation = pageRes.fullTextAnnotation;
+  if (!fullTextAnnotation?.pages) return words;
+
+  for (const page of fullTextAnnotation.pages) {
+    const pageWidth = page.width || 1;
+    const pageHeight = page.height || 1;
+
+    if (!page.blocks) continue;
+    for (const block of page.blocks) {
+      if (!block.paragraphs) continue;
+      for (const paragraph of block.paragraphs) {
+        if (!paragraph.words) continue;
+        for (const word of paragraph.words) {
+          const text = word.symbols?.map((s: any) => s.text).join('') || '';
+          if (!text) continue;
+
+          const vertices = word.boundingBox?.normalizedVertices || word.boundingBox?.vertices;
+          if (vertices && vertices.length >= 4) {
+            const isNormalized = word.boundingBox?.normalizedVertices !== undefined;
+            const xs = vertices.map((v: any) => v.x ?? 0);
+            const ys = vertices.map((v: any) => v.y ?? 0);
+
+            const x1 = Math.min(...xs) / (isNormalized ? 1 : pageWidth);
+            const y1 = Math.min(...ys) / (isNormalized ? 1 : pageHeight);
+            const x2 = Math.max(...xs) / (isNormalized ? 1 : pageWidth);
+            const y2 = Math.max(...ys) / (isNormalized ? 1 : pageHeight);
+
+            words.push({
+              text,
+              bbox: { x1, y1, x2, y2 },
+              page: pageIndex,
+            });
+          }
+        }
+      }
+    }
+  }
+  return words;
+}
+
 async function runOcrForPageRange(
   base64Data: string,
   apiKey: string,
   pages: number[]
-): Promise<string[]> {
+): Promise<{ pageTexts: string[]; ocrWords: OcrWord[] }> {
   const apiUrl = `https://vision.googleapis.com/v1/files:annotate?key=${apiKey}`;
   const payload = {
     requests: [
@@ -105,12 +147,19 @@ async function runOcrForPageRange(
     throw new Error('Google Cloud Vision returned empty PDF OCR responses for page range');
   }
 
-  return fileResponses.map((pageRes) => {
+  const pageTexts: string[] = [];
+  let ocrWords: OcrWord[] = [];
+
+  fileResponses.forEach((pageRes, idx) => {
     if (pageRes.error) {
       throw new Error(`Google Cloud Vision page OCR error: ${pageRes.error.message}`);
     }
-    return pageRes.fullTextAnnotation?.text || '';
+    pageTexts.push(pageRes.fullTextAnnotation?.text || '');
+    const pageWords = extractWordsFromPage(pageRes, pages[idx] || 1);
+    ocrWords = ocrWords.concat(pageWords);
   });
+
+  return { pageTexts, ocrWords };
 }
 
 export async function preprocessInvoice(
@@ -122,6 +171,7 @@ export async function preprocessInvoice(
   ocrOpCount: number;
   splits?: { start_page: number; end_page: number }[];
   pageTexts?: string[];
+  ocrWords?: OcrWord[];
 }> {
   console.log(`[Preprocessor] 📄 Starting OCR preprocessing for file URL: ${fileUrl} (${mimeType})`);
 
@@ -153,6 +203,7 @@ export async function preprocessInvoice(
   const detectedLanguages = new Set<string>();
   let splits: { start_page: number; end_page: number }[] = [];
   let pageTexts: string[] = [];
+  let ocrWords: OcrWord[] = [];
 
   if (isPdf) {
     console.log(`[Preprocessor] Processing as PDF via files:annotate`);
@@ -168,8 +219,9 @@ export async function preprocessInvoice(
 
     if (pdfPageCount === 0) {
       // Fallback: request first page only to get page count if pdf-lib failed
-      const testTexts = await runOcrForPageRange(base64Data, apiKey, [1]);
-      rawOcrText = testTexts[0] || '';
+      const ocrRes = await runOcrForPageRange(base64Data, apiKey, [1]);
+      rawOcrText = ocrRes.pageTexts[0] || '';
+      ocrWords = ocrRes.ocrWords;
       pageCount = 1;
       splits = [{ start_page: 1, end_page: 1 }];
       pageTexts = [rawOcrText];
@@ -178,7 +230,7 @@ export async function preprocessInvoice(
       console.log(`[Preprocessor] 📊 PDF has ${pdfPageCount} pages. Running page-by-page OCR in batches...`);
 
       // Run OCR in batches of 5 pages in parallel
-      const batchPromises: Promise<string[]>[] = [];
+      const batchPromises: Promise<{ pageTexts: string[]; ocrWords: OcrWord[] }>[] = [];
       const batchSize = 5;
       for (let i = 0; i < pdfPageCount; i += batchSize) {
         const pagesToRequest = [];
@@ -190,7 +242,8 @@ export async function preprocessInvoice(
       }
 
       const batchResults = await Promise.all(batchPromises);
-      const allPageTexts = batchResults.flat();
+      const allPageTexts = batchResults.flatMap((r) => r.pageTexts);
+      ocrWords = batchResults.flatMap((r) => r.ocrWords);
 
       rawOcrText = allPageTexts.join('\n\n');
       pageTexts = allPageTexts;
@@ -247,6 +300,10 @@ export async function preprocessInvoice(
       const annotation = imageResponse.fullTextAnnotation;
       if (annotation) {
         rawOcrText = annotation.text || '';
+        
+        // Extract words from image fullTextAnnotation
+        ocrWords = extractWordsFromPage(imageResponse, 1);
+
         if (annotation.pages) {
           pageCount = annotation.pages.length;
           let totalConfidence = 0;
@@ -293,5 +350,6 @@ export async function preprocessInvoice(
     ocrOpCount: Math.ceil(pageCount / 5),
     splits,
     pageTexts,
+    ocrWords,
   };
 }

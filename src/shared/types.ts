@@ -116,6 +116,12 @@ export interface OcrMetadata {
   confidence: number;
 }
 
+export interface OcrWord {
+  text: string;
+  bbox: { x1: number; y1: number; x2: number; y2: number };
+  page: number;
+}
+
 export interface CostMetrics {
   ocrOpCount: number;
   inputTokens: number;
@@ -132,6 +138,7 @@ export interface PipelineState {
   tenantRules: TenantRules | null;
   rawOcrText: string | null;
   ocrMetadata: OcrMetadata | null;
+  ocrWords?: OcrWord[];
   extractedData: ExtractedData | null;
   validationResult: ValidationResult | null;
   retryCount: number;

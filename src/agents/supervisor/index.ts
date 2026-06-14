@@ -1,11 +1,100 @@
 import { StateGraph, END, MemorySaver } from '@langchain/langgraph';
-import type { PipelineState, TenantRules, ExtractedData } from '@/shared/types';
+import type { PipelineState, TenantRules, ExtractedData, OcrWord, BboxMap, FieldBbox } from '@/shared/types';
 import { preprocessInvoice } from '../preprocessor';
 import { extractInvoiceData } from '../extraction';
 import { validateInvoice } from '../validation';
 import { approvalNode } from '../approval';
 import { supabase } from '@/lib/supabase';
 import { PDFDocument } from 'pdf-lib';
+
+function cleanTextForMatching(text: string): string {
+  return text
+    .replace(/[^a-zA-Z0-9א-ת]/g, '')
+    .trim();
+}
+
+function findExactBbox(value: string | number | null, ocrWords: OcrWord[]): FieldBbox | undefined {
+  if (value == null) return undefined;
+  const targetStr = String(value).trim();
+  const cleanedTarget = cleanTextForMatching(targetStr);
+  if (!cleanedTarget) return undefined;
+
+  // 1. First search for exact or partial matches in single words
+  const singleMatches = ocrWords.filter(
+    (w) => cleanTextForMatching(w.text).includes(cleanedTarget) || cleanedTarget.includes(cleanTextForMatching(w.text))
+  );
+
+  if (singleMatches.length > 0) {
+    const xs = singleMatches.flatMap((m) => [m.bbox.x1, m.bbox.x2]);
+    const ys = singleMatches.flatMap((m) => [m.bbox.y1, m.bbox.y2]);
+    return {
+      x1: Math.min(...xs),
+      y1: Math.min(...ys),
+      x2: Math.max(...xs),
+      y2: Math.max(...ys),
+    };
+  }
+
+  // 2. If it's a multi-word value, search for phrase sequence matches
+  const targetTokens = targetStr.split(/\s+/).map(cleanTextForMatching).filter(Boolean);
+  if (targetTokens.length > 1) {
+    for (let i = 0; i <= ocrWords.length - targetTokens.length; i++) {
+      let matchesAll = true;
+      for (let j = 0; j < targetTokens.length; j++) {
+        const ocrClean = cleanTextForMatching(ocrWords[i + j].text);
+        const targetClean = targetTokens[j];
+        if (!ocrClean.includes(targetClean) && !targetClean.includes(ocrClean)) {
+          matchesAll = false;
+          break;
+        }
+      }
+      if (matchesAll) {
+        const matchedSequence = ocrWords.slice(i, i + targetTokens.length);
+        const xs = matchedSequence.flatMap((m) => [m.bbox.x1, m.bbox.x2]);
+        const ys = matchedSequence.flatMap((m) => [m.bbox.y1, m.bbox.y2]);
+        return {
+          x1: Math.min(...xs),
+          y1: Math.min(...ys),
+          x2: Math.max(...xs),
+          y2: Math.max(...ys),
+        };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+export function matchBboxesWithOcr(
+  extractedData: ExtractedData,
+  ocrWords: OcrWord[] | undefined
+): BboxMap {
+  const bboxes: BboxMap = { ...extractedData.bboxes };
+  if (!ocrWords || ocrWords.length === 0) return bboxes;
+
+  const fields: (keyof BboxMap)[] = [
+    'supplier_name',
+    'supplier_vat_id',
+    'invoice_number',
+    'invoice_date',
+    'amount_before_vat',
+    'vat_amount',
+    'total_amount',
+    'expense_category',
+  ];
+
+  for (const field of fields) {
+    const val = extractedData[field];
+    if (val != null) {
+      const match = findExactBbox(val, ocrWords);
+      if (match) {
+        bboxes[field] = match;
+      }
+    }
+  }
+
+  return bboxes;
+}
 
 async function splitPdfBuffer(
   fileBuffer: Buffer,
@@ -138,6 +227,7 @@ const graph = new StateGraph<any>({
     tenantRules:      { value: (a: any, b: any) => b ?? a, default: () => null },
     rawOcrText:       { value: (a: any, b: any) => b ?? a, default: () => null },
     ocrMetadata:      { value: (a: any, b: any) => b ?? a, default: () => null },
+    ocrWords:         { value: (a: any, b: any) => b ?? a, default: () => null },
     extractedData:    { value: (a: any, b: any) => b ?? a, default: () => null },
     validationResult: { value: (a: any, b: any) => b ?? a, default: () => null },
     retryCount:       { value: (a: number, b: number) => b ?? a, default: () => 0 },
@@ -158,7 +248,7 @@ const graph = new StateGraph<any>({
 
   // 2. Preprocess node (Deterministic OCR Extraction)
   .addNode('preprocess', async (state: PipelineState) => {
-    const { rawOcrText, ocrMetadata, ocrOpCount, splits, pageTexts } = await preprocessInvoice(state.fileUrl, state.mimeType);
+    const { rawOcrText, ocrMetadata, ocrOpCount, splits, pageTexts, ocrWords } = await preprocessInvoice(state.fileUrl, state.mimeType);
     const updatedMetrics = {
       ...state.costMetrics,
       ocrOpCount: state.costMetrics.ocrOpCount + ocrOpCount,
@@ -195,6 +285,7 @@ const graph = new StateGraph<any>({
         let primaryFileName = originalFileName;
         let primaryRawOcrText = rawOcrText;
         let primaryOcrMetadata = ocrMetadata;
+        let primaryOcrWords = ocrWords;
 
         const childPromises: Promise<any>[] = [];
 
@@ -237,11 +328,18 @@ const graph = new StateGraph<any>({
             confidence: ocrMetadata?.confidence || 0.95,
           };
 
+          const splitOcrWords = ocrWords
+            ? ocrWords
+                .filter((w) => w.page >= split.start_page && w.page <= split.end_page)
+                .map((w) => ({ ...w, page: w.page - split.start_page + 1 }))
+            : [];
+
           if (idx === 0) {
             primaryFileUrl = splitFileUrl;
             primaryFileName = splitFileName;
             primaryRawOcrText = splitRawOcrText;
             primaryOcrMetadata = splitOcrMetadata;
+            primaryOcrWords = splitOcrWords;
 
             await supabase
               .from('invoices')
@@ -287,6 +385,7 @@ const graph = new StateGraph<any>({
           fileUrl: primaryFileUrl,
           rawOcrText: primaryRawOcrText,
           ocrMetadata: primaryOcrMetadata,
+          ocrWords: primaryOcrWords,
           costMetrics: updatedMetrics,
         };
       } catch (err) {
@@ -297,6 +396,7 @@ const graph = new StateGraph<any>({
     return {
       rawOcrText,
       ocrMetadata,
+      ocrWords,
       costMetrics: updatedMetrics,
     };
   })
@@ -315,6 +415,12 @@ const graph = new StateGraph<any>({
       useVision,
       isRetry
     );
+
+    // Overwrite bounding boxes with coordinates from Google Vision OCR for pixel-perfect accuracy
+    if (extractedData && state.ocrWords && state.ocrWords.length > 0) {
+      console.log('[Supervisor] 🎯 Matching extracted fields with exact Google Vision OCR coordinates...');
+      extractedData.bboxes = matchBboxesWithOcr(extractedData, state.ocrWords);
+    }
 
     const updatedMetrics = {
       ...state.costMetrics,

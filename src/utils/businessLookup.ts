@@ -43,22 +43,42 @@ export async function searchVatIdByName(supplierName: string): Promise<string | 
     );
     
     const clean = (s: string) => 
-      s.replace(/["'׳״()~]|בע.?מ|ע.?ר|בע"מ|בע~מ|למיקוד|בפירוק|LTD|שותפות/gi, '')
+      s.replace(/["'׳״()~,\-\/]|בע.?מ|ע.?ר|בע"מ|בע~מ|למיקוד|בפירוק|LTD|L\.T\.D\.|שותפות|מוגבלת/gi, '')
        .replace(/\s+/g, ' ')
        .trim();
 
-    const cleanQuery = clean(query);
+    const isMatch = (q: string, c: string) => {
+      const cleanQ = clean(q).toLowerCase();
+      const cleanC = clean(c).toLowerCase();
+      if (!cleanQ || !cleanC) return false;
+
+      // 1. Substring matches
+      if (cleanC.includes(cleanQ) || cleanQ.includes(cleanC)) return true;
+
+      // 2. Token overlap matches
+      const wordsQ = cleanQ.split(/\s+/).filter(w => w.length >= 2);
+      const wordsC = cleanC.split(/\s+/).filter(w => w.length >= 2);
+      if (wordsQ.length === 0 || wordsC.length === 0) return false;
+
+      const intersect = wordsQ.filter(w => wordsC.includes(w));
+      const ratio = intersect.length / Math.min(wordsQ.length, wordsC.length);
+      if (ratio >= 0.6) return true;
+
+      // 3. First 2 words match exactly
+      if (wordsQ.length >= 2 && wordsC.length >= 2) {
+        if (wordsQ[0] === wordsC[0] && wordsQ[1] === wordsC[1]) return true;
+      }
+
+      return false;
+    };
 
     // 1. Parse Companies
     const companyRecords = responses[0]?.result?.records || [];
     for (const rec of companyRecords) {
       const name = rec['שם חברה'] || '';
       const num = rec['מספר חברה'];
-      if (name && num) {
-        const cleanName = clean(name);
-        if (cleanName.includes(cleanQuery) || cleanQuery.includes(cleanName)) {
-          return String(num).trim();
-        }
+      if (name && num && isMatch(query, name)) {
+        return String(num).trim();
       }
     }
 
@@ -67,11 +87,8 @@ export async function searchVatIdByName(supplierName: string): Promise<string | 
     for (const rec of partnershipRecords) {
       const name = rec['שם שותפות'] || '';
       const num = rec['מספר שותפות'];
-      if (name && num) {
-        const cleanName = clean(name);
-        if (cleanName.includes(cleanQuery) || cleanQuery.includes(cleanName)) {
-          return String(num).trim();
-        }
+      if (name && num && isMatch(query, name)) {
+        return String(num).trim();
       }
     }
 
@@ -80,11 +97,8 @@ export async function searchVatIdByName(supplierName: string): Promise<string | 
     for (const rec of nonProfitRecords) {
       const name = rec['שם עמותה בעברית'] || '';
       const num = rec['מספר עמותה'];
-      if (name && num) {
-        const cleanName = clean(name);
-        if (cleanName.includes(cleanQuery) || cleanQuery.includes(cleanName)) {
-          return String(num).trim();
-        }
+      if (name && num && isMatch(query, name)) {
+        return String(num).trim();
       }
     }
 
