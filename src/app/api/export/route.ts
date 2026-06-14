@@ -48,12 +48,7 @@ export async function POST(request: Request) {
       const data = inv.validated_data ?? inv.extracted_data;
       if (!data) continue;
 
-      if (
-        data.supplier_name &&
-        !mappings.find((m) => m.mapping_type === 'supplier' && m.key === data.supplier_name)
-      ) {
-        missing.push(`ספק: ${data.supplier_name}`);
-      }
+      // Suppliers now fallback to "ספקים שונים" code 3499 if not mapped, so they are never "missing"
 
       if (
         data.expense_category &&

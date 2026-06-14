@@ -106,6 +106,13 @@ export class MoveinExporter {
   private lookupCode(mappings: AccountMapping[], type: 'supplier' | 'category', key: string | null): string {
     if (!key) return '';
     const m = mappings.find((m) => m.mapping_type === type && m.key === key);
-    return m?.account_code ?? '???';
+    if (m) return m.account_code;
+    
+    // Fallback to "ספקים שונים" with code 3499 if supplier is not mapped
+    if (type === 'supplier') {
+      return '3499';
+    }
+    
+    return '???';
   }
 }

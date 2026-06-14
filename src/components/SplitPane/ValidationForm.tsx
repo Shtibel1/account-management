@@ -175,7 +175,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             <label className="text-xs text-amber-800 shrink-0">קוד חשבון ספק:</label>
             <input
               className="input-base py-1 text-sm font-mono flex-1"
-              placeholder="לדוג׳ 2340 — ריק = ייצוא ייחסם"
+              placeholder="לדוג׳ 2340 — ריק = יקושר ל'ספקים שונים' 3499"
               value={supplierCode}
               onChange={(e) => setSupplierCode(e.target.value)}
             />

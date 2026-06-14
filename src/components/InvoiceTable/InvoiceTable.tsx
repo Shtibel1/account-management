@@ -19,9 +19,19 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
   const [missingMappings, setMissingMappings] = useState<string[] | null>(null);
+  const [clientFilter, setClientFilter] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<string>('all');
   const { toast } = useToast();
 
-  const approved = invoices.filter((i) => i.status === 'approved');
+  const uniqueClientIds = Array.from(new Set(invoices.map((i) => i.client_id)));
+
+  const filteredInvoices = invoices.filter((inv) => {
+    const matchClient = clientFilter === 'all' || inv.client_id === clientFilter;
+    const matchStatus = statusFilter === 'all' || inv.status === statusFilter;
+    return matchClient && matchStatus;
+  });
+
+  const approved = filteredInvoices.filter((i) => i.status === 'approved');
 
   const toggleAll = () =>
     selected.size === approved.length
@@ -112,6 +122,55 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
         </div>
       )}
 
+      {/* Filters bar */}
+      <div className="flex flex-wrap items-center gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200/60 mb-3" style={{ direction: 'rtl' }}>
+        <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">סינון חשבוניות:</span>
+        
+        {/* Client filter */}
+        <div className="flex items-center gap-2">
+          <label className="text-xs font-semibold text-slate-600">לקוח:</label>
+          <select
+            value={clientFilter}
+            onChange={(e) => setClientFilter(e.target.value)}
+            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-w-[140px] text-right font-medium"
+          >
+            <option value="all">כל הלקוחות ({invoices.length})</option>
+            {uniqueClientIds.map((cid) => (
+              <option key={cid} value={cid}>
+                {clients[cid] || cid}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Status filter */}
+        <div className="flex items-center gap-2">
+          <label className="text-xs font-semibold text-slate-600">סטטוס:</label>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-w-[140px] text-right font-medium"
+          >
+            <option value="all">כל הסטטוסים</option>
+            <option value="processing">מעבד...</option>
+            <option value="review">מוכן לבדיקה</option>
+            <option value="approved">אושר</option>
+            <option value="exported">יוצא</option>
+            <option value="error">שגיאה</option>
+          </select>
+        </div>
+
+        {/* Clear filters button */}
+        {(clientFilter !== 'all' || statusFilter !== 'all') && (
+          <button
+            onClick={() => { setClientFilter('all'); setStatusFilter('all'); }}
+            className="text-xs text-blue-600 hover:text-blue-700 underline font-semibold mr-auto"
+          >
+            נקה מסננים
+          </button>
+        )}
+      </div>
+
       {/* Table */}
       <div className="card overflow-hidden">
         <table className="w-full text-sm">
@@ -137,7 +196,14 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {invoices.map((inv) => {
+            {filteredInvoices.length === 0 ? (
+              <tr>
+                <td colSpan={10} className="p-8 text-center text-slate-400 font-medium">
+                  לא נמצאו חשבוניות התואמות את הסינון המבוקש.
+                </td>
+              </tr>
+            ) : (
+              filteredInvoices.map((inv) => {
               const data = inv.validated_data ?? inv.extracted_data;
               const isSelectable = inv.status === 'approved';
               return (
@@ -200,7 +266,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
                   </td>
                 </tr>
               );
-            })}
+            }))}
           </tbody>
         </table>
       </div>
