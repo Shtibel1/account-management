@@ -2,6 +2,24 @@ import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { PDFDocument } from 'pdf-lib';
 
+function sanitizeStorageFilename(fileName: string): string {
+  const lastDot = fileName.lastIndexOf('.');
+  const ext = lastDot !== -1 ? fileName.substring(lastDot) : '';
+  const nameWithoutExt = lastDot !== -1 ? fileName.substring(0, lastDot) : fileName;
+  
+  let sanitized = nameWithoutExt
+    .replace(/[^a-zA-Z0-9-.]/g, '_')
+    .replace(/__+/g, '_')
+    .replace(/--+/g, '-')
+    .replace(/^[_-]+|[_-]+$/g, '');
+    
+  if (!sanitized) {
+    sanitized = Buffer.from(nameWithoutExt).toString('hex').substring(0, 16);
+  }
+  
+  return `${sanitized}${ext}`;
+}
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -65,7 +83,9 @@ export async function POST(
 
       // Upload split file to storage
       const splitFileName = `${nameWithoutExt}_חלק_${idx + 1}${ext}`;
-      const uploadPath = `${invoice.client_id}/${Date.now()}_${splitFileName}`;
+      const sanitizedBase = sanitizeStorageFilename(nameWithoutExt);
+      const storageFileName = `${sanitizedBase}_part_${idx + 1}${ext}`;
+      const uploadPath = `${invoice.client_id}/${Date.now()}_${storageFileName}`;
 
       const { data: uploadData, error: uploadErr } = await supabase.storage
         .from('raw-invoices')

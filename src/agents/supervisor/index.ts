@@ -27,6 +27,24 @@ async function splitPdfBuffer(
   return Buffer.from(pdfBytes);
 }
 
+function sanitizeStorageFilename(fileName: string): string {
+  const lastDot = fileName.lastIndexOf('.');
+  const ext = lastDot !== -1 ? fileName.substring(lastDot) : '';
+  const nameWithoutExt = lastDot !== -1 ? fileName.substring(0, lastDot) : fileName;
+  
+  let sanitized = nameWithoutExt
+    .replace(/[^a-zA-Z0-9-.]/g, '_')
+    .replace(/__+/g, '_')
+    .replace(/--+/g, '-')
+    .replace(/^[_-]+|[_-]+$/g, '');
+    
+  if (!sanitized) {
+    sanitized = Buffer.from(nameWithoutExt).toString('hex').substring(0, 16);
+  }
+  
+  return `${sanitized}${ext}`;
+}
+
 
 // Helper to compute confidence (Legacy calculation method)
 export function computeConfidence(data: ExtractedData | null): number {
@@ -184,7 +202,9 @@ const graph = new StateGraph<any>({
           const split = splits[idx];
           const splitBuffer = await splitPdfBuffer(fileBuffer, split.start_page, split.end_page);
           const splitFileName = `${nameWithoutExt}_חלק_${idx + 1}${ext}`;
-          const uploadPath = `${state.tenantId}/${Date.now()}_${splitFileName}`;
+          const sanitizedBase = sanitizeStorageFilename(nameWithoutExt);
+          const storageFileName = `${sanitizedBase}_part_${idx + 1}${ext}`;
+          const uploadPath = `${state.tenantId}/${Date.now()}_${storageFileName}`;
 
           const { data: uploadData, error: uploadErr } = await supabase.storage
             .from('raw-invoices')
