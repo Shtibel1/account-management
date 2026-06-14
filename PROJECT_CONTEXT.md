@@ -1,6 +1,10 @@
 # Project Context & AI Guidelines: Invoice Scan (Shtibel1)
 
-Welcome! This document serves as the source of truth for the codebase architecture, design choices, tech stack, and development guidelines for the Shtibel1 Invoice Scan & Management project. Read this document before making any changes.
+Welcome! This document serves as the source of truth for the codebase architecture, design choices, tech stack, and development guidelines for the Shtibel1 Invoice Scan & Management project. Read this document and the detailed guides in the `docs/` folder before making any changes.
+
+### 📚 Detailed Reference Guides
+- [Database Schema (docs/db_schema.md)](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/docs/db_schema.md): Detailed schemas, tables, relationships, and JSONB formats.
+- [Coding Standards & AI Guidelines (docs/coding_standards.md)](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/docs/coding_standards.md): Mandatory conventions, type-safety, import rules, and Git commit guidelines.
 
 ---
 
