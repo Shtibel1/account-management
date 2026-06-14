@@ -24,7 +24,7 @@ Welcome! This document serves as the source of truth for the codebase architectu
 src/
 ├── app/                  # Next.js pages & API routes
 │   ├── (dashboard)/      # Layouts and routes for Clients, Mappings, Upload, and Review
-│   └── api/              # API endpoints (/api/export, /api/invoices, /api/mock-db)
+│   └── api/              # API endpoints (/api/export, /api/invoices, /api/suppliers/search-vat, /api/mock-db)
 ├── agents/               # LangGraph AI Pipeline Nodes
 │   ├── supervisor/       # Orchestrator & StateGraph definition
 │   ├── preprocessor/     # OCR & Smart Invoice Splitting logic
@@ -34,7 +34,7 @@ src/
 ├── components/           # UI Components (UploadZone, InvoiceTable, SplitPane)
 ├── lib/                  # Services & Exporters (e.g., movein.ts for Move-in ERP format)
 ├── shared/               # TypeScript interfaces (types.ts) and schemas
-└── utils/                # Utility helpers (e.g., encoding.ts for Hebrew support)
+└── utils/                # Utility helpers (e.g., encoding.ts, businessLookup.ts for Gov.il searches)
 ```
 
 ---
@@ -46,7 +46,7 @@ The processing pipeline is defined in [supervisor/index.ts](file:///c:/Users/nad
 1. **`init_rules`:** Fetch client-specific dynamic rules from the database.
 2. **`preprocess`:** Run Google Vision OCR. If a multi-page PDF contains multiple invoices, Claude Haiku detects split boundaries. The PDF is split, parts are uploaded, and child pipelines are triggered.
 3. **`extract`:** Use Claude 3.5 Sonnet with a tool-use definition (`save_invoice_data`) to extract invoice fields and bounding box coordinates (bboxes).
-4. **`validate`:** Run calculations, Luhn checksum for Israeli VAT IDs (H.P.), whitelist category checks, and database duplication checks.
+4. **`validate`:** Run calculations, Luhn checksum for Israeli VAT IDs (H.P.), whitelist category checks, database duplication checks, and composed VAT ID identification (from the invoice, supplier table, and Gov.il API web search).
 5. **`save_review` / `save_success`:** Invoices currently route to `save_review` since manual review is forced (`requires_manual_review: true` in validation). The status becomes `review` and execution interrupts.
 6. **`approval`:** When a human reviews the invoice, the client-side invokes `resumeApproval` to update the state graph with modified values and finishes the graph.
 
