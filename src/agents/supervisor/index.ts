@@ -61,7 +61,21 @@ function findExactBbox(value: string | number | null, ocrWords: OcrWord[]): Fiel
   const singleMatches = ocrWords.filter(
     (w) => {
       const cleanWord = cleanTextForMatching(w.text);
-      if (cleanWord.includes(cleanedTarget) || cleanedTarget.includes(cleanWord)) {
+      
+      // Prevent numeric substring matches (e.g. "97611" matching "039761111")
+      const isTargetNumeric = /^\d+$/.test(cleanedTarget);
+      const isWordNumeric = /^\d+$/.test(cleanWord);
+      
+      let isMatch = false;
+      if (isTargetNumeric && isWordNumeric) {
+        isMatch = cleanWord === cleanedTarget;
+      } else {
+        isMatch = cleanedTarget.length <= 2
+          ? cleanWord === cleanedTarget
+          : cleanWord.includes(cleanedTarget);
+      }
+
+      if (isMatch) {
         return true;
       }
       if (numbersMatch(w.text, targetStr)) {
