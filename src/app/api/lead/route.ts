@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 
-const CONTACT_EMAIL = process.env.CONTACT_EMAIL || 'contact@nadav-shtibel.com';
-const CONTACT_FROM = process.env.CONTACT_FROM || 'contact@nadav-shtibel.com';
-const AWS_REGION = process.env.AWS_REGION || process.env.AWS_SES_REGION;
+const CONTACT_TO = process.env.CONTACT_TO_EMAIL || process.env.CONTACT_TO || process.env.CONTACT_EMAIL || 'nadavshtibel@gmail.com';
+const CONTACT_FROM = process.env.CONTACT_FROM_EMAIL || process.env.CONTACT_FROM || 'contact@nadav-shtibel.com';
+const AWS_REGION = process.env.AWS_REGION || 'eu-west-1';
 
 interface LeadData {
   name: string;
@@ -116,7 +116,7 @@ async function sendViaSES(data: LeadData): Promise<void> {
   const command = new SendEmailCommand({
     Source: CONTACT_FROM,
     Destination: {
-      ToAddresses: [CONTACT_EMAIL],
+      ToAddresses: [CONTACT_TO],
     },
     Message: {
       Subject: { Data: subject, Charset: 'UTF-8' },
@@ -152,12 +152,8 @@ export async function POST(request: NextRequest) {
       notes: typeof notes === 'string' ? notes.trim() : '',
     };
 
-    if (AWS_REGION) {
-      await sendViaSES(leadData);
-      console.log(`[Lead] Sent via SES to ${CONTACT_EMAIL}: ${leadData.name}`);
-    } else {
-      console.log('[Lead] SES not configured (AWS_REGION missing). Lead data:', JSON.stringify(leadData, null, 2));
-    }
+    await sendViaSES(leadData);
+    console.log(`[Lead] Sent via SES to ${CONTACT_TO}: ${leadData.name}`);
 
     return NextResponse.json({ success: true });
   } catch (error) {
