@@ -1,60 +1,75 @@
-# סריקה בעברית (Hebrew Scanning Services)
+# Invoice Scan — Hebrew invoice OCR & bookkeeping pipeline
 
-Public-facing Hebrew document and photo scanning service.
+**סריקה בעברית** is a full-stack Next.js app that turns scanned Hebrew invoices and receipts into validated, ready-to-import accounting entries for bookkeeping firms. Accountants upload PDFs or photos per client, a multi-agent AI pipeline extracts and verifies the data, and a reviewer approves each document side-by-side with the original before export.
 
-## Product
+## Architecture
 
-**סריקה בעברית** offers Hebrew-only image and document scanning services:
-- Photo and album digitization
-- Document and invoice scanning
-- Hebrew OCR (Optical Character Recognition)
+```
+Upload (PDF / image) ──► Supabase Storage
+        │
+        ▼
+ Supervisor agent (LangGraph)
+   ├─ Preprocessor  – Google Cloud Vision DOCUMENT_TEXT_DETECTION, word-level bounding boxes
+   ├─ Extraction    – LLM (Claude / Gemini / OpenAI) → typed invoice JSON (Zod schemas)
+   ├─ Validation    – VAT-ID checksum, totals & VAT math, supplier lookup in the
+   │                  Israeli Companies Registrar open-data API, per-client mappings
+   └─ Approval      – maps supplier / expense category → ledger account codes
+        │
+        ▼
+ Review UI (split pane: document viewer with highlighted fields + editable form)
+        │
+        ▼
+ Export (e.g. MoveIn / Excel via xlsx)
+```
 
-The public site allows visitors to learn about the service and submit lead requests.
+Each agent lives in `src/agents/<name>/` with its prompt/spec in `agent.md` and logic in `index.ts`. Extracted fields are matched back to OCR word boxes so the reviewer sees exactly where each value came from.
 
-## URLs
+## Stack
 
-- `/` — Marketing home page (Hebrew RTL)
-- `/order` — Lead capture form
-- `/privacy` — Privacy policy
+- **Next.js 16 (App Router), React 18, TypeScript, Tailwind CSS**
+- **LangGraph / LangChain** with Anthropic, Google GenAI and OpenAI models
+- **Google Cloud Vision** for Hebrew OCR, `pdf-lib` / `react-pdf` for documents
+- **Supabase** (Postgres + Storage) for clients, invoices and mappings
+- **AWS Amplify** hosting, **AWS SES** for marketing-site lead emails
+- **Zod** shared schemas (`src/shared`)
 
-## Internal Dashboard
+## Routes
 
-The invoice processing dashboard remains available at:
-- `/clients` — Client management
-- `/upload` — Invoice upload
-- `/review` — Review and approval
-- `/mappings` — Account mappings
+| Route | Purpose |
+|---|---|
+| `/` | Hebrew marketing site |
+| `/order` | Lead / order form (sent via AWS SES) |
+| `/privacy` | Privacy policy |
+| `/clients` | Manage bookkeeping clients |
+| `/upload` | Bulk upload invoices per client |
+| `/review`, `/review/[id]` | Review queue and side-by-side validation |
+| `/mappings` | Supplier / category → account-code mappings |
 
-## Deployment
+API routes under `src/app/api/`: `invoices` (upload, upload-url, process, split, approve), `suppliers/search-vat`, `export`, `lead`.
 
-Hosted on AWS Amplify (app `d1qccb7exs3uyj`). Uses Next.js with `WEB_COMPUTE` platform.
-
-### Environment Variables
-
-**Required for dashboard functionality:**
-- `NEXT_PUBLIC_SUPABASE_URL`
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-- `SUPABASE_SERVICE_KEY`
-- `GOOGLE_CLOUD_API_KEY`
-- `ANTHROPIC_API_KEY`
-
-**Optional for lead form email delivery (SES):**
-- `AWS_REGION` — AWS region for SES (e.g., `eu-west-1`)
-- `CONTACT_EMAIL` — Recipient email (default: `contact@nadav-shtibel.com`)
-- `CONTACT_FROM` — Sender email (default: `contact@nadav-shtibel.com`)
-
-If `AWS_REGION` is not set, lead submissions are logged to console instead of emailed.
-
-## Development
+## Local setup
 
 ```bash
 npm install
-npm run dev    # http://localhost:3001
-npm run build  # Production build
+cp .env.example .env.local   # or create it with the variables below
+npm run dev                  # http://localhost:3001
 ```
 
-## Notes
+Environment variables (names only):
 
-- No custom DNS configuration in this repository
-- No pricing, testimonials, or fake metrics on the public site
-- No checkout/payment functionality
+- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+- `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_API_KEY`
+- `AWS_REGION` / `AWS_SES_REGION`, `CONTACT_FROM_EMAIL`, `CONTACT_TO_EMAIL`
+
+A mock Supabase client (`src/utils/supabase/mockClient.ts`) allows running the UI without a database.
+
+## Repository layout
+
+```
+src/agents/      AI pipeline (supervisor, preprocessor, extraction, validation, approval)
+src/app/         Next.js routes – (dashboard), (marketing), api
+src/components/  UI: InvoiceTable, SplitPane viewer/form, UploadZone
+src/lib/         API client, exporters
+src/shared/      Zod schemas & types
+docs/            DB schema and coding standards
+```
