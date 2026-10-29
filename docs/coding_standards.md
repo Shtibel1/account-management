@@ -9,7 +9,7 @@ This document outlines strict coding rules, style guides, and operational git wo
 ### 1. Strict Typing (No `any`)
 - The `any` keyword is **strictly forbidden**. Every variable, function parameter, and return value must have an explicit, descriptive type.
 - If a type is unknown or dynamic, prefer `unknown` or a strict interface over `any`.
-- Define shared interfaces inside [types.ts](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/src/shared/types.ts).
+- Define shared interfaces inside [types.ts](../src/shared/types.ts).
 
 ```typescript
 // ❌ Bad
@@ -68,7 +68,7 @@ try {
 ## 🤖 AI Operational Rules & Git Workflow
 
 ### 1. Self-Documenting Files
-- After completing a task or coding a feature, if any file layouts, dependencies, environment variables, or databases changes occurred, the agent **MUST** update [PROJECT_CONTEXT.md](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/PROJECT_CONTEXT.md) and related markdown documents in the `docs/` folder to reflect the changes.
+- After completing a task or coding a feature, if any file layouts, dependencies, environment variables, or databases changes occurred, the agent **MUST** update [PROJECT_CONTEXT.md](../PROJECT_CONTEXT.md) and related markdown documents in the `docs/` folder to reflect the changes.
 
 ### 2. Database Synchronization
 - If any database tables, columns, constraints, or schemas are modified in Supabase, the agent **MUST** run `npm run db:pull-types` to regenerate `src/shared/supabase-types.ts`, and commit the changes.

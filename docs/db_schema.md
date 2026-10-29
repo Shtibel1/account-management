@@ -26,6 +26,6 @@ npx supabase login
 
 ## 📚 Codebase Sources of Truth
 When coding or performing database operations, refer to:
-1. **[supabase-types.ts](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/src/shared/supabase-types.ts):** The auto-generated database contracts.
-2. **[types.ts](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/src/shared/types.ts):** Domain-specific TypeScript models and pipeline states.
-3. **[schemas.ts](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/src/shared/schemas.ts):** Run-time validation schemas (Zod).
+1. **[supabase-types.ts](../src/shared/supabase-types.ts):** The auto-generated database contracts.
+2. **[types.ts](../src/shared/types.ts):** Domain-specific TypeScript models and pipeline states.
+3. **[schemas.ts](../src/shared/schemas.ts):** Run-time validation schemas (Zod).
