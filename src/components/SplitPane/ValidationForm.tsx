@@ -23,6 +23,7 @@ import { useToast } from '@/components/ui/Toast';
 import { DuplicateAlert } from './DuplicateAlert';
 import { RejectDialog } from '@/components/SplitPane/RejectDialog';
 import { toUserErrorMessage } from '@/shared/processing';
+import { BUYER_VAT_UNRESOLVED_VIOLATION } from '@/shared/buyerVatId';
 
 interface Props {
   invoice: Invoice;
@@ -392,6 +393,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
           ruleViolations = ruleViolations.filter(
             (v) => !v.includes('checksum') && !v.includes('תקין')
           );
+          if (updatedData.supplier_vat_id) ruleViolations = ruleViolations.filter((v) => v !== BUYER_VAT_UNRESOLVED_VIOLATION);
         } else {
           if (!ruleViolations.some(v => v.includes('checksum'))) {
             ruleViolations.push('ח.פ. / עוסק מורשה אינו תקין לפי בדיקת checksum');
@@ -606,6 +608,13 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
               {flags?.auto_approve_blockers?.map((b, i) => <li key={i}>{b}</li>)}
             </ul>
           </div>
+        </div>
+      )}
+      {/* The extracted VAT ID was the buyer's and no reliable issuer ID was found: until one is entered */}
+      {!data.supplier_vat_id && flags?.rule_violations?.includes(BUYER_VAT_UNRESOLVED_VIOLATION) && (
+        <div className="mx-4 mt-3 flex items-center gap-2.5 p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          {BUYER_VAT_UNRESOLVED_VIOLATION}
         </div>
       )}
       {!mathOk && (

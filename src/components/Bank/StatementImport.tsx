@@ -119,6 +119,7 @@ export function StatementImport({ clientId, existingAccountLabels = [], onImport
       parts.push(`${result.matched} הותאמו אוטומטית`);
       toast(parts.join(' · '), 'success');
       if (result.matchError) toast(result.matchError, 'error');
+      else if (result.matchNote) toast(result.matchNote, 'info');
       setFile(null);
       setMapping(null);
       onImported();

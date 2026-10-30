@@ -12,7 +12,14 @@ import { isValidVatIdChecksum, normalizeVatId } from '@/shared/vatId';
 const BUYER_LABEL = /לכבוד|לקוח(?!ות)|נמען|מזמין|(?<![֐-׿])קונה(?![֐-׿])/;
 
 /** Labels of an ID of the issuing business ("ח.פ:", "ע.מ", "עוסק מורשה"). Checked only when no buyer label is near. */
-const ISSUER_LABEL = /ח\s*[."״'׳]\s*פ|ע\s*[."״'׳]\s*מ(?![֐-׿])|עוסק/;
+const ISSUER_LABEL = /ח\s*[."״'׳]\s*פ|ע\s*[."״'׳]\s*מ(?![֐-׿])|עוסק|מורשה/;
+
+/**
+ * Labels of numbers that are not a business ID at all but often pass the checksum by chance:
+ * transaction / reference / order / invoice / account / phone numbers ("מספר עסקה 311057368").
+ */
+const OTHER_LABEL =
+  /עסקה|אסמכת|אסמ\s*['׳"״]|הזמנ|חשבון|קבלה|טלפון|(?<![֐-׿])טל(?![֐-׿])|פקס|נייד|סלולר|הקצאה|שובר|משלוח|מנוי|פוליסה|כרטיס|סניף|בנק|ברקוד|מק\s*["״]?\s*ט|רכב|רישוי|ניכוי|(?<![֐-׿])תיק(?![֐-׿])|אישור|הפני|תשלום|(?<![a-z])(?:tel|phone|fax|order|ref|invoice|receipt|account|transaction)(?![a-z])/i;
 
 /** Characters on each side of the number that count as "next to" a label (same line only). */
 const CONTEXT_CHARS = 28;
@@ -24,13 +31,50 @@ export interface VatIdOccurrence {
   vatId: string;
   /** True when a buyer label sits next to the number (same line, or the header of its table cell). */
   buyerLabelled: boolean;
-  /** True when an issuer label ("ח.פ", "עוסק מורשה") and no buyer label sits next to the number. */
+  /**
+   * True when an issuer label ("ח.פ", "עוסק מורשה") and no buyer label sits next to the number, and
+   * no other label ("מספר עסקה", "אסמכתא", "טלפון" …) sits closer to it.
+   */
   issuerLabelled: boolean;
 }
 
 function labelFlags(context: string): { buyerLabelled: boolean; issuerLabelled: boolean } {
   const buyerLabelled = BUYER_LABEL.test(context);
-  return { buyerLabelled, issuerLabelled: !buyerLabelled && ISSUER_LABEL.test(context) };
+  return { buyerLabelled, issuerLabelled: !buyerLabelled && ISSUER_LABEL.test(context) && !OTHER_LABEL.test(context) };
+}
+
+function globalRegex(re: RegExp): RegExp {
+  return new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+}
+
+/** Characters between the end of the last label match in `before` and the number (null = none). */
+function distanceBefore(re: RegExp, before: string): number | null {
+  let end: number | null = null;
+  for (const m of before.matchAll(globalRegex(re))) end = (m.index ?? 0) + m[0].length;
+  return end == null ? null : before.length - end;
+}
+
+/** Characters between the number and the first label match in `after` (null = none). */
+function distanceAfter(re: RegExp, after: string): number | null {
+  const m = globalRegex(re).exec(after);
+  return m ? m.index : null;
+}
+
+/**
+ * Issuer label of a number in the OCR text: the label written right before it (Hebrew OCR text is
+ * in logical order: "ח.פ: 511863805"), or, when nothing labels it from before, the one right after
+ * it (reversed / mixed-direction lines). The nearest label on that side decides, so in
+ * "מספר עסקה 311057368" the transaction number is not taken for an ID because a "ח.פ" follows it.
+ */
+function isIssuerLabelledInText(before: string, after: string): boolean {
+  for (const [issuer, other] of [
+    [distanceBefore(ISSUER_LABEL, before), distanceBefore(OTHER_LABEL, before)],
+    [distanceAfter(ISSUER_LABEL, after), distanceAfter(OTHER_LABEL, after)],
+  ]) {
+    if (issuer == null && other == null) continue;
+    return issuer != null && (other == null || issuer <= other);
+  }
+  return false;
 }
 
 /** Every 8/9-digit number in the OCR text (normalized to 9 digits), with its label context. */
@@ -55,7 +99,7 @@ export function findVatIdOccurrences(ocrText: string | null | undefined): VatIdO
         result.push({
           vatId,
           buyerLabelled: buyer,
-          issuerLabelled: !buyer && (ISSUER_LABEL.test(before) || ISSUER_LABEL.test(after)),
+          issuerLabelled: !buyer && isIssuerLabelledInText(before, after),
         });
       }
     }
@@ -183,6 +227,27 @@ function joinWords(words: AxisWord[]): string {
   return `${ordered.map((w) => w.text).join(' ')} | ${[...ordered].reverse().map((w) => w.text).join(' ')}`;
 }
 
+/** How many of the side's words (nearest first) it takes to reach a match of `re` (null = none). */
+function wordsToLabel(re: RegExp, side: AxisWord[]): number | null {
+  for (let k = 1; k <= side.length; k++) {
+    if (re.test(joinWords(side.slice(0, k)))) return k;
+  }
+  return null;
+}
+
+/** Issuer label next to a number in the word layout: the nearest label on either side must be the issuer's. */
+function isIssuerLabelledInWords(start: AxisWord[], end: AxisWord[]): boolean {
+  let issuer: number | null = null;
+  let other: number | null = null;
+  for (const side of [start, end]) {
+    const i = wordsToLabel(ISSUER_LABEL, side);
+    const o = wordsToLabel(OTHER_LABEL, side);
+    if (i != null && (issuer == null || i < issuer)) issuer = i;
+    if (o != null && (other == null || o < other)) other = o;
+  }
+  return issuer != null && (other == null || issuer <= other);
+}
+
 /**
  * Every 8/9-digit number in the OCR word boxes, with its label: the words next to it on its line,
  * or, for a number alone in its cell, the header right above / below it in the same column.
@@ -194,8 +259,11 @@ export function findVatIdOccurrencesFromWords(ocrWords: readonly OcrWord[] | nul
   for (const token of numberTokens(words)) {
     const others = words.filter((w) => !token.parts.has(w.index) && w.page === token.box.page);
     const lineWords = others.filter((w) => sameLine(token.box, w));
-    const context = [...sideContext(token, lineWords, 'start'), ...sideContext(token, lineWords, 'end')];
-    let flags = labelFlags(joinWords(context));
+    const startSide = sideContext(token, lineWords, 'start');
+    const endSide = sideContext(token, lineWords, 'end');
+    const context = [...startSide, ...endSide];
+    const buyerLabelled = BUYER_LABEL.test(joinWords(context));
+    let flags = { buyerLabelled, issuerLabelled: !buyerLabelled && isIssuerLabelledInWords(startSide, endSide) };
 
     if (!context.some((w) => HAS_LETTER.test(w.text))) {
       // A value alone in a table cell: take the header line nearest above or below, in the same column
@@ -247,7 +315,7 @@ export function isBuyerLabelledVatId(
 }
 
 export interface SupplierVatIdCheck {
-  /** The VAT ID to keep: the original, the issuer's ID it was swapped for, or null when removed. */
+  /** The VAT ID to keep: the original, the ID it was swapped for, or null when removed. */
   vatId: string | null;
   /**
    * Why the extracted ID is not the supplier's (null = it looks fine):
@@ -255,15 +323,38 @@ export interface SupplierVatIdCheck {
    * misread - fails the checksum, is not on the page, and the page has one clear issuer ID.
    */
   reason: 'buyer_label' | 'client_own' | 'misread' | null;
-  /** The issuer ID used instead, when one was found. */
+  /** The ID used instead, when one was found. */
   replacement: string | null;
+  /**
+   * Where the replacement comes from: issuer_label - printed on the page next to an issuer label
+   * ("ח.פ", "עוסק מורשה"); reference - the supplier table / the registrar lookup by the supplier's
+   * name (not labelled on the page). null when nothing replaced it.
+   */
+  replacementSource: 'issuer_label' | 'reference' | null;
+}
+
+/** Rule violation (blocks approval flows) when a buyer's ID was removed and nothing reliable replaced it. */
+export const BUYER_VAT_UNRESOLVED_VIOLATION =
+  'ח.פ. הספק לא זוהה בוודאות: המספר שחולץ שייך ללקוח ולא נמצא ח.פ. מסומן של המנפיק - נדרשת בדיקה ידנית';
+
+/** IDs printed in the line-item descriptions: transaction / order numbers, never the issuer's ID. */
+function lineItemIds(texts: readonly (string | null | undefined)[] | undefined): Set<string> {
+  const ids = new Set<string>();
+  for (const text of texts ?? []) {
+    for (const o of findVatIdOccurrences(text)) ids.add(o.vatId);
+  }
+  return ids;
 }
 
 /**
  * Checks the extracted supplier VAT ID against the buyer's IDs: printed next to a buyer label, or
  * known to be the client's own ID (clientOwnIds, from its invoice history). When it is the buyer's,
- * the issuer's ID replaces it: the only checksum-valid, non-buyer ID on the page, or the only one of
- * those labelled as the issuer's ("ח.פ", "עוסק מורשה"). With no single candidate it is removed.
+ * it is replaced only by a reliable ID: the single checksum-valid ID on the page labelled as the
+ * issuer's ("ח.פ", "עוסק מורשה" - not a number next to "מספר עסקה" / "אסמכתא" / "טלפון" …, and
+ * not one that appears in a line-item description), else the first valid reference ID
+ * (referenceIds: the supplier table, then the registrar lookup by the supplier's name). With
+ * neither it is removed (the caller flags the invoice for manual review). Any other checksum-valid
+ * number on the page is never taken: it is usually a transaction / order number.
  * An ID that fails the checksum and is not on the page at all (a misread) is swapped for the
  * labelled issuer ID too, but kept when there is none.
  */
@@ -272,24 +363,25 @@ export function checkSupplierVatId(params: {
   ocrText: string | null | undefined;
   ocrWords?: readonly OcrWord[] | null;
   clientOwnIds?: readonly string[];
+  /** Line-item descriptions (numbers in them are never a replacement). */
+  lineItemTexts?: readonly (string | null | undefined)[];
+  /** Trusted IDs for this supplier, best first: supplier table, registrar lookup by name. */
+  referenceIds?: readonly (string | null | undefined)[];
 }): SupplierVatIdCheck {
   const id = normalizeVatId(params.vatId);
-  const unchanged: SupplierVatIdCheck = { vatId: params.vatId ?? null, reason: null, replacement: null };
+  const unchanged: SupplierVatIdCheck = { vatId: params.vatId ?? null, reason: null, replacement: null, replacementSource: null };
   if (!id) return unchanged;
   const own = new Set((params.clientOwnIds ?? []).map((v) => normalizeVatId(v)).filter((v): v is string => !!v));
   const textOccurrences = findVatIdOccurrences(params.ocrText);
   const wordOccurrences = findVatIdOccurrencesFromWords(params.ocrWords);
   const occurrences = [...textOccurrences, ...wordOccurrences];
+  const itemIds = lineItemIds(params.lineItemTexts);
 
   const buyerIds = new Set(occurrences.filter((o) => o.buyerLabelled).map((o) => o.vatId));
-  const candidates = [
-    ...new Set(
-      occurrences
-        .map((o) => o.vatId)
-        .filter((v) => v !== id && !own.has(v) && !buyerIds.has(v) && isValidVatIdChecksum(v))
-    ),
+  const usable = (v: string) => v !== id && !own.has(v) && !buyerIds.has(v) && !itemIds.has(v) && isValidVatIdChecksum(v);
+  const issuerCandidates = [
+    ...new Set(occurrences.filter((o) => o.issuerLabelled && usable(o.vatId)).map((o) => o.vatId)),
   ];
-  const issuerCandidates = candidates.filter((v) => occurrences.some((o) => o.vatId === v && o.issuerLabelled));
   const issuerReplacement = issuerCandidates.length === 1 ? issuerCandidates[0] : null;
 
   let reason: SupplierVatIdCheck['reason'] = null;
@@ -301,12 +393,18 @@ export function checkSupplierVatId(params: {
     !occurrences.some((o) => o.vatId === id) &&
     issuerReplacement
   ) {
-    return { vatId: issuerReplacement, reason: 'misread', replacement: issuerReplacement };
+    return { vatId: issuerReplacement, reason: 'misread', replacement: issuerReplacement, replacementSource: 'issuer_label' };
   }
   if (!reason) return unchanged;
 
-  const replacement = candidates.length === 1 ? candidates[0] : issuerReplacement;
-  return { vatId: replacement, reason, replacement };
+  if (issuerReplacement) {
+    return { vatId: issuerReplacement, reason, replacement: issuerReplacement, replacementSource: 'issuer_label' };
+  }
+  const reference = (params.referenceIds ?? [])
+    .map((v) => normalizeVatId(v))
+    .find((v): v is string => !!v && usable(v));
+  if (reference) return { vatId: reference, reason, replacement: reference, replacementSource: 'reference' };
+  return { vatId: null, reason, replacement: null, replacementSource: null };
 }
 
 /** Hebrew reviewer warning for a buyer ID that was swapped / removed. */
@@ -316,7 +414,11 @@ export function supplierVatIdWarning(original: string, check: SupplierVatIdCheck
     return `ח.פ. שזוהה (${original}) אינו תקין ואינו מופיע במסמך — הוחלף ל-${check.replacement} שמופיע בפרטי המנפיק. אנא ודא`;
   }
   const whose = check.reason === 'client_own' ? 'של הלקוח עצמו' : 'של הלקוח / הנמען בחשבונית';
-  return check.replacement
-    ? `ח.פ. שזוהה (${original}) הוא ${whose} ולא של הספק — הוחלף ל-${check.replacement} שמופיע בפרטי המנפיק. אנא ודא`
-    : `ח.פ. שזוהה (${original}) הוא ${whose} ולא של הספק — הוסר. יש להזין את ח.פ. הספק מתוך פרטי המנפיק`;
+  if (check.replacement && check.replacementSource === 'issuer_label') {
+    return `ח.פ. שזוהה (${original}) הוא ${whose} ולא של הספק — הוחלף ל-${check.replacement} שמופיע בפרטי המנפיק. אנא ודא`;
+  }
+  if (check.replacement) {
+    return `ח.פ. שזוהה (${original}) הוא ${whose} ולא של הספק — הוחלף ל-${check.replacement} לפי פרטי הספק המוכר / חיפוש לפי שם הספק (לא נמצא ח.פ. מסומן של המנפיק במסמך). אנא ודא מול המסמך`;
+  }
+  return `ח.פ. שזוהה (${original}) הוא ${whose} ולא של הספק — הוסר. לא נמצא במסמך ח.פ. מסומן של המנפיק: יש להזין את ח.פ. הספק ידנית`;
 }

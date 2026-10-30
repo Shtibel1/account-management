@@ -7,8 +7,14 @@ import { requireClientAccess } from '@/lib/auth';
 // Stores normalized statement rows (parsed + column-mapped in the browser) and auto-matches them.
 // The import is all or nothing: a bad row is a 400 naming the row, and nothing is stored.
 // Amplify cuts a request at ~28 s. A large import that already used most of that leaves the
-// auto-match for later (the lines are stored; the bank page runs matching on demand).
+// auto-match for later (the lines are stored; the bank page runs matching on demand), and a match
+// that is started must return by AUTO_MATCH_DEADLINE_MS after the request began, so the response
+// (lines committed) always arrives well before the cut.
 const AUTO_MATCH_TIME_BUDGET_MS = 15_000;
+const AUTO_MATCH_DEADLINE_MS = 20_000;
+const MATCH_LATER = 'אפשר להשלים אותה בכפתור "הרץ התאמה אוטומטית" במסך הבנק.';
+const MATCH_TOO_MANY_LINES =
+  'ההתאמה האוטומטית לא הורצה כי יש יותר מדי תנועות פתוחות שעשויות להתאים לחשבוניות. יש להתאים אותן ידנית במסך הבנק.';
 
 export async function POST(request: Request) {
   const startedAt = Date.now();
@@ -47,20 +53,38 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'ייבוא התנועות נכשל ולא נשמרו תנועות. נסו שוב.' }, { status: 500 });
   }
 
-  // The lines are stored; a failed auto-match must not report the import itself as failed.
-  let match: MatchRunResult = { matched: 0, ambiguous: 0 };
+  // The lines are stored; a failed / partial auto-match must not report the import itself as failed.
+  let match: MatchRunResult = { matched: 0, ambiguous: 0, complete: false };
   let matchError: string | undefined;
+  let matchNote: string | undefined;
   if (Date.now() - startedAt > AUTO_MATCH_TIME_BUDGET_MS) {
     console.warn(`[bank] Import of ${rows.length} rows took ${Date.now() - startedAt} ms - skipping auto-match`);
-    matchError = 'התנועות נשמרו. בגלל גודל הקובץ ההתאמה האוטומטית לא הורצה - אפשר להריץ אותה מהמסך.';
+    matchNote = `התנועות נשמרו. בגלל גודל הקובץ ההתאמה האוטומטית לא הורצה - ${MATCH_LATER}`;
   } else {
     try {
-      match = await runAutoMatch(supabase, clientId);
+      match = await runAutoMatch(supabase, clientId, {
+        deadline: startedAt + AUTO_MATCH_DEADLINE_MS,
+        preferBatchId: imported.batchId,
+      });
+      if (match.truncated) {
+        console.warn(`[bank] Auto-match after import of ${rows.length} rows skipped: too many candidate lines`);
+        matchNote = `התנועות נשמרו. ${MATCH_TOO_MANY_LINES}`;
+      } else if (!match.complete) {
+        console.warn(`[bank] Auto-match after import of ${rows.length} rows stopped at the deadline (${match.matched} matched)`);
+        matchNote = `התנועות נשמרו. ההתאמה האוטומטית הושלמה חלקית (${match.matched} הותאמו) - ${MATCH_LATER}`;
+      }
     } catch (err) {
       console.error('[bank] Auto-match after import failed:', err);
-      matchError = 'התנועות נשמרו, אך ההתאמה האוטומטית נכשלה. אפשר להריץ אותה שוב מהמסך.';
+      matchError = `התנועות נשמרו, אך ההתאמה האוטומטית נכשלה. ${MATCH_LATER}`;
     }
   }
 
-  return NextResponse.json({ ...imported, matched: match.matched, ambiguous: match.ambiguous, ...(matchError ? { matchError } : {}) });
+  return NextResponse.json({
+    ...imported,
+    matched: match.matched,
+    ambiguous: match.ambiguous,
+    matchComplete: match.complete,
+    ...(matchError ? { matchError } : {}),
+    ...(matchNote ? { matchNote } : {}),
+  });
 }

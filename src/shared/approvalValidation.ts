@@ -3,6 +3,7 @@ import type { ExtractedData, ValidationResult } from '@/shared/types';
 import { isAllocationNumberWellFormed, isAllocationRequired, normalizeAllocationNumber } from '@/shared/allocation';
 import { isValidVatIdChecksum, normalizeVatId } from '@/shared/vatId';
 import { MAX_LINE_ITEMS } from '@/shared/lineItems';
+import { BUYER_VAT_UNRESOLVED_VIOLATION } from '@/shared/buyerVatId';
 
 // Server-side checks for a human approval (POST /api/invoices/[id]/approve). The review form
 // mirrors the blocking rules (ValidationForm isApproveDisabled), but the server never trusts it.
@@ -172,7 +173,13 @@ export function validateApproval(payload: unknown, stored: Partial<ExtractedData
     vat_id_ok: true,
     math_ok: true,
     allocation_required: allocationRequired,
-    rule_violations: violations.filter((v) => !v.includes(CHECKSUM_VIOLATION) && !v.includes(ALLOCATION_VIOLATION)),
+    rule_violations: violations.filter(
+      (v) =>
+        !v.includes(CHECKSUM_VIOLATION) &&
+        !v.includes(ALLOCATION_VIOLATION) &&
+        // The reviewer entered the supplier's ID the pipeline could not determine
+        !(v === BUYER_VAT_UNRESOLVED_VIOLATION && final.supplier_vat_id)
+    ),
     // A person approved it: it is no longer an auto-approved invoice (eligibility / banner).
     auto_approved: false,
   } as ValidationResult;

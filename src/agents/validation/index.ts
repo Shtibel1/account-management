@@ -16,7 +16,14 @@ import { isValidVatIdChecksum } from '@/shared/vatId';
 import { checkLineItemsSum, hasMixedVat, lineItemWarnings, normalizeLineItems } from '@/shared/lineItems';
 import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
 import { vatRateWarning } from '@/shared/vatRate';
-import { checkSupplierVatId, findVatIdOccurrences, findVatIdOccurrencesFromWords, supplierVatIdWarning } from '@/shared/buyerVatId';
+import {
+  BUYER_VAT_UNRESOLVED_VIOLATION,
+  checkSupplierVatId,
+  findVatIdOccurrences,
+  findVatIdOccurrencesFromWords,
+  supplierVatIdWarning,
+  type SupplierVatIdCheck,
+} from '@/shared/buyerVatId';
 import { isZeroVatInvoice, ZERO_VAT_WITH_HISTORY_WARNING } from '@/shared/supplierVatHistory';
 import { fetchClientOwnVatIds, fetchSupplierVatHistory } from '@/lib/validationHistory';
 
@@ -116,30 +123,8 @@ export async function validateInvoice(
     }
   }
 
-  // 1.4 The supplier's VAT ID is the issuer's. An ID printed next to a buyer label ("לכבוד",
-  // "ח.פ לקוח") or known to be the client's own ID is the buyer's: swap it for the issuer's ID on
-  // the page, or remove it when there is no single candidate.
-  const readVatId = corrected.supplier_vat_id || null;
-  let buyerVatIdSuspected = false;
-  if (readVatId) {
-    const ownIds = await fetchClientOwnVatIds(supabase, tenantId, invoiceId, [normalizeVatId(readVatId) ?? readVatId]);
-    const vatCheck = checkSupplierVatId({
-      vatId: readVatId,
-      ocrText: context.ocrText,
-      ocrWords: context.ocrWords,
-      clientOwnIds: ownIds,
-    });
-    if (vatCheck.reason) {
-      buyerVatIdSuspected = true;
-      console.log(`[Validation] supplier_vat_id ${readVatId} looks like the buyer's (${vatCheck.reason}); using ${vatCheck.replacement ?? 'none'}.`);
-      corrected.supplier_vat_id = vatCheck.vatId;
-      const warning = supplierVatIdWarning(readVatId, vatCheck);
-      if (warning) warnings.push(warning);
-    }
-  }
-
-  // 1.5 Fetch mapping if supplier name is known to override/fill the VAT ID
-  const invoiceVatId = corrected.supplier_vat_id || null;
+  // 1.4 Supplier table / registrar lookups by the supplier's name: they override / fill the VAT ID
+  // below, and are the trusted replacement when the extracted ID turns out to be the buyer's (1.5).
   let supplierTableVatId: string | null = null;
   let webSearchVatId: string | null = null;
 
@@ -185,6 +170,36 @@ export async function validateInvoice(
     }
   }
 
+  // 1.5 The supplier's VAT ID is the issuer's. An ID printed next to a buyer label ("לכבוד",
+  // "ח.פ לקוח") or known to be the client's own ID is the buyer's: swap it for the issuer-labelled
+  // ID on the page, else for the supplier table / registrar ID, else remove it and flag the invoice
+  // for manual review (never for some other number on the page: those are transaction numbers).
+  const readVatId = corrected.supplier_vat_id || null;
+  let buyerVatIdSuspected = false;
+  let vatReplacementSource: SupplierVatIdCheck['replacementSource'] = null;
+  if (readVatId) {
+    const ownIds = await fetchClientOwnVatIds(supabase, tenantId, invoiceId, [normalizeVatId(readVatId) ?? readVatId]);
+    const vatCheck = checkSupplierVatId({
+      vatId: readVatId,
+      ocrText: context.ocrText,
+      ocrWords: context.ocrWords,
+      clientOwnIds: ownIds,
+      lineItemTexts: (corrected.line_items ?? []).map((item) => item?.description),
+      referenceIds: [supplierTableVatId, webSearchVatId],
+    });
+    if (vatCheck.reason) {
+      buyerVatIdSuspected = true;
+      vatReplacementSource = vatCheck.replacementSource;
+      console.log(`[Validation] supplier_vat_id ${readVatId} looks like the buyer's (${vatCheck.reason}); using ${vatCheck.replacement ?? 'none'}.`);
+      corrected.supplier_vat_id = vatCheck.vatId;
+      const warning = supplierVatIdWarning(readVatId, vatCheck);
+      if (warning) warnings.push(warning);
+    }
+  }
+
+  // The ID as read from the invoice (after the buyer-ID check); a reference ID is not read from it
+  const invoiceVatId = vatReplacementSource === 'reference' ? null : corrected.supplier_vat_id || null;
+
   // Apply hierarchy to set the supplier_vat_id
   if (supplierTableVatId) {
     if (corrected.supplier_vat_id !== supplierTableVatId) {
@@ -192,7 +207,8 @@ export async function validateInvoice(
       corrected.supplier_vat_id = supplierTableVatId;
       warnings.push(`מספר ח.פ./עוסק מורשה עודכן אוטומטית ל-${supplierTableVatId} לפי הגדרות הספק המוכר`);
     }
-  } else if (!corrected.supplier_vat_id && webSearchVatId) {
+  } else if (!corrected.supplier_vat_id && webSearchVatId && !buyerVatIdSuspected) {
+    // (After a buyer-ID suspicion the check above already decided whether the registrar ID is usable)
     console.log(`[Validation] Correcting supplier_vat_id for "${corrected.supplier_name}" to "${webSearchVatId}" based on web search.`);
     corrected.supplier_vat_id = webSearchVatId;
     warnings.push(`מספר ח.פ./עוסק מורשה עודכן אוטומטית ל-${webSearchVatId} לפי חיפוש באינטרנט`);
@@ -230,9 +246,14 @@ export async function validateInvoice(
   const { data: withRule } = applySupplierRule(corrected, corrected, supplierMapping);
   const supplierRule = withRule.supplier_rule ?? null;
 
+  // The buyer's ID was removed and nothing reliable replaced it: the VAT ID is not OK and the
+  // invoice needs a reviewer, whether or not the supplier is opted in to auto-approve.
+  const buyerVatIdUnresolved = buyerVatIdSuspected && !corrected.supplier_vat_id;
+
   // 2. Perform baseline structural checks
   const mathOk = checkMath(corrected);
-  const vatIdOk = checkVatId(corrected.supplier_vat_id);
+  const vatIdChecksumOk = checkVatId(corrected.supplier_vat_id);
+  const vatIdOk = vatIdChecksumOk && !buyerVatIdUnresolved;
 
   // Determine missing fields based on tenant rules & system defaults
   const missingFields: string[] = [];
@@ -266,9 +287,10 @@ export async function validateInvoice(
   }
 
   // VAT ID requirement fallback
-  if (rules.requireVatId && !vatIdOk) {
+  if (rules.requireVatId && !vatIdChecksumOk) {
     ruleViolations.push('ח.פ. / עוסק מורשה אינו תקין לפי בדיקת checksum');
   }
+  if (buyerVatIdUnresolved) ruleViolations.push(BUYER_VAT_UNRESOLVED_VIOLATION);
 
   // Allocation number (חשבוניות ישראל) above the threshold
   corrected.allocation_number = normalizeAllocationNumber(corrected.allocation_number);
@@ -296,7 +318,7 @@ export async function validateInvoice(
   // Model confidences no longer apply to fields auto-corrected above (amounts, VAT ID from the supplier table)
   corrected.field_confidence = pruneFieldConfidence(data.field_confidence, data, corrected);
   if (!corrected.field_confidence) delete corrected.field_confidence;
-  if (registrarVatConflict && corrected.supplier_vat_id) {
+  if ((registrarVatConflict || (buyerVatIdSuspected && vatReplacementSource === 'reference')) && corrected.supplier_vat_id) {
     // The model's (often 0.95) score is not evidence against the registrar: highlight the field
     const prev = corrected.field_confidence?.supplier_vat_id;
     corrected.field_confidence = { ...(corrected.field_confidence ?? {}), supplier_vat_id: Math.min(prev ?? 0.5, 0.5) };
