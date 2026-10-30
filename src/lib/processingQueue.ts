@@ -271,7 +271,17 @@ async function failRun(d: QueueDeps, invoiceId: string, runId: string | null, me
   query = runId ? query.eq('processing_run_id', runId) : query;
   const { error } = await query;
   if (error) console.error(`[Queue] Could not mark invoice ${invoiceId} as failed:`, error);
-  await d.db.from(JOBS).delete().eq('invoice_id', invoiceId);
+  await deleteJob(d, invoiceId, runId);
+}
+
+/**
+ * Removes the job of `runId` only: a tick of a superseded run that finishes late must not delete
+ * the job a newer run (re-process / split) already created for the same invoice.
+ */
+async function deleteJob(d: QueueDeps, invoiceId: string, runId: string | null): Promise<void> {
+  let query = d.db.from(JOBS).delete().eq('invoice_id', invoiceId);
+  if (runId) query = query.eq('run_id', runId);
+  await query;
 }
 
 async function setInvoiceProgress(d: QueueDeps, job: JobRow, stage: ProcessingStage, progress: ProcessingProgress): Promise<void> {
@@ -356,7 +366,9 @@ export async function runProcessingTick(invoiceId: string): Promise<TickResult> 
   const nextVersion = job.lock_version + 1;
   const { data: claimed, error: claimErr } = await d.db.from(JOBS).update({
     lock_version: nextVersion,
-    locked_until: iso(now + (job.stage === 'extract' ? EXTRACT_LOCK_MS : JOB_LOCK_MS)),
+    // LLM stages (boundary detection, possibly retried with a larger budget, and extraction) can
+    // outlast JOB_LOCK_MS; a shorter lock would let a second tick repeat the same paid call
+    locked_until: iso(now + (job.stage === 'ocr' ? JOB_LOCK_MS : EXTRACT_LOCK_MS)),
     stage_attempts: job.stage_attempts + 1,
     updated_at: iso(now),
   }).eq('invoice_id', invoiceId).eq('lock_version', job.lock_version).select('invoice_id');
@@ -498,7 +510,7 @@ async function extractStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
     await failRun(d, job.invoice_id, job.run_id, toUserErrorMessage(err));
     return { state: 'failed' };
   }
-  await d.db.from(JOBS).delete().eq('invoice_id', job.invoice_id);
+  await deleteJob(d, job.invoice_id, job.run_id);
   return { state: 'done' };
 }
 

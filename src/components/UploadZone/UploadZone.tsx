@@ -14,6 +14,7 @@ import {
   checkUploadDeclaration,
   filesLabel,
 } from '@/shared/uploadValidation';
+import { useProcessingTicks } from '@/components/Processing/ProcessingStatus';
 
 interface FileState {
   file: File;
@@ -36,7 +37,13 @@ export function UploadZone({ clientId, disabled = false }: { clientId: string; d
   const [files, setFiles] = useState<FileState[]>([]);
   const [uploading, setUploading] = useState(false);
   const [done, setDone] = useState(false);
+  // Invoices queued from this screen: keep their processing moving while the user stays here
+  const [queuedIds, setQueuedIds] = useState<string[]>([]);
   const { toast } = useToast();
+  useProcessingTicks(
+    queuedIds.map((id) => ({ id, status: 'processing' as const })),
+    (id) => setQueuedIds((prev) => prev.filter((x) => x !== id))
+  );
 
   // Rejected files are listed with their reason instead of disappearing silently
   const onDrop = useCallback((accepted: File[], rejected: FileRejection[]) => {
@@ -88,6 +95,9 @@ export function UploadZone({ clientId, disabled = false }: { clientId: string; d
         })
       );
 
+      const newIds = fileResults.filter((r) => r.status === 'success' && r.id).map((r) => r.id as string);
+      if (newIds.length > 0) setQueuedIds((prev) => [...prev, ...newIds.filter((x) => !prev.includes(x))]);
+
       const hasSuccess = fileResults.some((r: any) => r.status === 'success');
       const hasError = fileResults.some((r: any) => r.status === 'error');
 
@@ -138,7 +148,7 @@ export function UploadZone({ clientId, disabled = false }: { clientId: string; d
         <div className="card overflow-hidden">
           <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
             <span className="text-sm font-medium text-slate-700">{filesLabel(files.length)}</span>
-            {!uploading && files.some(f => f.status === 'pending') && (
+            {!uploading && files.some(f => f.status === 'pending' || f.status === 'error') && (
               <button onClick={() => setFiles([])} className="text-xs text-slate-400 hover:text-slate-600">נקה הכל</button>
             )}
           </div>
@@ -161,7 +171,7 @@ export function UploadZone({ clientId, disabled = false }: { clientId: string; d
                 {f.status === 'pending'   && <button onClick={() => removeFile(i)} className="text-slate-300 hover:text-slate-500"><XCircle className="h-4 w-4" /></button>}
                 {f.status === 'uploading' && <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />}
                 {f.status === 'done'      && <CheckCircle2 className="h-4 w-4 text-emerald-500" />}
-                {f.status === 'error'     && <XCircle className="h-4 w-4 text-red-500" />}
+                {f.status === 'error'     && <button onClick={() => removeFile(i)} title="הסר מהרשימה"><XCircle className="h-4 w-4 text-red-500" /></button>}
               </div>
             ))}
           </div>

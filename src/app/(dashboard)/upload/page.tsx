@@ -49,6 +49,9 @@ function UploadContent() {
         const row = Array.isArray(data) ? data[0] : null;
         if (error || !row) setClient({ state: 'missing' });
         else setClient({ state: 'found', name: row.name });
+      }, () => {
+        // network failure: don't leave the page spinning forever
+        if (!cancelled) setClient({ state: 'missing' });
       });
     return () => { cancelled = true; };
   }, [clientId]);

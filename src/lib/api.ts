@@ -2,6 +2,7 @@ import type { BankTransaction, ClientContact, ClientNotification, ExtractedData,
 import type { FeatureFlag, FeatureFlagsResponse, OrgFeatureFlagsResponse } from '@/shared/featureFlags';
 import type { NotificationOutcome, ReturnReasonCode } from '@/shared/returns';
 import type { BankAction, BankOverview, ImportResult, MatchRunResult } from '@/lib/bankTransactions';
+import { mimeFromFileName } from '@/shared/uploadValidation';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -39,7 +40,9 @@ export async function uploadInvoices(clientId: string, files: File[]): Promise<{
         method: 'PUT',
         body: file,
         headers: {
-          'Content-Type': file.type,
+          // The type implied by the (already checked) extension: some browsers send an empty or
+          // generic type, which the raw-invoices bucket (allowed_mime_types) would refuse
+          'Content-Type': mimeFromFileName(file.name) ?? file.type ?? 'application/octet-stream',
         },
       });
       if (!uploadRes.ok) {
@@ -49,7 +52,7 @@ export async function uploadInvoices(clientId: string, files: File[]): Promise<{
       uploadedFiles.push({
         filePath,
         fileName: file.name,
-        mimeType: file.type,
+        mimeType: mimeFromFileName(file.name) ?? file.type,
       });
     } catch (err: any) {
       console.error(`Error uploading ${file.name}:`, err);

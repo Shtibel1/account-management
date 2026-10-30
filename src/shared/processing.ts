@@ -18,7 +18,7 @@ export interface ProcessingProgress {
 
 /** A tick holds the job lock this long; a tick that dies frees the job when it expires. */
 export const JOB_LOCK_MS = 90_000;
-/** The extraction step (LLM, possibly a long retry) holds the job longer, so no second tick repeats it. */
+/** The LLM steps (boundary detection, extraction; possibly a long retry) hold the job longer, so no second tick repeats them. */
 export const EXTRACT_LOCK_MS = 5 * 60_000;
 /** Time budget of one tick for OCR batches (well under the ~28 s Amplify response limit). */
 export const TICK_OCR_BUDGET_MS = 14_000;

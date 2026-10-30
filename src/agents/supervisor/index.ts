@@ -515,7 +515,8 @@ const graph = new StateGraph<any>({
             primaryOcrMetadata = splitOcrMetadata;
             primaryOcrWords = splitOcrWords;
 
-            await supabase
+            // Only while this run still owns the row (a superseded run must not repoint the file)
+            let repoint = supabase
               .from('invoices')
               .update({
                 file_url: splitFileUrl,
@@ -523,6 +524,12 @@ const graph = new StateGraph<any>({
                 updated_at: new Date().toISOString(),
               })
               .eq('id', state.invoiceId);
+            const runId = (state as PipelineRunState).runId;
+            if (runId) repoint = repoint.eq('processing_run_id', runId);
+            const { data: repointed, error: repointErr } = await repoint.select('id');
+            if (repointErr || !Array.isArray(repointed) || repointed.length === 0) {
+              throw new Error(`Could not point invoice ${state.invoiceId} at split part 1 (superseded or DB error)`);
+            }
             // The invoice now points at the split part, so its fingerprint changes with it
             await saveInvoiceFileHash(supabase, state.invoiceId, splitFileHash);
           } else {

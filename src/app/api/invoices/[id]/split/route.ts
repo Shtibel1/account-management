@@ -133,6 +133,10 @@ export async function POST(
       status: 'processing',
       processing_stage: 'splitting',
       processing_run_id: claimToken,
+      // A fresh start time: the stuck-run check (tick / sweeper) must not judge this claim by the
+      // start time of an earlier processing run (> MAX_RUN_MS ago) and fail it mid-split
+      processing_started_at: new Date().toISOString(),
+      processing_progress: null,
       updated_at: new Date().toISOString(),
     })
     .eq('id', id)
@@ -260,12 +264,20 @@ export async function POST(
   }
 
   // 6. Queue every part on the server; a short head start runs after the response
+  // (in parallel: each part is its own row, and a 20-part split must stay within the response limit)
   const queuedIds: string[] = [];
-  for (const part of results) {
-    const queued = await enqueueProcessing(part.id, { mimeType: 'application/pdf' });
-    if (queued.ok) queuedIds.push(part.id);
-    else console.error(`[Split API] Could not queue part ${part.id}: ${queued.error}`);
-  }
+  const queuedResults = await Promise.all(
+    results.map((part) =>
+      enqueueProcessing(part.id, { mimeType: 'application/pdf' }).catch((err) => {
+        console.error(`[Split API] Queueing part ${part.id} crashed:`, err);
+        return { ok: false as const, httpStatus: 500 as const, error: String(err) };
+      })
+    )
+  );
+  queuedResults.forEach((queued, idx) => {
+    if (queued.ok) queuedIds.push(results[idx].id);
+    else console.error(`[Split API] Could not queue part ${results[idx].id}: ${queued.error}`);
+  });
   after(async () => {
     const started = Date.now();
     for (const partId of queuedIds) {
