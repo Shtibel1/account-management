@@ -1,4 +1,5 @@
-import type { ClientContact, ExtractedData, SupplierAutomation, SupplierAutomationStatus, ValidationResult } from '@/shared/types';
+import type { BankTransaction, ClientContact, ExtractedData, NormalizedBankRow, SupplierAutomation, SupplierAutomationStatus, ValidationResult } from '@/shared/types';
+import type { BankAction, BankOverview, ImportResult, MatchRunResult } from '@/lib/bankTransactions';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -268,4 +269,51 @@ export async function removeClientContact(clientId: string, contactId: string): 
     const body = await res.json().catch(() => null);
     throw new Error(body?.error ?? 'שגיאה במחיקת מספר');
   }
+}
+
+// ── Bank statement matching ───────────────────────────────────────────
+
+export interface BankOverviewResponse extends BankOverview {
+  /** True when the bank_transactions migration hasn't been applied to the database yet. */
+  setupRequired?: boolean;
+}
+
+async function bankRequest<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_URL}${url}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error ?? 'שגיאה בתקשורת עם השרת');
+  return body as T;
+}
+
+export function fetchBankOverview(clientId: string) {
+  return bankRequest<BankOverviewResponse>(`/api/bank?clientId=${encodeURIComponent(clientId)}`);
+}
+
+export function importBankStatement(payload: {
+  clientId: string;
+  accountLabel: string;
+  fileName: string | null;
+  rows: NormalizedBankRow[];
+}) {
+  return bankRequest<ImportResult & MatchRunResult>('/api/bank/import', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function runBankAutoMatch(clientId: string) {
+  return bankRequest<MatchRunResult>('/api/bank/match', {
+    method: 'POST',
+    body: JSON.stringify({ clientId }),
+  });
+}
+
+export function bankTransactionAction(id: string, action: BankAction) {
+  return bankRequest<BankTransaction>(`/api/bank/transactions/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(action),
+  });
 }

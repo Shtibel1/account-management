@@ -164,3 +164,27 @@ export const CostMetricsSchema = z.object({
   estimatedCostUsd: z.number(),
 });
 
+
+// ── Bank statement matching (/api/bank) ───────────────────────────────
+// Ids are plain strings: the local mock DB doesn't generate UUIDs.
+
+export const NormalizedBankRowSchema = z.object({
+  txn_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  description: z.string().max(500),
+  amount: z.number().finite(),
+  reference: z.string().max(100).nullable(),
+});
+
+export const BankImportSchema = z.object({
+  clientId: z.string().min(1),
+  accountLabel: z.string().trim().max(100),
+  fileName: z.string().max(255).nullable().optional(),
+  rows: z.array(NormalizedBankRowSchema).min(1).max(20000),
+});
+
+export const BankActionSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('match'), invoiceId: z.string().min(1) }),
+  z.object({ action: z.literal('unmatch') }),
+  z.object({ action: z.literal('ignore') }),
+  z.object({ action: z.literal('restore') }),
+]);

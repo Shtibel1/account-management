@@ -5,7 +5,7 @@ import { usePathname } from 'next/navigation';
 import clsx from 'clsx';
 import { Logo } from '@/components/ui/Logo';
 import {
-  Upload, ClipboardCheck, Users, BookOpen, LayoutDashboard,
+  Upload, ClipboardCheck, Users, BookOpen, LayoutDashboard, Landmark,
 } from 'lucide-react';
 import versionData from '@/shared/version.json';
 
@@ -14,6 +14,7 @@ const navItems = [
   { href: '/upload',   label: 'העלאת חשבוניות',   icon: Upload },
   { href: '/review',   label: 'בדיקה ואישור',     icon: ClipboardCheck },
   { href: '/mappings', label: 'מיפוי חשבונות',    icon: BookOpen },
+  { href: '/bank',     label: 'התאמות בנק',       icon: Landmark },
 ];
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {

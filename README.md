@@ -44,8 +44,9 @@ Each agent lives in `src/agents/<name>/` with its prompt/spec in `agent.md` and 
 | `/upload` | Bulk upload invoices per client |
 | `/review`, `/review/[id]` | Review queue and side-by-side validation |
 | `/mappings` | Supplier / category → account-code mappings |
+| `/bank` | Bank / credit-card statement import, invoice matching and the "missing invoices" list |
 
-API routes under `src/app/api/`: `invoices` (upload, upload-url, process, split, approve), `ingest/email` and `ingest/whatsapp` (inbound channels, see [docs/ingestion.md](docs/ingestion.md)), `clients` (channels, contacts), `suppliers/search-vat`, `export`, `lead`.
+API routes under `src/app/api/`: `invoices` (upload, upload-url, process, split, approve, duplicates/dismiss), `ingest/email` and `ingest/whatsapp` (inbound channels, see [docs/ingestion.md](docs/ingestion.md)), `clients` (channels, contacts), `suppliers` (search-vat, automation, rules/apply), `export`, `lead`, `bank` (overview, import, match, transactions/[id]).
 
 ## Local setup
 
