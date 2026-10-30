@@ -1,13 +1,13 @@
-import { isGenericSupplierName } from '@/shared/supplierRules';
+import { isSpecificSupplierName, registrarNameMatches } from '@/shared/supplierNameMatch';
 
 /**
  * Helper function to look up the official VAT ID (ח.פ. / מספר תאגיד) 
  * from the Israeli Government open data portal (data.gov.il) CKAN API.
  */
 export async function searchVatIdByName(supplierName: string): Promise<string | null> {
-  if (!supplierName || supplierName.trim().length < 2) return null;
-  // A placeholder like "ספקים שונים" is not a business: any registrar hit would be unrelated
-  if (isGenericSupplierName(supplierName)) return null;
+  // A placeholder ("ספקים שונים") or a generic word ("חברה", "דלק") is not one business: any
+  // registrar hit would be an unrelated company whose number gets autofilled as the supplier's
+  if (!isSpecificSupplierName(supplierName)) return null;
   
   const query = supplierName.trim();
   
@@ -46,35 +46,8 @@ export async function searchVatIdByName(supplierName: string): Promise<string | 
       )
     );
     
-    const clean = (s: string) => 
-      s.replace(/["'׳״()~,\-\/]|בע.?מ|ע.?ר|בע"מ|בע~מ|למיקוד|בפירוק|LTD|L\.T\.D\.|שותפות|מוגבלת/gi, '')
-       .replace(/\s+/g, ' ')
-       .trim();
-
-    const isMatch = (q: string, c: string) => {
-      const cleanQ = clean(q).toLowerCase();
-      const cleanC = clean(c).toLowerCase();
-      if (!cleanQ || !cleanC) return false;
-
-      // 1. Substring matches
-      if (cleanC.includes(cleanQ) || cleanQ.includes(cleanC)) return true;
-
-      // 2. Token overlap matches
-      const wordsQ = cleanQ.split(/\s+/).filter(w => w.length >= 2);
-      const wordsC = cleanC.split(/\s+/).filter(w => w.length >= 2);
-      if (wordsQ.length === 0 || wordsC.length === 0) return false;
-
-      const intersect = wordsQ.filter(w => wordsC.includes(w));
-      const ratio = intersect.length / Math.min(wordsQ.length, wordsC.length);
-      if (ratio >= 0.6) return true;
-
-      // 3. First 2 words match exactly
-      if (wordsQ.length >= 2 && wordsC.length >= 2) {
-        if (wordsQ[0] === wordsC[0] && wordsQ[1] === wordsC[1]) return true;
-      }
-
-      return false;
-    };
+    // A record must be the queried business as a whole (see registrarNameMatches)
+    const isMatch = registrarNameMatches;
 
     // 1. Parse Companies
     const companyRecords = responses[0]?.result?.records || [];

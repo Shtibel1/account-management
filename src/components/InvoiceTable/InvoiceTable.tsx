@@ -299,7 +299,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
                     <div className="flex items-center gap-2">
                       <FileText className="h-4 w-4 text-slate-400 shrink-0 self-start mt-0.5" />
                       <div className="flex flex-col min-w-0">
-                        <span className="text-slate-700 font-medium max-w-[160px] truncate" title={inv.file_name}>{inv.file_name}</span>
+                        <span className="text-slate-700 font-medium max-w-[160px] truncate" title={inv.file_name}><bdi>{inv.file_name}</bdi></span>
                         {showReturned && inv.status === 'returned' && inv.return_reason && (
                           <span className="text-xs text-orange-600 font-normal max-w-[200px] truncate mt-0.5" title={inv.return_reason}>
                             {inv.return_reason}

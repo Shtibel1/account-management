@@ -21,6 +21,7 @@ import {
 } from '@/lib/api';
 import { downloadMissingInvoicesXlsx } from '@/lib/exporters/missingInvoices';
 import { DEFAULT_BANK_PAGE_SIZE, summarizeBankTransactions } from '@/shared/bankOverview';
+import { clientDisplayNames } from '@/shared/clientLabels';
 
 const EMPTY: BankOverviewResponse = {
   transactions: [],
@@ -40,6 +41,7 @@ export default function BankPage() {
   const supabase = createClient();
   const { toast } = useToast();
   const [clients, setClients] = useState<Client[]>([]);
+  const clientLabels = useMemo(() => clientDisplayNames(clients), [clients]);
   const [clientId, setClientId] = useState('');
   const [overview, setOverview] = useState<BankOverviewResponse>(EMPTY);
   const [loading, setLoading] = useState(false);
@@ -186,10 +188,10 @@ export default function BankPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <select className="input-base w-56" value={clientId} onChange={(e) => setClientId(e.target.value)}>
+          <select className="input-base w-56 max-w-full" value={clientId} onChange={(e) => setClientId(e.target.value)} aria-label="לקוח">
             {clients.length === 0 && <option value="">אין לקוחות</option>}
             {clients.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
+              <option key={c.id} value={c.id}>{clientLabels.get(c.id) ?? c.name}</option>
             ))}
           </select>
           <button

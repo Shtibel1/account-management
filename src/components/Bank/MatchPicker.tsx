@@ -89,7 +89,7 @@ export function MatchPicker({ transaction, available, candidateIds, onSelect, on
               >
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="font-medium text-slate-800 truncate">{inv.supplier_name || inv.file_name}</span>
+                    <bdi className="font-medium text-slate-800 truncate">{inv.supplier_name || inv.file_name}</bdi>
                     {candidateSet.has(inv.id) && (
                       <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-700 bg-blue-50 border border-blue-200 rounded-full px-2 py-0.5 shrink-0">
                         <Sparkles className="h-3 w-3" /> מוצעת

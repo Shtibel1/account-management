@@ -262,7 +262,7 @@ export default function ReviewDetailPage() {
         </button>
 
         <span className="text-slate-300">·</span>
-        <h1 className="text-base font-semibold text-slate-900 truncate min-w-0 max-w-[60vw] sm:max-w-xs">{invoice.file_name}</h1>
+        <h1 className="text-base font-semibold text-slate-900 truncate min-w-0 max-w-[60vw] sm:max-w-xs" title={invoice.file_name}><bdi>{invoice.file_name}</bdi></h1>
 
         {hasBboxes && (
           <div className="mr-auto flex items-center gap-3 flex-wrap">
@@ -346,7 +346,8 @@ export default function ReviewDetailPage() {
       {/* Stacked on small screens (form first, then the document); side by side from lg */}
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-4 min-h-0">
         {/* Right — validation form (places it on the right side in RTL) */}
-        <div className="card overflow-hidden h-[75vh] lg:h-auto">
+        {/* Mobile: natural height (the page scrolls; see ValidationForm). lg: fills the grid row */}
+        <div className="card lg:overflow-hidden lg:h-auto">
           <ValidationForm
             invoice={invoice}
             onApproved={load}

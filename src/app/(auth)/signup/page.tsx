@@ -86,9 +86,10 @@ function SignupForm() {
         </FormMessage>
       ) : (
         <form onSubmit={handleSubmit} className="space-y-4">
-          <label className="block space-y-1.5">
-            <span className="text-sm font-medium text-slate-700">שם המשרד</span>
+          <div className="space-y-1.5">
+            <label htmlFor="signup-org" className="block text-sm font-medium text-slate-700">שם המשרד</label>
             <input
+              id="signup-org"
               type="text"
               value={orgName}
               onChange={(e) => setOrgName(e.target.value)}
@@ -96,10 +97,11 @@ function SignupForm() {
               placeholder="לדוגמה: משרד כהן ראיית חשבון"
               maxLength={200}
             />
-          </label>
-          <label className="block space-y-1.5">
-            <span className="text-sm font-medium text-slate-700">שם מלא</span>
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="signup-name" className="block text-sm font-medium text-slate-700">שם מלא</label>
             <input
+              id="signup-name"
               type="text"
               autoComplete="name"
               value={fullName}
@@ -107,10 +109,11 @@ function SignupForm() {
               className="input-base"
               maxLength={200}
             />
-          </label>
-          <label className="block space-y-1.5">
-            <span className="text-sm font-medium text-slate-700">אימייל</span>
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="signup-email" className="block text-sm font-medium text-slate-700">אימייל</label>
             <input
+              id="signup-email"
               type="email"
               required
               autoComplete="email"
@@ -120,21 +123,23 @@ function SignupForm() {
               className="input-base text-left"
               placeholder="name@office.co.il"
             />
-          </label>
-          <label className="block space-y-1.5">
-            <span className="text-sm font-medium text-slate-700">סיסמה</span>
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="signup-password" className="block text-sm font-medium text-slate-700">סיסמה</label>
             <input
+              id="signup-password"
               type="password"
               required
               minLength={MIN_PASSWORD}
+              aria-describedby="signup-password-hint"
               autoComplete="new-password"
               dir="ltr"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="input-base text-left"
             />
-            <span className="block text-xs text-slate-400">לפחות {MIN_PASSWORD} תווים</span>
-          </label>
+            <span id="signup-password-hint" className="block text-xs text-slate-400">לפחות {MIN_PASSWORD} תווים</span>
+          </div>
 
           <button
             type="submit"

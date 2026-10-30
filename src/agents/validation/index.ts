@@ -1,4 +1,4 @@
-import type { DuplicateMatch, ExtractedData, SupplierRuleTrace, TenantRules, ValidationResult } from '@/shared/types';
+import type { DuplicateMatch, ExtractedData, OcrWord, SupplierRuleTrace, TenantRules, ValidationResult } from '@/shared/types';
 import { supabase } from '@/lib/supabase';
 import { fetchSupplierMappings, isAutoApproveEnabled } from '@/lib/supplierAutomation';
 import { applySupplierRule, findSupplierRule, isGenericSupplierName, normalizeVatId } from '@/shared/supplierRules';
@@ -91,6 +91,8 @@ function checkVatId(vatId: string | null): boolean {
 export interface ValidationContext {
   /** Full OCR text of the document: used to tell the issuer's VAT ID from the buyer's. */
   ocrText?: string | null;
+  /** OCR word boxes: tell label/value columns of a key-value table apart from the issuer's header. */
+  ocrWords?: readonly OcrWord[] | null;
 }
 
 export async function validateInvoice(
@@ -121,7 +123,12 @@ export async function validateInvoice(
   let buyerVatIdSuspected = false;
   if (readVatId) {
     const ownIds = await fetchClientOwnVatIds(supabase, tenantId, invoiceId, [normalizeVatId(readVatId) ?? readVatId]);
-    const vatCheck = checkSupplierVatId({ vatId: readVatId, ocrText: context.ocrText, clientOwnIds: ownIds });
+    const vatCheck = checkSupplierVatId({
+      vatId: readVatId,
+      ocrText: context.ocrText,
+      ocrWords: context.ocrWords,
+      clientOwnIds: ownIds,
+    });
     if (vatCheck.reason) {
       buyerVatIdSuspected = true;
       console.log(`[Validation] supplier_vat_id ${readVatId} looks like the buyer's (${vatCheck.reason}); using ${vatCheck.replacement ?? 'none'}.`);

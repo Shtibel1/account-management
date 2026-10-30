@@ -221,8 +221,8 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
         <Document
           file={fileUrl}
           onLoadSuccess={onDocumentLoadSuccess}
-          loading={<div className="text-slate-400 py-4 text-center">טוען קובץ PDF...</div>}
-          error={<div className="text-rose-500 py-4 text-center">שגיאה בטעינת קובץ ה-PDF</div>}
+          loading={<div dir="rtl" className="text-slate-400 py-4 text-center">טוען קובץ PDF...</div>}
+          error={<div dir="rtl" className="text-rose-500 py-4 text-center">שגיאה בטעינת קובץ ה-PDF</div>}
           className="flex flex-col items-center gap-4 w-full"
         >
           {Array.from(new Array(numPages ?? 0), (el, index) => {

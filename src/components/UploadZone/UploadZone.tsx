@@ -161,7 +161,7 @@ export function UploadZone({ clientId, disabled = false }: { clientId: string; d
                     : <FileImage className="h-4 w-4 text-blue-500" />}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-slate-700 truncate font-medium">{f.file.name}</p>
+                  <p className="text-sm text-slate-700 truncate font-medium" title={f.file.name}><bdi>{f.file.name}</bdi></p>
                   {f.status === 'error' && f.error ? (
                     <p className="text-xs text-red-500 font-medium truncate" title={f.error}>{f.error}</p>
                   ) : (

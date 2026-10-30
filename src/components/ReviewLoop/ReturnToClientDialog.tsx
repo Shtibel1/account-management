@@ -76,7 +76,7 @@ export function ReturnToClientDialog({
         </div>
 
         <p className="text-sm text-slate-500">
-          המסמך <span className="font-semibold text-slate-700">{fileName}</span> יסומן &quot;הוחזר ללקוח&quot;, והלקוח יקבל הודעה עם הסיבה ובקשה לשלוח מסמך מתוקן.
+          המסמך <bdi className="font-semibold text-slate-700">{fileName}</bdi> יסומן &quot;הוחזר ללקוח&quot;, והלקוח יקבל הודעה עם הסיבה ובקשה לשלוח מסמך מתוקן.
         </p>
 
         <div className="space-y-2">

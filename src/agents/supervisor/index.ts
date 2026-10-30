@@ -662,7 +662,7 @@ const graph = new StateGraph<any>({
       state.tenantId,
       state.extractedData,
       state.tenantRules,
-      { ocrText: state.rawOcrText }
+      { ocrText: state.rawOcrText, ocrWords: state.ocrWords }
     );
     // A file that holds several invoices must not be auto-approved as one: force review and
     // store the suggestion so the review screen can pre-fill the split dialog.
