@@ -2,7 +2,8 @@
 // account). These values go into the exports (e.g. Move-in pads them to 15 characters), so they
 // must be digits only. These rows are written straight through PostgREST (RLS), so every form that
 // writes them (mappings page + Excel import, review form, new-client form) runs these checks.
-// No DB CHECK constraint: legacy rows with free text would then fail unrelated updates.
+// The DB enforces the same formats for new writes (triggers in 20261030182000_qa2_security2.sql,
+// SQLSTATE 23514, checked only when the column changes so legacy free-text rows still update).
 import { isValidVatIdChecksum, normalizeVatId } from '@/shared/vatId';
 
 /** Longest account code the exports can hold (Move-in account columns are 15 wide). */
@@ -65,7 +66,7 @@ export function mappingDbErrorMessage(error: { code?: string; message?: string }
   if (!error) return null;
   if (error.code === '23514') {
     if (/vat_account/.test(error.message ?? '')) return 'קוד חשבון מע"מ חייב להכיל ספרות בלבד';
-    if (/vat_id/.test(error.message ?? '')) return 'מספר תיק מע"מ חייב להיות בן 9 ספרות';
+    if (/vat_id/.test(error.message ?? '')) return 'מספר תיק מע"מ אינו תקין (9 ספרות עם ספרת ביקורת תקינה)';
     return 'קוד החשבון חייב להכיל ספרות בלבד';
   }
   if (error.code === '23505') return 'מיפוי בשם זה כבר קיים ללקוח';

@@ -116,7 +116,9 @@ export function clientIpFrom(headers: HeaderReader): string {
   return chain[chain.length - 1] || headers.get('x-real-ip')?.trim() || 'unknown';
 }
 
-/** Counter bucket names for one request (the IP is already hashed by the caller). */
+/** Counter bucket names for one request (the IP is already hashed by the caller). Per-IP buckets
+ * come first: the DB check (lead_rate_limit_hit_all) stops at the first full bucket and counts
+ * nothing, so a refused request never touches the global counter. */
 export function rateBuckets(ipHash: string): { rule: RateRule; bucket: string }[] {
   return LEAD_RATE_RULES.map((rule) => ({ rule, bucket: rule.perIp ? `${rule.name}:${ipHash}` : rule.name }));
 }
@@ -138,6 +140,30 @@ export class MemoryRateLimiter {
     this.counters.set(key, entry);
     if (this.counters.size > 10_000) this.prune(windowStart);
     return entry.hits <= max;
+  }
+
+  /**
+   * All-or-nothing: when every bucket still has room in its current window, counts one hit on each
+   * and returns true; otherwise counts NOTHING and returns false (a request refused by the per-IP
+   * limit must not use up the global budget meant for other visitors - QA round 2 N6).
+   */
+  hitAll(entries: { bucket: string; windowSeconds: number; max: number }[]): boolean {
+    const now = this.now();
+    const slots = entries.map(({ bucket, windowSeconds, max }) => {
+      const windowMs = windowSeconds * 1000;
+      const windowStart = Math.floor(now / windowMs) * windowMs;
+      const key = `${bucket}@${windowSeconds}`;
+      const current = this.counters.get(key);
+      const entry = current && current.windowStart === windowStart ? current : { windowStart, hits: 0 };
+      return { key, entry, max, windowStart };
+    });
+    if (slots.some((s) => s.entry.hits >= s.max)) return false;
+    for (const s of slots) {
+      s.entry.hits += 1;
+      this.counters.set(s.key, s.entry);
+    }
+    if (this.counters.size > 10_000) this.prune(Math.min(...slots.map((s) => s.windowStart)));
+    return true;
   }
 
   private prune(currentWindow: number): void {

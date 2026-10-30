@@ -92,10 +92,16 @@ auth.users ──< memberships (role owner|member) >── organizations ──<
 - `next.config.ts` `headers()` (`src/lib/securityHeaders.ts`): every response gets `X-Content-Type-Options:
   nosniff`, HSTS, `X-Frame-Options: SAMEORIGIN` and `Referrer-Policy`; every `/api/*` and `/auth/*` response gets
   `Cache-Control: private, no-store` (per-office data must never be stored by CloudFront or shared caches).
-- `POST /api/lead` (public): field length caps, a honeypot field (`website`; filled → fake success, no email) and
-  rate limits per client IP (3 / 10 min, 10 / day) plus a global 30 / hour, counted in the DB
-  (`lead_rate_limit_hit()`, salted IP hash, service role only) with an in-memory fallback → 429
+- `POST /api/lead` (public): field length caps, a honeypot field (`website`; filled → fake success, no email,
+  nothing counted) and rate limits per client IP (3 / 10 min, 10 / day) plus a global 30 / hour, counted in the DB
+  all-or-nothing (`lead_rate_limit_hit_all()`, salted IP hash, service role only: a request refused by any limit
+  counts nothing, so one IP can't use up the global budget) with an in-memory fallback of the same semantics → 429
   (`src/lib/leadGuard.ts`).
+- Formats of bookkeeping codes are enforced in the DB for new writes (triggers, migration
+  `20261030182000_qa2_security2.sql`): `account_mappings.account_code` / `clients.vat_account` digits only (≤ 15),
+  `account_mappings.vat_id` 9 digits with a valid check digit; checked only on insert or when the column changes.
+- `clients.contact_email` (flag-gated) can only be written by the server (`PUT /api/clients/[id]/contact-email`,
+  which checks the flag); a direct PostgREST write by a member is refused (42501).
 
 ## Login UI
 

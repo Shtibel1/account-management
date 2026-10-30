@@ -6,7 +6,12 @@ import { requireClientAccess } from '@/lib/auth';
 
 // Stores normalized statement rows (parsed + column-mapped in the browser) and auto-matches them.
 // The import is all or nothing: a bad row is a 400 naming the row, and nothing is stored.
+// Amplify cuts a request at ~28 s. A large import that already used most of that leaves the
+// auto-match for later (the lines are stored; the bank page runs matching on demand).
+const AUTO_MATCH_TIME_BUDGET_MS = 15_000;
+
 export async function POST(request: Request) {
+  const startedAt = Date.now();
   let raw: unknown;
   try {
     raw = await request.json();
@@ -45,11 +50,16 @@ export async function POST(request: Request) {
   // The lines are stored; a failed auto-match must not report the import itself as failed.
   let match: MatchRunResult = { matched: 0, ambiguous: 0 };
   let matchError: string | undefined;
-  try {
-    match = await runAutoMatch(supabase, clientId);
-  } catch (err) {
-    console.error('[bank] Auto-match after import failed:', err);
-    matchError = 'התנועות נשמרו, אך ההתאמה האוטומטית נכשלה. אפשר להריץ אותה שוב מהמסך.';
+  if (Date.now() - startedAt > AUTO_MATCH_TIME_BUDGET_MS) {
+    console.warn(`[bank] Import of ${rows.length} rows took ${Date.now() - startedAt} ms - skipping auto-match`);
+    matchError = 'התנועות נשמרו. בגלל גודל הקובץ ההתאמה האוטומטית לא הורצה - אפשר להריץ אותה מהמסך.';
+  } else {
+    try {
+      match = await runAutoMatch(supabase, clientId);
+    } catch (err) {
+      console.error('[bank] Auto-match after import failed:', err);
+      matchError = 'התנועות נשמרו, אך ההתאמה האוטומטית נכשלה. אפשר להריץ אותה שוב מהמסך.';
+    }
   }
 
   return NextResponse.json({ ...imported, matched: match.matched, ambiguous: match.ambiguous, ...(matchError ? { matchError } : {}) });
