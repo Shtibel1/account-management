@@ -56,9 +56,10 @@ const SECRET_KEY_NAMES = new Set([
   'sessionid',
   'cookie',
   'credentials',
+  'policy', // presigned S3 POST policy
 ]);
 
-const SECRET_KEY_SUFFIXES = ['password', 'secret', 'token', 'apikey', 'privatekey'];
+const SECRET_KEY_SUFFIXES = ['password', 'secret', 'token', 'apikey', 'privatekey', 'signature', 'credential'];
 
 function normalizeKey(key: string): string {
   return key.toLowerCase().replace(/[-_\s.]/g, '');

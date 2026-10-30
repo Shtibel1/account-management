@@ -3,8 +3,10 @@ import type {
   ExportPlugin,
   IntegrationEnvironment,
   IntegrationLogSink,
+  InvoiceFileReader,
   PluginContext,
 } from '@/integrations/types';
+import { supabaseInvoiceFileReader } from '@/integrations/files';
 import { createIntegrationHttpClient, createIntegrationLogger, type FetchLike } from '@/integrations/http';
 import { secretsOf, type ConfigValues } from '@/integrations/config';
 import { decryptJson, encryptJson, integrationConfigAad } from '@/lib/secrets';
@@ -53,6 +55,7 @@ export interface ContextOptions {
   dryRun: boolean;
   sink?: IntegrationLogSink;
   fetchImpl?: FetchLike;
+  files?: InvoiceFileReader;
 }
 
 export function buildPluginContext(options: ContextOptions): PluginContext<unknown> {
@@ -78,6 +81,7 @@ export function buildPluginContext(options: ContextOptions): PluginContext<unkno
     logger: createIntegrationLogger(common),
     correlationId: options.correlationId,
     dryRun: options.dryRun,
+    files: options.files ?? (plugin.capabilities.attachPdf ? supabaseInvoiceFileReader() : undefined),
   };
 }
 

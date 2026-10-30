@@ -15,6 +15,36 @@ UI `src/app/(dashboard)/integrations` ("חיבור להנהלת חשבונות")
 | `movein`  | file | `movein.dat` (Windows-1255, fixed width) via the existing `MoveinExporter`. Byte-for-byte the same output as `POST /api/export`. |
 | `excel`   | file | `.xlsx` (RTL) with invoice fields + resolved account codes (supplier / expense / VAT) and a totals row. |
 | `webhook` | api  | POSTs each invoice as JSON to an https URL of the office (own middleware, Make / Zapier, an import hook). Optional Bearer token and HMAC signature. Reference implementation of an API plugin. |
+| `morning` | api  | Morning / Green Invoice (חשבונית ירוקה): one expense per invoice (`POST /expenses`) + the stored PDF attached. See below. |
+
+### Morning (`src/integrations/plugins/morning/`)
+
+- Config: `clientId` + `clientSecret` (API key from Morning, both secret), optional `defaultDocumentType`
+  (`305` / `320`) and `attachPdf` (`yes` default / `no`). Sandbox and production per client.
+- Hosts: API `https://sandbox.d.greeninvoice.co.il/api/v1` / `https://api.greeninvoice.co.il/api/v1`; token
+  `POST https://api.sandbox.morning.dev/idp/v1/oauth/token` / `https://api.morning.co/idp/v1/oauth/token`
+  (`client_credentials` -> `{ accessToken, expiresAt }`, 1 h). The token is cached in memory per client +
+  environment + credentials (hash) until 60 s before expiry; a 401 drops it and repeats the call once.
+- Mapping: `documentType` 330 for credit notes (negative total, or "חשבונית זיכוי" in the OCR text), else 320 when
+  the OCR text says "חשבונית מס / קבלה", 305 for "חשבונית מס", otherwise the configured default. `amount` = total incl.
+  VAT, `vat` = VAT part (absolute values; missing values derived), `reportingDate` = first of the invoice month,
+  `supplier { name, taxId, accountingKey (only a mapped supplier code), add: true }`,
+  `accountingClassification` = `{ id }` when the mapped expense account is a Morning classification UUID, else
+  `{ key: <expense account code> }` (the spec documents `id` or inline details; whether `key` alone is accepted is
+  unverified against the live API, so map Morning classification ids when in doubt), `allocationNumber`,
+  `currency: ILS`, `remarks: invoice-scan:<invoice id>`. Missing number / date / supplier / amount / mapped category,
+  a date before 2010-01-01 or a future date (Morning rejects both) block the export.
+- Idempotency: before every create, `POST /expenses/search` (number + reporting-month range: Morning filters
+  `fromDate` / `toDate` on `reportingDate` and accepts only `YYYY-MM-01`, so the invoice month -2 .. +6 months; up to
+  3 pages) and a match on number + supplier (tax id, else name) + document family (305 / 320 alike, 330 separate),
+  ignoring deleted (status 100) expenses; a match
+  is adopted. `POST /expenses` is non-idempotent (no retry on 5xx / timeout; the run marks it uncertain).
+- PDF: `GET /file-upload/v1/url?context=expense&data={"id":<expense>,"source":5,"state":"expense"}` -> presigned S3
+  POST (`url` must be `*.amazonaws.com`, 60 s), multipart with `file` last. The file is read server-side from the
+  `raw-invoices` bucket (`src/integrations/files.ts`, `ctx.files`; only the invoice's own client folder). An
+  attachment failure is logged (`attach_pdf`) but never fails the export, since the expense already exists.
+- Errors: Morning `errorCode` / `errorMessage` (and OAuth `error`) become `MorningApiError` with a Hebrew message
+  such as "מורנינג: שגיאה ביצירת ההוצאה - פרטי הספק חסרים [קוד 3311]", stored as the export's `last_error`.
 
 The legacy `POST /api/export` (Move-in download from the review table) is unchanged. Note: the only other Excel
 exporter in the codebase (`src/lib/exporters/missingInvoices.ts`) is the bank "missing invoices" sheet, which is not
