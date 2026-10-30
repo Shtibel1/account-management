@@ -13,7 +13,7 @@ Welcome! This document serves as the source of truth for the codebase architectu
 - **Framework:** Next.js (App Router, Tailwind CSS, TypeScript).
 - **Database & Storage:** Supabase (PostgreSQL database & Storage buckets for raw invoices).
 - **AI Agent Pipeline:** LangGraph (`StateGraph` with a memory saver checkpointer).
-- **LLM Provider:** Anthropic SDK (Claude 3.5 Sonnet for extraction, Claude Haiku for invoice splitting).
+- **LLM Provider:** Anthropic SDK (Claude Sonnet for extraction and multi-invoice boundary detection).
 - **OCR Engine:** Google Cloud Vision API (Document Text Detection).
 - **PDF Manipulation & Rendering:** `pdf-lib` (splitting/page management) and `react-pdf` (client-side page canvas rendering).
 
@@ -28,7 +28,8 @@ src/
 │   └── api/              # API endpoints (/api/export, /api/invoices, /api/suppliers/search-vat, /api/mock-db)
 ├── agents/               # LangGraph AI Pipeline Nodes
 │   ├── supervisor/       # Orchestrator & StateGraph definition
-│   ├── preprocessor/     # OCR & Smart Invoice Splitting logic
+│   ├── preprocessor/     # Google Vision OCR (full text, per-page text, word bboxes)
+│   ├── splitter/         # Multi-invoice PDF boundary detection (heuristics + Claude tool-use)
 │   ├── extraction/       # Anthropic Claude 3.5 Sonnet extraction engine
 │   ├── validation/       # Business rules & DB duplicate checks
 │   └── approval/         # Human-in-the-Loop approval node & resumption
@@ -45,7 +46,9 @@ src/
 The processing pipeline is defined in [supervisor/index.ts](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/src/agents/supervisor/index.ts) and runs in the following order:
 
 1. **`init_rules`:** Fetch client-specific dynamic rules from the database.
-2. **`preprocess`:** Run Google Vision OCR. If a multi-page PDF contains multiple invoices, Claude Haiku detects split boundaries. The PDF is split, parts are uploaded, and child pipelines are triggered.
+2. **`preprocess`:** Run Google Vision OCR (per page). For multi-page PDFs the splitter agent detects document boundaries: a cheap heuristic pre-check (single page, unreadable pages, consistent "עמוד X מתוך N" markers) decides without the LLM where it can; otherwise Claude (tool `report_document_boundaries`) groups pages into documents with a confidence. Ranges are validated by the pure helpers in `src/shared/documentSplit.ts`.
+   - **Default:** the file is kept whole, the suggestion is stored in `extracted_data.split_suggestion`, `validate` adds a warning and forces manual review, and the review screen shows a banner that pre-fills the existing split dialog.
+   - **Auto-split:** only when `AUTO_SPLIT_ENABLED` (in `documentSplit.ts`, default `false`) and confidence ≥ `AUTO_SPLIT_MIN_CONFIDENCE` (0.9): the PDF is split, parts are uploaded, and child pipelines are triggered.
 3. **`extract`:** Use Claude 3.5 Sonnet with a tool-use definition (`save_invoice_data`) to extract invoice fields and bounding box coordinates (bboxes).
    - **Per-supplier few-shot ("instant learning"):** before the call, VAT-id candidates in the OCR text (8/9 digits passing the checksum) are matched against `supplier_vat_id` of human-reviewed invoices (`reviewed_at` set). Up to 3 recent ones with stored `ocr_text` (same client first; other clients only without bank details, and never for the client's own VAT id — recognized as the buyer id printed on its reviewed invoices from 2+ suppliers) are added to the prompt as truncated OCR + approved values, with fields from `invoice_corrections` marked as previously misread. Pure logic in `src/shared/fewshot.ts`, DB loader in `src/lib/fewshot.ts`; best-effort (any failure → no examples). The save nodes persist `invoices.ocr_text` and `fewshot_example_count` / `fewshot_example_ids`; compare accuracy in the `fewshot_accuracy` view. Set `EXTRACTION_FEWSHOT=off` to disable.
 4. **`validate`:** Run calculations, Luhn checksum for Israeli VAT IDs (H.P.), whitelist category checks, database duplication checks, and composed VAT ID identification (from the invoice, supplier table, and Gov.il API web search).

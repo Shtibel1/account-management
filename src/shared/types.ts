@@ -1,3 +1,4 @@
+import type { SplitSuggestion } from '@/shared/documentSplit';
 import type { FewShotExample } from '@/shared/fewshot';
 
 export type InvoiceStatus = 'processing' | 'review' | 'approved' | 'exported' | 'error' | 'rejected';
@@ -35,6 +36,7 @@ export interface ExtractedData {
   bank_account?: string | null;
   validation_flags?: ValidationResult;
   bboxes?: BboxMap;
+  split_suggestion?: SplitSuggestion | null; // file looks like several documents (set by the pipeline)
   supplier_rule?: SupplierRuleTrace | null; // validated_data only: what the supplier rule filled in
 }
 
@@ -226,6 +228,7 @@ export interface PipelineState {
   error: string | null;
   costMetrics: CostMetrics;
   useVisionFallback: boolean;
+  splitSuggestion?: SplitSuggestion | null;
   /** Per-supplier few-shot lookup, loaded once per run (null = not loaded yet). */
   fewShot?: FewShotLookupState | null;
   /** Past invoices included as examples in the latest extraction (null = extraction didn't run). */
