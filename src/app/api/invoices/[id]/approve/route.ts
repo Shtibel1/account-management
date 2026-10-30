@@ -5,12 +5,16 @@ import { supabase } from '@/lib/supabase';
 import { recordCorrections } from '@/lib/corrections';
 import { disableAutoApproveAfterCorrections } from '@/lib/supplierAutomation';
 import type { PipelineState } from '@/shared/types';
+import { requireInvoiceAccess } from '@/lib/auth';
 
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+
+  const access = await requireInvoiceAccess(id);
+  if (!access.ok) return access.response;
 
   try {
     const body = await request.json();

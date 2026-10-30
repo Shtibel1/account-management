@@ -2,12 +2,15 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useState } from 'react';
 import clsx from 'clsx';
 import { Logo } from '@/components/ui/Logo';
 import {
-  Upload, ClipboardCheck, Users, BookOpen, LayoutDashboard, Landmark,
+  Upload, ClipboardCheck, Users, BookOpen, LayoutDashboard, Landmark, LogOut, Building2,
 } from 'lucide-react';
 import versionData from '@/shared/version.json';
+import { SessionProvider, useSession } from '@/components/Auth/SessionContext';
+import { isSupabaseConfigured } from '@/lib/supabaseConfig';
 
 const navItems = [
   { href: '/clients',  label: 'לקוחות',          icon: Users },
@@ -17,7 +20,52 @@ const navItems = [
   { href: '/bank',     label: 'התאמות בנק',       icon: Landmark },
 ];
 
+/** Office name, signed-in user and logout at the bottom of the sidebar. */
+function SidebarAccount() {
+  const { me, loading, currentOrgName, signOut } = useSession();
+  const [signingOut, setSigningOut] = useState(false);
+
+  return (
+    <div className="px-3 py-3 border-t border-white/10 space-y-2">
+      <div className="flex items-center gap-2.5 px-2">
+        <div className="h-8 w-8 shrink-0 rounded-lg bg-white/10 flex items-center justify-center">
+          <Building2 className="h-4 w-4 text-blue-300" />
+        </div>
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-white truncate" title={currentOrgName ?? undefined}>
+            {loading ? 'טוען...' : currentOrgName || 'ללא משרד'}
+          </p>
+          {me?.user.email && (
+            <p className="text-xs text-slate-400 truncate" dir="ltr" title={me.user.email}>
+              {me.user.email}
+            </p>
+          )}
+        </div>
+      </div>
+      {isSupabaseConfigured() && (
+        <button
+          type="button"
+          onClick={async () => { setSigningOut(true); await signOut(); }}
+          disabled={signingOut}
+          className="sidebar-item w-full disabled:opacity-60"
+        >
+          <LogOut className="h-4 w-4 shrink-0" />
+          {signingOut ? 'מתנתק...' : 'התנתקות'}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <SessionProvider>
+      <DashboardShell>{children}</DashboardShell>
+    </SessionProvider>
+  );
+}
+
+function DashboardShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
 
   return (
@@ -46,6 +94,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           })}
         </nav>
 
+        <SidebarAccount />
+
         {/* Footer */}
         <div className="px-5 py-4 border-t border-white/10">
           <p className="text-xs text-slate-500">גרסה {versionData.version} · {new Date().getFullYear()}</p>
@@ -66,10 +116,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </div>
         </header>
 
-        {!(
-          process.env.NEXT_PUBLIC_SUPABASE_URL &&
-          process.env.NEXT_PUBLIC_SUPABASE_URL !== 'https://placeholder-url.supabase.co'
-        ) && (
+        {!isSupabaseConfigured() && (
           <div className="bg-amber-50 border-b border-amber-200 px-8 py-2.5 flex items-center gap-3 text-sm text-amber-800">
             <span className="flex h-2 w-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
             <span className="font-semibold">סימולציה מקומית (Local Mock Mode):</span>

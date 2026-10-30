@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { buildStoragePath } from '@/lib/ingestHelpers';
+import { requireClientAccess } from '@/lib/auth';
 
 export async function POST(request: Request) {
   try {
@@ -14,6 +15,9 @@ export async function POST(request: Request) {
     if (!clientId || !fileName) {
       return NextResponse.json({ error: 'Missing clientId or fileName' }, { status: 400 });
     }
+
+    const access = await requireClientAccess(clientId);
+    if (!access.ok) return access.response;
 
     const filePath = buildStoragePath(clientId, fileName);
 

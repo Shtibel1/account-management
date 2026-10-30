@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { BankTableMissingError, loadBankOverview } from '@/lib/bankTransactions';
+import { requireClientAccess } from '@/lib/auth';
 
 // Statement lines of one client + matchable invoices + candidates for the unmatched debits.
 export async function GET(request: Request) {
@@ -8,6 +9,9 @@ export async function GET(request: Request) {
   if (!clientId) {
     return NextResponse.json({ error: 'חסר לקוח' }, { status: 400 });
   }
+
+  const access = await requireClientAccess(clientId);
+  if (!access.ok) return access.response;
 
   try {
     const overview = await loadBankOverview(supabase, clientId);

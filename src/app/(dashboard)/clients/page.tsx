@@ -5,10 +5,12 @@ import { createClient } from '@/utils/supabase/client';
 import { Client } from '@/shared/types';
 import Link from 'next/link';
 import { Plus, Building2, ChevronLeft, Users, Loader2 } from 'lucide-react';
+import { useSession } from '@/components/Auth/SessionContext';
 import { ClientChannelsDialog, ClientChannelsSummary, useClientChannels } from '@/components/ClientChannels/ClientChannels';
 
 export default function ClientsPage() {
   const supabase = createClient();
+  const { currentOrgId } = useSession();
   const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -44,7 +46,8 @@ export default function ClientsPage() {
     setSaving(true);
     const { data: newClient } = await supabase
       .from('clients')
-      .insert({ name: name.trim(), vat_account: vatAccount.trim() })
+      // org_id: the user's office (RLS requires membership; the DB defaults it when omitted).
+      .insert({ name: name.trim(), vat_account: vatAccount.trim(), ...(currentOrgId ? { org_id: currentOrgId } : {}) })
       .select('id')
       .single();
     if (newClient) {

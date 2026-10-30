@@ -5,6 +5,7 @@ Welcome! This document serves as the source of truth for the codebase architectu
 ### 📚 Detailed Reference Guides
 - [Database Schema (docs/db_schema.md)](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/docs/db_schema.md): Detailed schemas, tables, relationships, and JSONB formats.
 - [Supplier Rules & Auto-Approve (docs/supplier_automation.md)](docs/supplier_automation.md): Per-supplier defaults, precedence, auto-approve eligibility and opt-in.
+- [Authentication & Tenancy (docs/auth.md)](docs/auth.md): Login, offices (organizations) + memberships, RLS model, route guards, inviting members.
 - [Coding Standards & AI Guidelines (docs/coding_standards.md)](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/docs/coding_standards.md): Mandatory conventions, type-safety, import rules, and Git commit guidelines.
 
 ---
@@ -38,6 +39,16 @@ src/
 ├── shared/               # TypeScript interfaces (types.ts) and schemas
 └── utils/                # Utility helpers (e.g., encoding.ts, businessLookup.ts for Gov.il searches)
 ```
+
+---
+
+## 🔐 Authentication & Tenancy
+
+Supabase Auth with cookie sessions (`@supabase/ssr`). An **organization** is a bookkeeping office; users join it through `memberships` (owner | member) and every `clients` row has `org_id`. Details: [docs/auth.md](docs/auth.md).
+- `src/proxy.ts` (Next 16 Proxy, formerly middleware): session refresh; dashboard pages → `/login?next=`, `/api/*` → 401. Public: marketing pages, `/login`, `/signup`, `/auth/*`, `/api/lead`, `/api/ingest/{email,whatsapp}` (list in `src/lib/routeAccess.ts`).
+- `src/lib/auth.ts`: `requireUser`, `requireClientAccess`, `requireInvoiceAccess`, `requireBankTransactionAccess`, `requireOrgOwner`, `accessibleClientIds`. **Every new API route must call one of these before using the service-role client** (`@/lib/supabase`, server-only). Never trust `clientId`/`tenantId` from the body without a check.
+- Browser components use `@/utils/supabase/client` (anon key + user session → RLS). RLS policies (migration `20261030140000_auth_tenancy.sql`) scope every table by org membership; anon has no access.
+- Mock mode (no Supabase env, not production) skips auth; production without env fails closed (`src/lib/supabaseConfig.ts`).
 
 ---
 
@@ -99,7 +110,8 @@ Make sure the following environment variables are present in `.env.local`:
 - `ANTHROPIC_API_KEY`
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_SERVICE_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) - required since the auth/tenancy migration (anon has no table access)
+- `NEXT_PUBLIC_SITE_URL` (optional, origin for invite-email redirects)
 - `EXTRACTION_FEWSHOT` (optional, `off` disables per-supplier few-shot examples)
 
 Optional ingestion channels (off unless set, see [docs/ingestion.md](docs/ingestion.md)):

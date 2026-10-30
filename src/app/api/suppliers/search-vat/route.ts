@@ -1,7 +1,12 @@
 import { NextResponse } from 'next/server';
 import { searchVatIdByName } from '@/utils/businessLookup';
+import { requireUser } from '@/lib/auth';
 
 export async function GET(request: Request) {
+  // No tenant data involved (public registrar lookup), but it costs outbound calls: users only.
+  const auth = await requireUser();
+  if (!auth.ok) return auth.response;
+
   const { searchParams } = new URL(request.url);
   const name = searchParams.get('name');
 

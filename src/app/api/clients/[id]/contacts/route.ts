@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { addClientContact } from '@/lib/clientChannels';
+import { requireClientAccess } from '@/lib/auth';
 
 /** Adds a WhatsApp contact phone for the client. Body: { phone, name? } */
 export async function POST(
@@ -7,6 +8,9 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+
+  const access = await requireClientAccess(id);
+  if (!access.ok) return access.response;
 
   try {
     const body = (await request.json()) as { phone?: unknown; name?: unknown };

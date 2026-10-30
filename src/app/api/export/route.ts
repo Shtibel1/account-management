@@ -2,13 +2,17 @@ import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { MoveinExporter } from '@/lib/exporters/movein';
 import type { Invoice, AccountMapping } from '@/shared/types';
+import { requireClientsAccess, requireUser } from '@/lib/auth';
 
 export async function POST(request: Request) {
+  const auth = await requireUser();
+  if (!auth.ok) return auth.response;
+
   try {
     const body = await request.json();
     const { ids } = body as { ids: string[] };
 
-    if (!ids || ids.length === 0) {
+    if (!Array.isArray(ids) || ids.length === 0 || ids.some((id) => typeof id !== 'string')) {
       return NextResponse.json({ error: 'לא נבחרו חשבוניות' }, { status: 400 });
     }
 
@@ -27,7 +31,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'לא נמצאו חשבוניות מאושרות' }, { status: 400 });
     }
 
-    const clientId = (invoices[0] as Invoice).client_id;
+    // Every selected invoice must belong to a client of the user's organizations.
+    const clientIds = [...new Set((invoices as Invoice[]).map((inv) => inv.client_id))];
+    const access = await requireClientsAccess(clientIds, auth.value);
+    if (!access.ok) return access.response;
+    if (clientIds.length > 1) {
+      return NextResponse.json({ error: 'יש לייצא חשבוניות של לקוח אחד בכל פעם' }, { status: 400 });
+    }
+
+    const clientId = clientIds[0];
+    const exportedIds = (invoices as Invoice[]).map((inv) => inv.id);
 
     // 2. Fetch client + mappings
     const [clientRes, mappingsRes] = await Promise.all([
@@ -80,7 +93,7 @@ export async function POST(request: Request) {
         exported_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
-      .in('id', ids);
+      .in('id', exportedIds);
 
     // 6. Return the file buffer as download attachment
     const headers = new Headers();

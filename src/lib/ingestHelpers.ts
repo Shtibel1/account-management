@@ -24,7 +24,8 @@ export const MAX_DOCUMENTS_PER_MESSAGE = 10;
 /** Makes a filename safe for a Supabase Storage key (ASCII only), keeping the extension. */
 export function sanitizeStorageFilename(fileName: string): string {
   const lastDot = fileName.lastIndexOf('.');
-  const ext = lastDot !== -1 ? fileName.substring(lastDot) : '';
+  // Extension: ASCII alphanumerics only (a "/" there would otherwise leak into the storage key).
+  const ext = lastDot !== -1 ? fileName.substring(lastDot).replace(/[^a-zA-Z0-9.]/g, '') : '';
   const nameWithoutExt = lastDot !== -1 ? fileName.substring(0, lastDot) : fileName;
 
   let sanitized = nameWithoutExt
@@ -43,6 +44,18 @@ export function sanitizeStorageFilename(fileName: string): string {
 /** Storage key inside the raw-invoices bucket: <clientId>/<timestamp>_<safe name>. */
 export function buildStoragePath(clientId: string, fileName: string, now: number = Date.now()): string {
   return `${clientId}/${now}_${sanitizeStorageFilename(fileName)}`;
+}
+
+/**
+ * True when `filePath` is a single file directly inside the client's folder, in the shape
+ * buildStoragePath() produces (no traversal, no nested folders, no other client's prefix).
+ */
+export function isOwnStoragePath(clientId: string, filePath: string): boolean {
+  if (!clientId || typeof filePath !== 'string') return false;
+  const prefix = `${clientId}/`;
+  if (!filePath.startsWith(prefix)) return false;
+  const rest = filePath.slice(prefix.length);
+  return rest.length > 0 && rest.length <= 300 && !rest.includes('/') && !rest.includes('\\') && rest !== '.' && rest !== '..';
 }
 
 // ── File type detection ───────────────────────────────────────────────────────

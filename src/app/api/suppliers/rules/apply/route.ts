@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { reapplySupplierRules, type SupplierRef } from '@/lib/supplierAutomation';
+import { requireClientAccess } from '@/lib/auth';
 
 /**
  * Re-applies a client's supplier rules to its invoices still in review (validated_data only).
@@ -14,6 +15,9 @@ export async function POST(request: Request) {
     if (!clientId) {
       return NextResponse.json({ error: 'Missing clientId' }, { status: 400 });
     }
+
+    const access = await requireClientAccess(clientId);
+    if (!access.ok) return access.response;
 
     let suppliers: SupplierRef[] | undefined;
     if (body.suppliers !== undefined) {

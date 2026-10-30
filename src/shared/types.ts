@@ -126,6 +126,8 @@ export interface Client {
   vat_account: string;
   /** Local part of the client's inbound email address (<alias>@INBOUND_EMAIL_DOMAIN). */
   inbound_alias?: string | null;
+  /** Owning organization (bookkeeping office); see docs/auth.md. Absent in the local mock DB. */
+  org_id?: string;
   created_at: string;
 }
 

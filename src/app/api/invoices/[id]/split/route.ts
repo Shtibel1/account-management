@@ -3,6 +3,7 @@ import { supabase } from '@/lib/supabase';
 import { PDFDocument } from 'pdf-lib';
 import { saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
 import { validateSplitRanges } from '@/shared/documentSplit';
+import { requireInvoiceAccess } from '@/lib/auth';
 
 function sanitizeStorageFilename(fileName: string): string {
   const lastDot = fileName.lastIndexOf('.');
@@ -27,6 +28,9 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+
+  const access = await requireInvoiceAccess(id);
+  if (!access.ok) return access.response;
 
   try {
     const body = await request.json();

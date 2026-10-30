@@ -6,6 +6,7 @@ import {
   SupplierNotEligibleError,
 } from '@/lib/supplierAutomation';
 import { AUTO_APPROVE_HISTORY_SIZE } from '@/shared/autoApprove';
+import { requireClientAccess } from '@/lib/auth';
 
 /** Auto-approve eligibility + opt-in state for every supplier of a client. */
 export async function GET(request: Request) {
@@ -14,6 +15,9 @@ export async function GET(request: Request) {
   if (!clientId) {
     return NextResponse.json({ error: 'Missing clientId' }, { status: 400 });
   }
+
+  const access = await requireClientAccess(clientId);
+  if (!access.ok) return access.response;
 
   try {
     const suppliers = await fetchSupplierAutomationStatus(supabase, clientId);
@@ -34,6 +38,9 @@ export async function PUT(request: Request) {
     if (typeof body.clientId !== 'string' || typeof body.supplierVatId !== 'string' || typeof body.autoApprove !== 'boolean') {
       return NextResponse.json({ error: 'Expected { clientId, supplierVatId, autoApprove }' }, { status: 400 });
     }
+
+    const access = await requireClientAccess(body.clientId);
+    if (!access.ok) return access.response;
 
     const row = await setSupplierAutoApprove(supabase, body.clientId, body.supplierVatId, body.autoApprove);
     return NextResponse.json(row);

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { DuplicateDismissalError, dismissDuplicate } from '@/lib/duplicates';
+import { requireInvoiceAccess } from '@/lib/auth';
 
 // Reviewer says "not a duplicate": remember the pair and clear the flag on both invoices.
 export async function POST(
@@ -8,6 +9,10 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+
+  // dismissDuplicate() itself rejects pairs from different clients, so access to `id` covers both.
+  const access = await requireInvoiceAccess(id);
+  if (!access.ok) return access.response;
 
   try {
     const body = (await request.json().catch(() => ({}))) as { otherInvoiceId?: unknown } | null;

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { BankImportSchema } from '@/shared/schemas';
 import { BankTableMissingError, importBankRows, runAutoMatch } from '@/lib/bankTransactions';
+import { requireClientAccess } from '@/lib/auth';
 
 // Stores normalized statement rows (parsed + column-mapped in the browser) and auto-matches them.
 export async function POST(request: Request) {
@@ -14,6 +15,9 @@ export async function POST(request: Request) {
       );
     }
     const { clientId, accountLabel, fileName, rows } = parsed.data;
+
+    const access = await requireClientAccess(clientId);
+    if (!access.ok) return access.response;
 
     const imported = await importBankRows(supabase, {
       clientId,

@@ -71,15 +71,21 @@ export interface ClientChannels {
   contacts: ClientContact[];
 }
 
-/** Aliases + WhatsApp contacts for every client (used by the clients page). */
-export async function listClientChannels(): Promise<ClientChannels[]> {
-  const { data: clients, error } = await supabase.from('clients').select('*');
+/**
+ * Aliases + WhatsApp contacts per client (used by the clients page).
+ * `clientIds`: only these clients (the caller's accessible clients); null = every client (mock mode).
+ */
+export async function listClientChannels(clientIds: string[] | null = null): Promise<ClientChannels[]> {
+  if (clientIds !== null && clientIds.length === 0) return [];
+
+  let clientsQuery = supabase.from('clients').select('*');
+  if (clientIds !== null) clientsQuery = clientsQuery.in('id', clientIds);
+  const { data: clients, error } = await clientsQuery;
   if (error) throw new Error(`Failed to load clients: ${error.message}`);
 
-  const { data: contacts, error: contactsErr } = await supabase
-    .from('client_contacts')
-    .select('*')
-    .order('created_at', { ascending: true });
+  let contactsQuery = supabase.from('client_contacts').select('*');
+  if (clientIds !== null) contactsQuery = contactsQuery.in('client_id', clientIds);
+  const { data: contacts, error: contactsErr } = await contactsQuery.order('created_at', { ascending: true });
   if (contactsErr) {
     console.warn('[Channels] client_contacts unavailable (migration not applied?):', contactsErr.message);
   }
