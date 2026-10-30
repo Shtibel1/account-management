@@ -1,4 +1,4 @@
-import type { ExtractedData, SupplierAutomation, SupplierAutomationStatus, ValidationResult } from '@/shared/types';
+import type { ClientContact, ExtractedData, SupplierAutomation, SupplierAutomationStatus, ValidationResult } from '@/shared/types';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -227,4 +227,45 @@ export async function dismissDuplicate(id: string, otherInvoiceId: string): Prom
   const body = await res.json().catch(() => null);
   if (!res.ok) throw new Error(body?.error ?? 'שגיאה בסימון החשבונית כלא כפולה');
   return (body?.validation_flags ?? null) as ValidationResult | null;
+}
+
+export interface ChannelSettings {
+  emailDomain: string | null;
+  emailEnabled: boolean;
+  whatsappEnabled: boolean;
+  whatsappNumber: string | null;
+}
+
+export interface ClientChannelsInfo {
+  clientId: string;
+  inboundAlias: string | null;
+  contacts: ClientContact[];
+}
+
+export async function fetchClientChannels(): Promise<{ settings: ChannelSettings; clients: ClientChannelsInfo[] }> {
+  const res = await fetch(`${API_URL}/api/clients/channels`, { cache: 'no-store' });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? 'שגיאה בטעינת ערוצי הקליטה');
+  }
+  return res.json();
+}
+
+export async function addClientContact(clientId: string, phone: string, name: string): Promise<ClientContact> {
+  const res = await fetch(`${API_URL}/api/clients/${clientId}/contacts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone, name }),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error ?? 'שגיאה בהוספת מספר');
+  return body as ClientContact;
+}
+
+export async function removeClientContact(clientId: string, contactId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/api/clients/${clientId}/contacts/${contactId}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? 'שגיאה במחיקת מספר');
+  }
 }

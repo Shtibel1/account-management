@@ -3,6 +3,9 @@ import type { FewShotExample } from '@/shared/fewshot';
 
 export type InvoiceStatus = 'processing' | 'review' | 'approved' | 'exported' | 'error' | 'rejected';
 
+/** Channel an invoice arrived through (invoices.source). */
+export type InvoiceSource = 'upload' | 'email' | 'whatsapp';
+
 export type MappingType = 'supplier' | 'category';
 
 export interface FieldBbox {
@@ -121,6 +124,17 @@ export interface Client {
   id: string;
   name: string;
   vat_account: string;
+  /** Local part of the client's inbound email address (<alias>@INBOUND_EMAIL_DOMAIN). */
+  inbound_alias?: string | null;
+  created_at: string;
+}
+
+/** A phone number allowed to send documents for a client over WhatsApp (E.164). */
+export interface ClientContact {
+  id: string;
+  client_id: string;
+  phone: string;
+  name: string | null;
   created_at: string;
 }
 
@@ -170,6 +184,9 @@ export interface Invoice {
   file_url: string;
   file_name: string;
   status: InvoiceStatus;
+  source?: InvoiceSource;
+  /** Sender address / phone for email and WhatsApp documents. */
+  source_sender?: string | null;
   extracted_data: ExtractedData | null;
   validated_data: ExtractedData | null;
   ai_confidence: number | null;

@@ -25,7 +25,7 @@ Welcome! This document serves as the source of truth for the codebase architectu
 src/
 ├── app/                  # Next.js pages & API routes
 │   ├── (dashboard)/      # Layouts and routes for Clients, Mappings, Upload, and Review
-│   └── api/              # API endpoints (/api/export, /api/invoices, /api/suppliers/search-vat, /api/mock-db)
+│   └── api/              # API endpoints (/api/export, /api/invoices, /api/ingest/{email,whatsapp}, /api/clients, /api/suppliers/search-vat, /api/mock-db)
 ├── agents/               # LangGraph AI Pipeline Nodes
 │   ├── supervisor/       # Orchestrator & StateGraph definition
 │   ├── preprocessor/     # Google Vision OCR (full text, per-page text, word bboxes)
@@ -34,7 +34,7 @@ src/
 │   ├── validation/       # Business rules & DB duplicate checks
 │   └── approval/         # Human-in-the-Loop approval node & resumption
 ├── components/           # UI Components (UploadZone, InvoiceTable, SplitPane)
-├── lib/                  # Services & Exporters (e.g., movein.ts for Move-in ERP format)
+├── lib/                  # Services & Exporters (e.g., movein.ts for Move-in ERP format; ingest.ts = single ingestion entry point for upload/email/WhatsApp, see docs/ingestion.md)
 ├── shared/               # TypeScript interfaces (types.ts) and schemas
 └── utils/                # Utility helpers (e.g., encoding.ts, businessLookup.ts for Gov.il searches)
 ```
@@ -92,6 +92,10 @@ Make sure the following environment variables are present in `.env.local`:
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `EXTRACTION_FEWSHOT` (optional, `off` disables per-supplier few-shot examples)
+
+Optional ingestion channels (off unless set, see [docs/ingestion.md](docs/ingestion.md)):
+- `INGEST_EMAIL_SECRET`, `INBOUND_EMAIL_DOMAIN` (inbound email webhook)
+- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WEBHOOK_URL`, `TWILIO_WHATSAPP_NUMBER` (WhatsApp via Twilio)
 
 ---
 

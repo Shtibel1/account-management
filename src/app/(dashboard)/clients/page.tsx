@@ -5,6 +5,7 @@ import { createClient } from '@/utils/supabase/client';
 import { Client } from '@/shared/types';
 import Link from 'next/link';
 import { Plus, Building2, ChevronLeft, Users, Loader2 } from 'lucide-react';
+import { ClientChannelsDialog, ClientChannelsSummary, useClientChannels } from '@/components/ClientChannels/ClientChannels';
 
 export default function ClientsPage() {
   const supabase = createClient();
@@ -14,6 +15,9 @@ export default function ClientsPage() {
   const [name, setName] = useState('');
   const [vatAccount, setVatAccount] = useState('');
   const [saving, setSaving] = useState(false);
+  const [channelsClient, setChannelsClient] = useState<Client | null>(null);
+  // Reload channels whenever the client list changes (new clients get an inbound alias).
+  const { settings, channels, setContacts } = useClientChannels(clients.length);
 
   const load = async () => {
     const { data } = await supabase.from('clients').select('*').order('created_at', { ascending: false });
@@ -135,8 +139,8 @@ export default function ClientsPage() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {clients.map((c) => (
-            <Link key={c.id} href={`/upload?clientId=${c.id}`}>
-              <div className="card p-5 hover:shadow-card-md hover:border-blue-200 transition-all cursor-pointer group">
+            <div key={c.id} className="card hover:shadow-card-md hover:border-blue-200 transition-all group overflow-hidden">
+              <Link href={`/upload?clientId=${c.id}`} className="block p-5 cursor-pointer">
                 <div className="flex items-start justify-between">
                   <div className="flex items-center gap-3">
                     <div className="bg-gradient-to-br from-blue-500 to-blue-700 rounded-xl p-2.5 shadow-sm">
@@ -151,10 +155,26 @@ export default function ClientsPage() {
                   </div>
                   <ChevronLeft className="h-4 w-4 text-slate-400 group-hover:text-blue-500 transition-colors mt-1" />
                 </div>
-              </div>
-            </Link>
+              </Link>
+              <ClientChannelsSummary
+                info={channels[c.id]}
+                settings={settings}
+                onManage={() => setChannelsClient(c)}
+              />
+            </div>
           ))}
         </div>
+      )}
+
+      {channelsClient && (
+        <ClientChannelsDialog
+          clientId={channelsClient.id}
+          clientName={channelsClient.name}
+          info={channels[channelsClient.id]}
+          settings={settings}
+          onContactsChange={(contacts) => setContacts(channelsClient.id, contacts)}
+          onClose={() => setChannelsClient(null)}
+        />
       )}
     </div>
   );

@@ -1,26 +1,10 @@
 import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
-import { runOrchestrationPipeline } from '@/agents/supervisor';
-import { hashStoredFile, saveInvoiceFileHash } from '@/lib/fileHash';
+import { registerStoredDocument, type RegisterResult } from '@/lib/ingest';
 
-function sanitizeStorageFilename(fileName: string): string {
-  const lastDot = fileName.lastIndexOf('.');
-  const ext = lastDot !== -1 ? fileName.substring(lastDot) : '';
-  const nameWithoutExt = lastDot !== -1 ? fileName.substring(0, lastDot) : fileName;
-  
-  let sanitized = nameWithoutExt
-    .replace(/[^a-zA-Z0-9-.]/g, '_')
-    .replace(/__+/g, '_')
-    .replace(/--+/g, '-')
-    .replace(/^[_-]+|[_-]+$/g, '');
-    
-  if (!sanitized) {
-    sanitized = Buffer.from(nameWithoutExt).toString('hex').substring(0, 16);
-  }
-  
-  return `${sanitized}${ext}`;
-}
-
+/**
+ * Registers files the browser already PUT into raw-invoices (see /api/invoices/upload-url).
+ * The browser then triggers /api/invoices/[id]/process for each successful row.
+ */
 export async function POST(request: Request) {
   try {
     const body = await request.json();
@@ -37,77 +21,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'No files specified' }, { status: 400 });
     }
 
-    const results: { fileName: string; status: 'success' | 'error'; id?: string; error?: string; fileUrl?: string }[] = [];
+    const results: RegisterResult[] = [];
 
     for (const file of files) {
-      const { filePath, fileName, mimeType } = file;
-
-      // 1. Generate signed URL valid for 1 year
-      const { data: signedData, error: signErr } = await supabase.storage
-        .from('raw-invoices')
-        .createSignedUrl(filePath, 60 * 60 * 24 * 365);
-
-      if (signErr || !signedData?.signedUrl) {
-        console.error('Signed URL generation failed:', signErr);
-        const errMsg = `Signed URL generation failed: ${signErr?.message || 'Unknown error'}`;
-
-        // Record failure in database
-        const { data: invoice, error: dbErr } = await supabase
-          .from('invoices')
-          .insert({
-            client_id: clientId,
-            file_url: '',
-            file_name: fileName,
-            status: 'error',
-            error_message: errMsg,
-          })
-          .select()
-          .single();
-
-        results.push({
-          fileName,
-          status: 'error',
-          id: invoice?.id,
-          error: errMsg + (dbErr ? `. Also DB insert failed: ${dbErr.message}` : ''),
-        });
-        continue;
-      }
-
-      const fileUrl = signedData.signedUrl;
-
-      // 2. Insert Invoice record in database
-      const { data: invoice, error: dbErr } = await supabase
-        .from('invoices')
-        .insert({
-          client_id: clientId,
-          file_url: fileUrl,
-          file_name: fileName,
-          status: 'processing',
-        })
-        .select()
-        .single();
-
-      if (dbErr) {
-        console.error('Database insertion failed:', dbErr);
-        results.push({
-          fileName,
-          status: 'error',
-          error: `Database insertion failed: ${dbErr.message}`,
-        });
-        continue;
-      }
-
-      // 3. Fingerprint the stored bytes (exact-duplicate detection). Awaited so the hash is in
-      // place before the client triggers processing; failures only skip the same-file check.
-      const fileHash = await hashStoredFile(supabase, 'raw-invoices', filePath);
-      if (fileHash) await saveInvoiceFileHash(supabase, invoice.id, fileHash);
-
-      results.push({
-        fileName,
-        status: 'success',
-        id: invoice.id,
-        fileUrl,
-      });
+      // registerStoredDocument also fingerprints the stored bytes (invoices.file_hash) before
+      // returning, so the hash is in place before the client triggers processing.
+      results.push(
+        await registerStoredDocument({ clientId, filePath: file.filePath, fileName: file.fileName, source: 'upload' })
+      );
     }
 
     return NextResponse.json({ results, count: results.length }, { status: 201 });
