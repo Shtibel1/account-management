@@ -16,6 +16,7 @@ UI `src/app/(dashboard)/integrations` ("חיבור להנהלת חשבונות")
 | `excel`   | file | `.xlsx` (RTL) with invoice fields + resolved account codes (supplier / expense / VAT) and a totals row. |
 | `webhook` | api  | POSTs each invoice as JSON to an https URL of the office (own middleware, Make / Zapier, an import hook). Optional Bearer token and HMAC signature. Reference implementation of an API plugin. |
 | `morning` | api  | Morning / Green Invoice (חשבונית ירוקה): one expense per invoice (`POST /expenses`) + the stored PDF attached. See below. |
+| `icount`  | api  | iCount API v3: one expense (`expense/create`) per invoice, **draft by default**. See [iCount](#icount) below. |
 
 ### Morning (`src/integrations/plugins/morning/`)
 
@@ -89,6 +90,30 @@ expense category blocks the export with "קטגוריה: X").
 `ctx` gives the decrypted, schema-validated `config`, `environment`, `http` (below), `logger`
 (`info/warn/error` = redacted JSON console lines, `record()` = a non-HTTP row in `integration_logs`),
 `correlationId` and `dryRun`.
+
+## iCount
+
+`src/integrations/plugins/icount/` (API v3, `https://api.icount.co.il/api/v3.php/<module>/<method>`, POST JSON).
+No public sandbox exists, so the plugin is production-only (`capabilities.sandbox = false`) and the **"טיוטות בלבד"
+toggle is ON by default** (`is_draft: true`; only an explicit "off" creates final expenses).
+
+- **Auth**: API token (`Authorization: Bearer`, recommended) or `cid` + `user` + `pass` -> `auth/login` -> `sid` sent
+  in the body. The sid is cached in memory per credentials (SHA-256 key, 20 min) and renewed once on an auth error
+  (`auth_required` / `bad_auth` / ...). `pass`, `apiToken` are secret fields; `sid` is a redacted key in every log.
+- **Export** per invoice: supplier via `supplier/get_list` by `vat_id` (asked as the 9-digit form, then without leading zeros; matched on the normalized digits; without a vat id
+  by exact name), else `supplier/add` (`supplier_name` + `vat_id`; `duplicate_*` -> looked up again). Then
+  `expense/search` (supplier + `expense_doctype` + `expense_docnum`, drafts included, results re-filtered locally):
+  an existing document is adopted. Then `expense/create` with `expense_type_id`, `expense_doctype`,
+  `expense_docnum` = invoice number, `adv_expense: true`, `expense_sum` = amount before VAT, `expense_manual_vat` =
+  VAT (or `manual_no_vat` when VAT is explicitly 0; an invoice whose VAT is unknown is blocked, never sent as VAT-free), `invoice_date` = `vat_date`, `allocation_number`, `is_draft`, `comment`
+  = `invoice-scan:<invoice id>`. `expense_already_exists` -> searched again and adopted.
+- **Credit notes** (negative total): `creditDocType` (default `refund`) with absolute amounts.
+- **Expense type**: `defaultExpenseTypeId`, or (toggle) the category's account code from the account mappings is the
+  iCount `expense_type_id`. "בדוק חיבור" lists the expense types and checks the doc types against `expense/doctypes`.
+- **Errors**: `{ status: false, reason, error_description }` (usually HTTP 200) become `IcountApiError` with the
+  reason in the message; such a failure is certain (not "uncertain"). Reads are retried on 5xx / timeouts, writes
+  (`supplier/add`, `expense/create`) only on 429 / not-sent errors.
+- Not yet: attaching the PDF (`scan` upload; needs a binary file loader in the plugin context).
 
 ## Export flow
 
