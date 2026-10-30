@@ -6,6 +6,8 @@ import {
   AMOUNT_TOLERANCE,
   autoMatch,
   type AutoMatch,
+  DAYS_AFTER_INVOICE,
+  DAYS_BEFORE_INVOICE,
   findCandidates,
   isMatchableDebit,
   MAX_CANDIDATES,
@@ -352,6 +354,12 @@ export interface MatchRunResult {
    * confident pair was stored. Running it again continues: matched lines drop out of the next run.
    */
   complete: boolean;
+  /**
+   * True when the run was skipped because the client has more candidate lines than one run can
+   * handle (MAX_MATCH_LINES). Running it again does not help: those lines have to be matched
+   * manually (or the statement trimmed) until the candidate set is small enough.
+   */
+  truncated?: boolean;
 }
 
 export interface AutoMatchOptions {
@@ -427,6 +435,9 @@ async function loadMatchInputRpc(db: SupabaseClient, clientId: string, deadline:
       // A cent of slack: the exact (rounded) comparison runs in autoMatch()
       p_tolerance: AMOUNT_TOLERANCE + 0.01,
       p_max_lines: MAX_MATCH_LINES,
+      // The date window of evaluateCandidate(), so only lines autoMatch() can use are returned
+      p_days_before: DAYS_BEFORE_INVOICE,
+      p_days_after: DAYS_AFTER_INVOICE,
     }),
     deadline
   );
@@ -570,9 +581,10 @@ export async function runAutoMatch(db: SupabaseClient, clientId: string, options
     const input = (await loadMatchInputRpc(db, clientId, deadline)) ?? (await loadMatchInputFallback(db, clientId, deadline));
     if (input.truncated) {
       // Without every candidate line the "clear favourite among all competing lines" rule can't be
-      // checked, so nothing is matched rather than risking a wrong pair.
+      // checked, so nothing is matched rather than risking a wrong pair. Reported as truncated, not
+      // just incomplete: another run would stop at the same place.
       console.warn(`[bank] Auto-match for client ${clientId}: more than ${MAX_MATCH_LINES} candidate lines - skipped`);
-      return { matched: 0, ambiguous: 0, complete: false };
+      return { matched: 0, ambiguous: 0, complete: false, truncated: true };
     }
     const result = autoMatch(input.lines, input.invoices);
     let matches = result.matches;

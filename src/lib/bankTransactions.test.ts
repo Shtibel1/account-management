@@ -57,6 +57,9 @@ test('matches only the candidate lines from one RPC call and stores them in one 
   const result = await runAutoMatch(db, 'client-1', { deadline: Date.now() + 20_000, preferBatchId: BATCH });
   assert.deepEqual(result, { matched: 2, ambiguous: 0, complete: true });
   assert.deepEqual(calls.map((c) => c.fn), ['bank_auto_match_input', 'apply_bank_auto_matches']);
+  // The SQL candidate filter gets the same date window as evaluateCandidate()
+  assert.equal(calls[0].args.p_days_before, 7);
+  assert.equal(calls[0].args.p_days_after, 90);
   assert.deepEqual(calls[1].args.p_matches, [
     { transaction_id: 't-new', invoice_id: 'i-1' },
     { transaction_id: 't-old', invoice_id: 'i-2' },
@@ -87,11 +90,11 @@ test('stops between apply chunks at the deadline', async () => {
   assert.equal(calls.filter((c) => c.fn === 'apply_bank_auto_matches').length, 1);
 });
 
-test('too many candidate lines: nothing is matched, reported incomplete', async () => {
+test('too many candidate lines: nothing is matched, reported truncated (not "click again")', async () => {
   const calls: Call[] = [];
   const db = rpcDb({ lines: [line('t-1', -100, '2026-09-05', 'x')], invoices: [invoice('i-1', 100, '2026-09-01', 'x')], truncated: true }, calls);
   const result = await runAutoMatch(db, 'client-1', { deadline: Date.now() + 20_000 });
-  assert.deepEqual(result, { matched: 0, ambiguous: 0, complete: false });
+  assert.deepEqual(result, { matched: 0, ambiguous: 0, complete: false, truncated: true });
   assert.deepEqual(calls.map((c) => c.fn), ['bank_auto_match_input']);
 });
 

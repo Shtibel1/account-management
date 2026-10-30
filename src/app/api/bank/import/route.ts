@@ -13,6 +13,8 @@ import { requireClientAccess } from '@/lib/auth';
 const AUTO_MATCH_TIME_BUDGET_MS = 15_000;
 const AUTO_MATCH_DEADLINE_MS = 20_000;
 const MATCH_LATER = 'אפשר להשלים אותה בכפתור "הרץ התאמה אוטומטית" במסך הבנק.';
+const MATCH_TOO_MANY_LINES =
+  'ההתאמה האוטומטית לא הורצה כי יש יותר מדי תנועות פתוחות שעשויות להתאים לחשבוניות. יש להתאים אותן ידנית במסך הבנק.';
 
 export async function POST(request: Request) {
   const startedAt = Date.now();
@@ -64,7 +66,10 @@ export async function POST(request: Request) {
         deadline: startedAt + AUTO_MATCH_DEADLINE_MS,
         preferBatchId: imported.batchId,
       });
-      if (!match.complete) {
+      if (match.truncated) {
+        console.warn(`[bank] Auto-match after import of ${rows.length} rows skipped: too many candidate lines`);
+        matchNote = `התנועות נשמרו. ${MATCH_TOO_MANY_LINES}`;
+      } else if (!match.complete) {
         console.warn(`[bank] Auto-match after import of ${rows.length} rows stopped at the deadline (${match.matched} matched)`);
         matchNote = `התנועות נשמרו. ההתאמה האוטומטית הושלמה חלקית (${match.matched} הותאמו) - ${MATCH_LATER}`;
       }
