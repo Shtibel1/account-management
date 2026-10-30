@@ -8,8 +8,12 @@ frontend:
         - echo "NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL" >> .env.production
         - echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY" >> .env.production
         - echo "SUPABASE_SERVICE_KEY=$SUPABASE_SERVICE_KEY" >> .env.production
-        # Optional: public site origin for auth email redirects (invites); falls back to the request origin
+        # Public site origin for auth redirects and invite emails (src/lib/siteUrl.ts). Set it per branch:
+        # behind Amplify the request URL is https://localhost:3000.
         - echo "NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL" >> .env.production
+        # Fallback allow-list host <branch>.<appId>.amplifyapp.com for X-Forwarded-Host (src/lib/siteUrl.ts)
+        - echo "SITE_AMPLIFY_APP_ID=$AWS_APP_ID" >> .env.production
+        - echo "SITE_AMPLIFY_BRANCH=$AWS_BRANCH" >> .env.production
         - echo "GOOGLE_CLOUD_API_KEY=$GOOGLE_CLOUD_API_KEY" >> .env.production
         - echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> .env.production
         # Secret of the scheduled processing worker (/api/invoices/worker); see docs/ingestion.md

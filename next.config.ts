@@ -1,4 +1,5 @@
 import type { NextConfig } from 'next';
+import { SECURITY_HEADER_RULES } from './src/lib/securityHeaders';
 
 console.log('--------------------------------------------------');
 console.log('Build Environment Diagnostic:');
@@ -11,6 +12,10 @@ console.log('--------------------------------------------------');
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ['sharp'],
+  // Security headers + no-store on every API response (src/lib/securityHeaders.ts, QA #33)
+  async headers() {
+    return SECURITY_HEADER_RULES;
+  },
 };
 
 export default nextConfig;

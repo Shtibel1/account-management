@@ -13,6 +13,7 @@ import { saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
 import { linkResubmission } from '@/lib/returns';
 import { computeConfidence } from '@/shared/confidence';
 import { PDFDocument } from 'pdf-lib';
+import { PIPELINE_URL_TTL_SECONDS, signedInvoiceFileUrl, signObjectPath, storedFileUrlFor } from '@/lib/invoiceFiles';
 import { toUserErrorMessage } from '@/shared/processing';
 
 function parseNumber(text: string): number | null {
@@ -484,15 +485,13 @@ const graph = new StateGraph<any>({
 
           console.log(`[Supervisor]   - Part ${idx + 1}/${splits.length} split and uploaded to Storage.`);
 
-          const { data: signedData, error: signErr } = await supabase.storage
-            .from('raw-invoices')
-            .createSignedUrl(uploadPath, 60 * 60 * 24 * 365);
-
-          if (signErr || !signedData?.signedUrl) {
-            throw new Error(`Failed to create signed URL for split PDF part ${idx + 1}: ${signErr?.message}`);
+          // Stored: a storage reference (no bearer token, QA #31). The run itself reads the part
+          // through a short-lived signed URL.
+          const splitFileUrl = storedFileUrlFor(uploadPath);
+          const splitFetchUrl = await signObjectPath(uploadPath, PIPELINE_URL_TTL_SECONDS);
+          if (!splitFetchUrl) {
+            throw new Error(`Failed to create signed URL for split PDF part ${idx + 1}`);
           }
-
-          const splitFileUrl = signedData.signedUrl;
           const splitPageTexts = pageTexts ? pageTexts.slice(split.start_page - 1, split.end_page) : [];
           const splitRawOcrText = splitPageTexts.join('\n\n');
           const splitPageCount = split.end_page - split.start_page + 1;
@@ -509,7 +508,7 @@ const graph = new StateGraph<any>({
             : [];
 
           if (idx === 0) {
-            primaryFileUrl = splitFileUrl;
+            primaryFileUrl = splitFetchUrl;
             primaryFileName = splitFileName;
             primaryRawOcrText = splitRawOcrText;
             primaryOcrMetadata = splitOcrMetadata;
@@ -828,10 +827,13 @@ export async function runOrchestrationPipeline(
 ): Promise<void> {
   const runId = options.runId ?? null;
   try {
+    // fileUrl is the stored storage reference (or a legacy signed URL): the run reads the file
+    // through a fresh short-lived signed URL (QA #31). Anything else (mock mode) is used as is.
+    const fetchUrl = (await signedInvoiceFileUrl(fileUrl, tenantId, PIPELINE_URL_TTL_SECONDS)) ?? fileUrl;
     await compiledGraph.invoke(
       {
         invoiceId,
-        fileUrl,
+        fileUrl: fetchUrl,
         mimeType,
         tenantId,
         runId,

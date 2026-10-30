@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { FileExportPlugin } from '@/integrations/types';
 import { toMoveinInput } from '@/integrations/plugins/movein/mapping';
 import { writeMoveinFile } from '@/integrations/plugins/movein/client';
+import { validateMoveinInvoice } from '@/lib/exporters/movein';
 
 const configSchema = z.object({}).strict();
 
@@ -17,6 +18,11 @@ export const moveinPlugin: FileExportPlugin<z.infer<typeof configSchema>> = {
 
   async testConnection() {
     return { ok: true, message: 'ייצוא לקובץ - אין צורך בחיבור.' };
+  },
+
+  /** Values longer than their fixed-width field fail the invoice instead of being cut (QA #13). */
+  validateInvoice(invoice, mapping) {
+    return validateMoveinInvoice(invoice.raw, mapping.accountMappings ?? [], mapping.vatAccount ?? '').map((p) => p.message);
   },
 
   buildFile(_ctx, items) {

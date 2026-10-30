@@ -7,7 +7,7 @@ import { createClient } from '@/utils/supabase/client';
 import { Invoice } from '@/shared/types';
 import { ValidationForm } from '@/components/SplitPane/ValidationForm';
 import { ArrowRight, Loader2, Eye, EyeOff, SlidersHorizontal, Scissors, Sparkles } from 'lucide-react';
-import { splitInvoice } from '@/lib/api';
+import { getInvoiceFileUrl, splitInvoice } from '@/lib/api';
 import { formatRangesForInput, usableSuggestion } from '@/shared/documentSplit';
 import { useToast } from '@/components/ui/Toast';
 import { useFeatureFlags } from '@/components/FeatureFlags/useFeatureFlags';
@@ -135,12 +135,28 @@ export default function ReviewDetailPage() {
 
   useEffect(() => { load(); }, [id]);
 
+  // invoices.file_url is a storage reference, not a link: the viewer gets a short-lived signed URL.
+  const [fileViewUrl, setFileViewUrl] = useState<string | null>(null);
+  const [fileViewError, setFileViewError] = useState<string | null>(null);
   useEffect(() => {
-    if (invoice && invoice.file_url && invoice.file_url.toLowerCase().includes('.pdf')) {
+    if (!invoice?.id || !invoice.file_url) {
+      setFileViewUrl(null);
+      return;
+    }
+    let cancelled = false;
+    setFileViewError(null);
+    getInvoiceFileUrl(invoice.id)
+      .then((url) => { if (!cancelled) setFileViewUrl(url); })
+      .catch((err) => { if (!cancelled) { setFileViewUrl(null); setFileViewError((err as Error).message); } });
+    return () => { cancelled = true; };
+  }, [invoice?.id, invoice?.file_url]);
+
+  useEffect(() => {
+    if (fileViewUrl && invoice?.file_url && invoice.file_url.toLowerCase().includes('.pdf')) {
       // Dynamic import of pdf-lib to get page count on the client
       import('pdf-lib').then(async ({ PDFDocument }) => {
         try {
-          const res = await fetch(invoice.file_url);
+          const res = await fetch(fileViewUrl);
           const buf = await res.arrayBuffer();
           const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
           setPageCount(doc.getPageCount());
@@ -149,7 +165,7 @@ export default function ReviewDetailPage() {
         }
       });
     }
-  }, [invoice]);
+  }, [fileViewUrl, invoice?.file_url]);
 
   // Update parsed ranges preview when input changes
   useEffect(() => {
@@ -351,13 +367,19 @@ export default function ReviewDetailPage() {
             )}
           </div>
           <div className="flex-1 overflow-hidden">
-            <ImageViewer
-              fileUrl={invoice.file_url}
-              bboxes={bboxes}
-              activeField={activeField}
-              showAll={showAll}
-              yOffset={yOffset}
-            />
+            {fileViewUrl ? (
+              <ImageViewer
+                fileUrl={fileViewUrl}
+                bboxes={bboxes}
+                activeField={activeField}
+                showAll={showAll}
+                yOffset={yOffset}
+              />
+            ) : (
+              <div className="flex items-center justify-center h-full text-slate-400">
+                {fileViewError ?? (invoice.file_url ? 'טוען את קובץ החשבונית...' : 'לחשבונית אין קובץ שמור')}
+              </div>
+            )}
           </div>
         </div>
       </div>

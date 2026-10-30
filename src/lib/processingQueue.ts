@@ -89,7 +89,8 @@ export interface JobRow {
 export interface QueueDeps {
   db: SupabaseClient;
   now: () => number;
-  fetchFile: (url: string) => Promise<Buffer>;
+  /** Bytes of a stored file_url (a storage reference since QA #31) of this client. */
+  fetchFile: (url: string, clientId: string) => Promise<Buffer>;
   ocrPdfPages: (file: Buffer, pdf: unknown, pages: number[]) => Promise<{ pageTexts: string[]; ocrWords: OcrWord[] }>;
   loadPdf: (file: Buffer) => Promise<{ getPageCount(): number } | null>;
   ocrImage: (file: Buffer) => Promise<{ rawOcrText: string; ocrWords: OcrWord[]; confidence: number; detectedLanguages: string[] }>;
@@ -105,7 +106,11 @@ async function defaultDeps(): Promise<QueueDeps> {
   return {
     db: supabase,
     now: () => Date.now(),
-    fetchFile: pre.fetchInvoiceFile,
+    // file_url is a storage reference (not a link, QA #31): read it through a short-lived signed URL
+    fetchFile: async (url, clientId) => {
+      const { PIPELINE_URL_TTL_SECONDS, signedInvoiceFileUrl } = await import('@/lib/invoiceFiles');
+      return pre.fetchInvoiceFile((await signedInvoiceFileUrl(url, clientId, PIPELINE_URL_TTL_SECONDS)) ?? url);
+    },
     ocrPdfPages: (file, pdf, pages) => pre.ocrPdfPages(file, pdf as Awaited<ReturnType<typeof pre.loadPdf>>, pages),
     loadPdf: pre.loadPdf,
     ocrImage: pre.ocrImage,
@@ -407,7 +412,7 @@ export async function runProcessingTick(invoiceId: string): Promise<TickResult> 
 
 async function ocrStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
   const started = d.now();
-  const file = await d.fetchFile(job.file_url);
+  const file = await d.fetchFile(job.file_url, job.client_id);
   // Reject what Vision can't read before calling it (empty, oversized, not a PDF / image)
   const check = checkStoredBytes(file);
   if (!check.ok) throw new UserFacingError(check.error);

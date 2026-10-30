@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { User } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
+import { siteOriginFor } from '@/lib/siteUrl';
 import { hasOrgAccess, loadMemberships, requireOrgOwner, requireUser, type AuthContext } from '@/lib/auth';
 import { canRemoveMember, normalizeEmail, parseMemberRole, type MemberRole } from '@/shared/authModel';
 
@@ -105,14 +106,20 @@ export async function POST(request: Request) {
     if (inviteRowErr) throw new Error(`Failed to record invitation: ${inviteRowErr.message}`);
 
     if (!existing) {
-      const origin = process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, '') || new URL(request.url).origin;
+      // Trusted public origin only (request.url is localhost:3000 behind Amplify).
+      const origin = siteOriginFor(request);
+      if (!origin) {
+        await supabase.from('org_invitations').delete().eq('org_id', orgId).eq('email', email);
+        console.error('[org/members] No trusted site origin for the invite link - set NEXT_PUBLIC_SITE_URL.');
+        return NextResponse.json({ error: 'כתובת האתר אינה מוגדרת (NEXT_PUBLIC_SITE_URL), ולכן לא ניתן לשלוח הזמנה' }, { status: 503 });
+      }
       const { error: inviteErr } = await supabase.auth.admin.inviteUserByEmail(email, {
         redirectTo: `${origin}/auth/callback?next=/clients`,
       });
       if (inviteErr) {
         await supabase.from('org_invitations').delete().eq('org_id', orgId).eq('email', email);
         console.error('[org/members] Invite email failed:', inviteErr.message);
-        return NextResponse.json({ error: `שליחת ההזמנה נכשלה: ${inviteErr.message}` }, { status: 502 });
+        return NextResponse.json({ error: 'שליחת ההזמנה נכשלה. נסו שוב מאוחר יותר.' }, { status: 502 });
       }
     }
     // An existing but unconfirmed account joins once it confirms its email.

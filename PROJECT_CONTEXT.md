@@ -115,7 +115,7 @@ Make sure the following environment variables are present in `.env.local`:
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) - required since the auth/tenancy migration (anon has no table access)
-- `NEXT_PUBLIC_SITE_URL` (optional, origin for invite-email redirects)
+- `NEXT_PUBLIC_SITE_URL` (public origin for auth-callback redirects and invite emails - `src/lib/siteUrl.ts`; without it redirects stay relative and invites answer 503, never a localhost link)
 - `EXTRACTION_FEWSHOT` (optional, `off` disables per-supplier few-shot examples)
 - `INTEGRATIONS_ENCRYPTION_KEY` (32 random bytes, base64; AES-256-GCM key for per-client integration credentials, see [docs/integrations.md](docs/integrations.md))
 

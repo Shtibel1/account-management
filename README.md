@@ -62,7 +62,7 @@ npm run dev                  # http://localhost:3001
 
 Environment variables (names only):
 
-- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`; required - anon has no table access), optional `NEXT_PUBLIC_SITE_URL`
+- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`; required - anon has no table access), `NEXT_PUBLIC_SITE_URL` (public origin, e.g. `https://app.example.com`: auth-callback redirects and invite links; behind Amplify the request URL is `localhost:3000`, so set it on every branch), optional `SITE_ALLOWED_HOSTS` (comma-separated hosts whose `X-Forwarded-Host` is trusted when `NEXT_PUBLIC_SITE_URL` is unset), optional `LEAD_RATE_SALT` (salt of the IP hash used by the lead-form rate limit)
 - `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_API_KEY`
 - `AWS_REGION` / `AWS_SES_REGION`, `CONTACT_FROM_EMAIL`, `CONTACT_TO_EMAIL`
 - `INTEGRATIONS_ENCRYPTION_KEY` - 32 random bytes, base64 (`openssl rand -base64 32`); encrypts per-client bookkeeping credentials (export plugins, see [docs/integrations.md](docs/integrations.md))

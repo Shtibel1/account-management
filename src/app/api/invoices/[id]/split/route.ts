@@ -10,9 +10,9 @@ import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
 import { splitStatusError } from '@/shared/processing';
 import { sniffUploadMime } from '@/shared/uploadValidation';
 import { driveProcessing, enqueueProcessing } from '@/lib/processingQueue';
+import { downloadInvoiceFile, redactUrlForLog, storedFileUrlFor } from '@/lib/invoiceFiles';
 
 const RAW_BUCKET = 'raw-invoices';
-const SIGNED_URL_SECONDS = 60 * 60 * 24 * 365;
 /** Background head start for the parts' processing (the review list / worker continue the rest). */
 const AFTER_BUDGET_MS = 20_000;
 
@@ -98,11 +98,12 @@ export async function POST(
   }
 
   // 1. Download + parse + validate the ranges against the real page count (read-only so far)
+  // Service-role Storage read of the object (file_url is a storage reference, not a link - QA #31)
   let fileBuffer: Buffer;
   try {
-    const downloadRes = await fetch(invoice.file_url);
-    if (!downloadRes.ok) throw new Error(`HTTP ${downloadRes.status} ${downloadRes.statusText}`);
-    fileBuffer = Buffer.from(await downloadRes.arrayBuffer());
+    const downloaded = await downloadInvoiceFile(invoice.file_url, invoice.client_id);
+    if (!downloaded) throw new Error(`Storage download of ${redactUrlForLog(invoice.file_url)} failed`);
+    fileBuffer = downloaded;
   } catch (err) {
     console.error(`[Split API] Download of the original file of invoice ${id} failed:`, err);
     return NextResponse.json({ error: 'לא ניתן היה לקרוא את הקובץ מהאחסון. יש לנסות שוב' }, { status: 502 });
@@ -185,15 +186,12 @@ export async function POST(
       if (uploadErr || !uploadData) throw new Error(`Upload of part ${idx + 1} failed: ${uploadErr?.message}`);
       uploadedPaths.push(uploadPath);
 
-      const { data: signedData, error: signErr } = await supabase.storage
-        .from(RAW_BUCKET)
-        .createSignedUrl(uploadPath, SIGNED_URL_SECONDS);
-      if (signErr || !signedData?.signedUrl) throw new Error(`Signed URL of part ${idx + 1} failed: ${signErr?.message}`);
 
       parts.push({
         startPage,
         endPage,
-        fileUrl: signedData.signedUrl,
+        // Stored as a storage reference, not a bearer link (QA #31)
+        fileUrl: storedFileUrlFor(uploadPath),
         fileName: `${nameWithoutExt}_חלק_${idx + 1}${ext}`,
         hash: splitPartHash(sourceHash, startPage, endPage),
       });

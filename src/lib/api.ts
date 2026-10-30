@@ -255,6 +255,19 @@ export class MissingMappingsError extends Error {
   }
 }
 
+/**
+ * Short-lived signed URL of an invoice's original file (invoices.file_url is a storage reference,
+ * not a link - QA #31).
+ */
+export async function getInvoiceFileUrl(invoiceId: string): Promise<string> {
+  const res = await fetch(`${API_URL}/api/invoices/${encodeURIComponent(invoiceId)}/file`, { cache: 'no-store' });
+  const body = await res.json().catch(() => null);
+  if (!res.ok || typeof body?.url !== 'string') {
+    throw new Error(body?.error ?? 'לא ניתן לפתוח את קובץ החשבונית');
+  }
+  return body.url;
+}
+
 export async function exportInvoices(ids: string[]) {
   const res = await fetch(`${API_URL}/api/export`, {
     method: 'POST',
@@ -265,6 +278,10 @@ export async function exportInvoices(ids: string[]) {
     const body = await res.json().catch(() => null);
     if (res.status === 422 && body?.missing?.length) {
       throw new MissingMappingsError(body.missing as string[]);
+    }
+    if (res.status === 422 && Array.isArray(body?.invalid) && body.invalid.length) {
+      // Values that don't fit the Move-in format (e.g. an invoice number longer than 9 characters)
+      throw new Error([body.error, ...(body.invalid as string[])].join('\n'));
     }
     throw new Error(body?.error ?? 'שגיאה בייצוא');
   }

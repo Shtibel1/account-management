@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { requireClientAccess, requireInvoiceAccess } from '@/lib/auth';
-import { isClientStorageFileUrl } from '@/lib/ingestHelpers';
-import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
+import { isMockMode } from '@/lib/supabaseConfig';
+import { invoiceObjectPath } from '@/lib/invoiceFiles';
 import { dbErrorResponse, readJsonObject, transitionInvoice } from '@/lib/invoiceTransitions';
 import { canTransition, DELETABLE_STATUSES, isInvoiceStatus, STATUS_LABELS, transitionRefusedMessage } from '@/shared/invoiceStatus';
 import type { InvoiceStatus } from '@/shared/types';
@@ -124,16 +124,6 @@ export async function PATCH(
   }
 }
 
-/** Storage object path of a raw-invoices URL ("<clientId>/<file>"), or null. */
-function storageObjectPath(fileUrl: string): string | null {
-  try {
-    const match = /^\/storage\/v1\/object\/(?:sign|public)\/raw-invoices\/(.+)$/.exec(new URL(fileUrl).pathname);
-    return match ? decodeURIComponent(match[1]) : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Deletes a failed document (status 'error') together with its stored file. Reviewed, approved or
  * exported invoices are never deleted (409): reject them instead.
@@ -163,12 +153,9 @@ export async function DELETE(
     if (error) return dbErrorResponse(error, 'שגיאה במחיקת החשבונית');
 
     // Best effort: the row is gone either way; an orphaned file is only wasted storage.
-    if (
-      invoice.file_url &&
-      !isMockMode() &&
-      isClientStorageFileUrl(invoice.file_url, invoice.client_id, process.env.SUPABASE_URL || supabaseUrl())
-    ) {
-      const path = storageObjectPath(invoice.file_url);
+    // file_url: storage reference (QA #31) or a legacy signed / public URL of this client
+    if (invoice.file_url && !isMockMode()) {
+      const path = invoiceObjectPath(invoice.file_url, invoice.client_id);
       if (path) {
         const { error: storageErr } = await supabase.storage.from('raw-invoices').remove([path]);
         if (storageErr) console.error(`[invoices/${id}] Failed to delete stored file ${path}:`, storageErr);

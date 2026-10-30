@@ -186,6 +186,7 @@ export interface SupplierAutomationStatus extends SupplierEligibility {
 export interface Invoice {
   id: string;
   client_id: string;
+  /** Storage reference (not a link) - signed URLs come from GET /api/invoices/[id]/file. */
   file_url: string;
   file_name: string;
   status: InvoiceStatus;

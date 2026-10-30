@@ -112,7 +112,7 @@ export async function fetchInvoiceFile(fileUrl: string): Promise<Buffer> {
     }
     return Buffer.from(await response.arrayBuffer());
   } catch (e) {
-    console.error(`[Preprocessor] Error downloading invoice file from URL: ${fileUrl}`, e);
+    console.error(`[Preprocessor] Error downloading invoice file from URL: ${fileUrl.split('?')[0]}`, e);
     throw new Error(`Preprocessor failed to retrieve invoice file: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
@@ -243,7 +243,7 @@ export async function preprocessInvoice(
   pageTexts?: string[];
   ocrWords?: OcrWord[];
 }> {
-  console.log(`[Preprocessor] 📄 Starting OCR preprocessing for file URL: ${fileUrl} (${mimeType})`);
+  console.log(`[Preprocessor] 📄 Starting OCR preprocessing for file URL: ${fileUrl.split('?')[0]} (${mimeType})`);
   visionApiKey();
   const fileBuffer = await fetchInvoiceFile(fileUrl);
   const isPdf = mimeType === 'application/pdf' || fileUrl.toLowerCase().split('?')[0].endsWith('.pdf');

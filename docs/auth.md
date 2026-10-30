@@ -53,8 +53,12 @@ auth.users ──< memberships (role owner|member) >── organizations ──<
 - RPCs `find_duplicate_candidates` / `normalize_invoice_number`: execute for `authenticated` + `service_role` only.
 - **Storage** `raw-invoices` (objects at `<client_id>/<file>`): bucket set to private; anon / allow-all policies dropped;
   `authenticated` may read/write only objects whose first folder is a client of their org. The app itself only touches
-  the bucket server-side (service role: signed upload URLs, 1-year signed read URLs, pipeline uploads), so these
-  policies are defense in depth. Signed URLs keep working on a private bucket.
+  the bucket server-side (service role: signed upload URLs, pipeline uploads, short-lived signed read URLs), so these
+  policies are defense in depth. `invoices.file_url` stores a storage *reference*
+  (`/storage/v1/object/authenticated/raw-invoices/<path>`, not a bearer link).
+  Readers get signed URLs on demand (`src/lib/invoiceFiles.ts`): the viewer via `GET /api/invoices/[id]/file`
+  (10 minutes, after the access check), a pipeline run 1 hour, split / plugins read with the Storage API.
+  Migration `20261030162000_qa_export_security.sql` rewrote the old 1-year signed URLs (QA #31).
 - `update_updated_at`, `normalize_invoice_number`, `bank_transactions_before_update`: fixed `search_path`.
 - `service_role` bypasses RLS: API routes (after their own access check), the LangGraph pipeline, and the ingestion
   webhooks (which resolve the client by inbound alias / WhatsApp phone, unchanged).
@@ -83,6 +87,16 @@ auth.users ──< memberships (role owner|member) >── organizations ──<
    applies. The service key (`SUPABASE_SERVICE_KEY`, not `NEXT_PUBLIC_*`) is only read by `src/lib/supabase.ts`, which
    throws if evaluated in a browser.
 
+## Response headers and public endpoints
+
+- `next.config.ts` `headers()` (`src/lib/securityHeaders.ts`): every response gets `X-Content-Type-Options:
+  nosniff`, HSTS, `X-Frame-Options: SAMEORIGIN` and `Referrer-Policy`; every `/api/*` and `/auth/*` response gets
+  `Cache-Control: private, no-store` (per-office data must never be stored by CloudFront or shared caches).
+- `POST /api/lead` (public): field length caps, a honeypot field (`website`; filled → fake success, no email) and
+  rate limits per client IP (3 / 10 min, 10 / day) plus a global 30 / hour, counted in the DB
+  (`lead_rate_limit_hit()`, salted IP hash, service role only) with an in-memory fallback → 429
+  (`src/lib/leadGuard.ts`).
+
 ## Login UI
 
 - `/login`: email + password, or a magic link (`signInWithOtp`, existing accounts only).
@@ -100,7 +114,10 @@ auth.users ──< memberships (role owner|member) >── organizations ──<
 - Optional (works across browsers / devices): change the *Confirm signup*, *Magic link* and *Invite user* email
   templates to `{{ .SiteURL }}/auth/callback?token_hash={{ .TokenHash }}&type=<signup|magiclink|invite>&next=/clients`.
 - Server env: `SUPABASE_SERVICE_KEY` **must** be set (Amplify). Without it the server falls back to the anon key, which
-  has no access after this migration. Optional `NEXT_PUBLIC_SITE_URL` for invite redirects.
+  has no access after this migration. Set `NEXT_PUBLIC_SITE_URL` (public origin) on every Amplify branch: the auth callback and the proxy build
+  redirects from it, and invite emails need it (`src/lib/siteUrl.ts`). Behind Amplify `request.url` is
+  `https://localhost:3000`, so it is never used for a Location / email link; without a trusted origin redirects are
+  relative and invites answer 503.
 
 ## Adding a member to an office
 
