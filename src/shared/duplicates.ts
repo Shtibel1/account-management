@@ -180,7 +180,8 @@ export function duplicateReason(target: Fingerprint, candidate: Fingerprint): Du
     return 'same_number';
   }
   if (target.total == null || candidate.total == null) return null;
-  if (Math.abs(target.total - candidate.total) > FUZZY_AMOUNT_TOLERANCE) return null;
+  // Compared in agorot so float noise (2.14 - 1.14 = 1.0000000000000002) doesn't break the 1 ILS edge
+  if (Math.round(Math.abs(target.total - candidate.total) * 100) > FUZZY_AMOUNT_TOLERANCE * 100) return null;
   const days = daysBetween(target.invoiceDate, candidate.invoiceDate);
   if (days == null || days > FUZZY_DATE_WINDOW_DAYS) return null;
   return 'fuzzy';

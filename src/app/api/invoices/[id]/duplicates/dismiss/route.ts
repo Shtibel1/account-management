@@ -10,8 +10,8 @@ export async function POST(
   const { id } = await params;
 
   try {
-    const body = (await request.json()) as { otherInvoiceId?: unknown };
-    const otherInvoiceId = typeof body.otherInvoiceId === 'string' ? body.otherInvoiceId.trim() : '';
+    const body = (await request.json().catch(() => ({}))) as { otherInvoiceId?: unknown } | null;
+    const otherInvoiceId = typeof body?.otherInvoiceId === 'string' ? body.otherInvoiceId.trim() : '';
     if (!otherInvoiceId) {
       return NextResponse.json({ error: 'Missing otherInvoiceId' }, { status: 400 });
     }

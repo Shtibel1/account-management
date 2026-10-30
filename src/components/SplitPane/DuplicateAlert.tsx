@@ -26,7 +26,7 @@ function MatchDetails({ match }: { match: DuplicateMatch }) {
   const parts = [
     match.invoice_number ? `חשבונית ${match.invoice_number}` : null,
     formatDate(match.invoice_date),
-    match.total_amount != null ? `₪${match.total_amount.toLocaleString()}` : null,
+    match.total_amount != null ? `₪${match.total_amount.toLocaleString('he-IL', { minimumFractionDigits: 2 })}` : null,
   ].filter(Boolean);
   return parts.length > 0 ? <span className="text-xs text-red-600/80">{parts.join(' · ')}</span> : null;
 }
@@ -46,7 +46,7 @@ export function DuplicateAlert({ invoiceId, flags, readOnly, onDismissed }: Prop
     try {
       await dismissDuplicate(invoiceId, otherInvoiceId);
       onDismissed(otherInvoiceId);
-      toast('סומן כלא כפול — הצמד הזה לא יסומן שוב', 'success');
+      toast('סומנה כלא כפולה — הצמד הזה לא יסומן שוב', 'success');
     } catch (e) {
       console.error('[DuplicateAlert] Failed to dismiss duplicate:', e);
       toast(e instanceof Error ? e.message : 'שגיאה בסימון החשבונית כלא כפולה', 'error');

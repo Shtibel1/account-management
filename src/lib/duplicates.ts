@@ -99,6 +99,9 @@ async function clearDismissedFlag(db: SupabaseClient, invoice: InvoiceRow, other
   const validated = invoice.validated_data;
   const flags = validated?.validation_flags;
   if (!validated || !flags) return null;
+  // Nothing to clear: don't rewrite (possibly approved / exported) data, and don't drop a legacy
+  // flag (no duplicate_matches) that may point at a different invoice
+  if (!(flags.duplicate_matches ?? []).some((m) => m.invoice_id === otherInvoiceId)) return flags;
   const updatedFlags = dismissDuplicateInFlags(flags, otherInvoiceId, validated.invoice_number ?? null);
   const { error } = await db
     .from('invoices')
