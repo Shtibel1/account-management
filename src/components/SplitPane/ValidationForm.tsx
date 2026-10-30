@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { ExtractedData, Invoice, AccountMapping } from '@/shared/types';
 import { approveInvoice } from '@/lib/api';
+import { allocationThreshold, isAllocationNumberWellFormed, isAllocationRequired } from '@/shared/allocation';
 import { createClient } from '@/utils/supabase/client';
 import clsx from 'clsx';
 import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark } from 'lucide-react';
@@ -233,6 +234,10 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const vatIdErrorText = getVatIdError(data.supplier_vat_id ?? null);
   const isVatIdOk = !vatIdErrorText;
 
+  const allocationRequired = isAllocationRequired(data);
+  const isAllocationMissing = allocationRequired && !data.allocation_number?.trim();
+  const isAllocationMalformed = !!data.allocation_number?.trim() && !isAllocationNumberWellFormed(data.allocation_number);
+
   const isDateEmpty = !data.invoice_date;
   const isAmountBeforeVatEmpty = data.amount_before_vat == null || isNaN(data.amount_before_vat);
   const isVatAmountEmpty = data.vat_amount == null || isNaN(data.vat_amount);
@@ -303,11 +308,19 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
           }
         }
 
+        ruleViolations = ruleViolations.filter((v) => !v.includes('מספר הקצאה'));
+        if (isAllocationMissing) {
+          ruleViolations.push(
+            `חסר מספר הקצאה: חשבונית מעל ₪${allocationThreshold(updatedData.invoice_date)} לפני מע"מ — בלי מספר הקצאה לא ניתן לקזז את המע"מ`
+          );
+        }
+
         updatedData.validation_flags = {
           ...updatedData.validation_flags,
           vat_id_ok: vatIdOk,
           math_ok: mathOk,
           rule_violations: ruleViolations,
+          allocation_required: allocationRequired,
         };
       }
 
@@ -698,6 +711,25 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
               </Field>
             </div>
             {mathError && <p className="text-xs text-red-600">שגיאה: לפני מע"מ + מע"מ ≠ סה"כ</p>}
+
+            <Field label="מספר הקצאה" error={isAllocationMissing} fieldKey="allocation_number" onFieldFocus={onFieldFocus}>
+              <input
+                className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', isAllocationMissing && 'input-error')}
+                value={data.allocation_number ?? ''}
+                onChange={(e) => set('allocation_number', e.target.value || null)}
+                onFocus={() => onFieldFocus?.('allocation_number')}
+                onBlur={() => onFieldFocus?.(null)}
+                inputMode="numeric"
+                placeholder={allocationRequired ? 'חובה בחשבונית זו' : 'לא חובה'}
+                disabled={isReadOnly}
+              />
+            </Field>
+            {isAllocationMissing && (
+              <p className="text-xs text-amber-700">
+                חשבונית מעל ₪{allocationThreshold(data.invoice_date)?.toLocaleString()} לפני מע"מ — בלי מספר הקצאה לא ניתן לקזז את המע"מ
+              </p>
+            )}
+            {isAllocationMalformed && <p className="text-xs text-amber-700">מספר הקצאה אמור להיות 9 ספרות — אנא ודא</p>}
 
             <Field label="קטגוריית הוצאה" error={fieldError('expense_category')} fieldKey="expense_category" onFieldFocus={onFieldFocus}>
               <select

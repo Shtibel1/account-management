@@ -48,6 +48,8 @@ const TOOL_DEFINITION: Anthropic.Tool = {
 - "אחר": כל מה שלא מתאים`,
       },
       expense_category_bbox: { '$ref': '#/$defs/bbox' },
+      allocation_number: { type: 'string', description: 'מספר הקצאה מרשות המסים (חשבוניות ישראל), בדרך כלל 9 ספרות, מופיע ליד "מספר הקצאה" / "מס׳ הקצאה". לא מספר החשבונית ולא ח.פ.' },
+      allocation_number_bbox: { '$ref': '#/$defs/bbox' },
       bank_name:         { type: 'string', description: 'שם הבנק להעברה בנקאית (למשל הבינלאומי, לאומי, הפועלים)' },
       bank_branch_code:  { type: 'string', description: 'מספר סניף הבנק (למשל 109)' },
       bank_branch_name:  { type: 'string', description: 'שם סניף הבנק (למשל אשקלון)' },
@@ -78,6 +80,7 @@ You will receive raw OCR text from bilingual Israeli invoices. The text may have
 שים לב: מספר עוסק מורשה ישראלי (ח.פ. / ע.מ.) הוא 9 ספרות בדיוק.
 תאריכים — המר לפורמט YYYY-MM-DD.
 סכומים — ספרות בלבד, ללא סימן מטבע.
+מספר הקצאה — אם מופיע "מספר הקצאה" (רשות המסים), חלץ אותו כ-allocation_number. אל תבלבל עם מספר החשבונית או מספר העוסק.
 פרטי חשבון בנק — אם מופיעים פרטי העברה בנקאית (שם בנק, מספר/שם סניף, מספר חשבון), חלץ אותם במדויק.
 
 כללים חשובים לסכומים בחשבוניות ישראליות:
@@ -96,6 +99,7 @@ You will receive raw OCR text from bilingual Israeli invoices. The text may have
 השתמש תמיד ב-tool "save_invoice_data" להחזרת הנתונים.
 אם שדה לא קיים, אל תכלול אותו.
 חלץ גם פרטי העברה בנקאית של הספק (בנק, סניף, חשבון) אם רשומים במסמך.
+חלץ את "מספר הקצאה" של רשות המסים כ-allocation_number אם מופיע (לא מספר החשבונית ולא ח.פ.).
 הנוסחה תמיד: amount_before_vat = total_amount - vat_amount.`;
 
 const RETRY_HINT = `שים לב במיוחד לסכומים: ודא ש-(סכום לפני מע"מ + מע"מ = סה"כ לתשלום).
@@ -176,6 +180,7 @@ export async function extractInvoiceData(
     vat_amount:        (raw.vat_amount as number) ?? null,
     total_amount:      (raw.total_amount as number) ?? null,
     expense_category:  (raw.expense_category as string) ?? null,
+    allocation_number: (raw.allocation_number as string) ?? null,
     bank_name:         (raw.bank_name as string) ?? null,
     bank_branch_code:  (raw.bank_branch_code as string) ?? null,
     bank_branch_name:  (raw.bank_branch_name as string) ?? null,
@@ -189,6 +194,7 @@ export async function extractInvoiceData(
       vat_amount:        bbox('vat_amount'),
       total_amount:      bbox('total_amount'),
       expense_category:  bbox('expense_category'),
+      allocation_number: bbox('allocation_number'),
     },
   };
 

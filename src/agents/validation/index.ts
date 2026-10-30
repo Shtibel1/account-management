@@ -1,6 +1,12 @@
 import type { ExtractedData, TenantRules, ValidationResult } from '@/shared/types';
 import { supabase } from '@/lib/supabase';
 import { searchVatIdByName } from '@/utils/businessLookup';
+import {
+  allocationThreshold,
+  isAllocationNumberWellFormed,
+  isAllocationRequired,
+  normalizeAllocationNumber,
+} from '@/shared/allocation';
 
 const REQUIRED_FIELDS: (keyof ExtractedData)[] = [
   'supplier_name',
@@ -203,6 +209,17 @@ export async function validateInvoice(
     ruleViolations.push('ח.פ. / עוסק מורשה אינו תקין לפי בדיקת checksum');
   }
 
+  // Allocation number (חשבוניות ישראל) above the threshold
+  corrected.allocation_number = normalizeAllocationNumber(corrected.allocation_number);
+  const allocationRequired = isAllocationRequired(corrected);
+  if (allocationRequired && !corrected.allocation_number) {
+    ruleViolations.push(
+      `חסר מספר הקצאה: חשבונית מעל ₪${allocationThreshold(corrected.invoice_date)} לפני מע"מ — בלי מספר הקצאה לא ניתן לקזז את המע"מ`
+    );
+  } else if (corrected.allocation_number && !isAllocationNumberWellFormed(corrected.allocation_number)) {
+    warnings.push(`מספר ההקצאה ${corrected.allocation_number} אינו בן 9 ספרות — אנא ודא`);
+  }
+
   // 4. Duplicate checks
   let duplicateFound = false;
   if (rules.duplicateInvoiceCheck && corrected.supplier_vat_id && corrected.invoice_number) {
@@ -246,6 +263,7 @@ export async function validateInvoice(
     warnings,
     requires_manual_review: requiresManualReview,
     not_an_invoice: notAnInvoice,
+    allocation_required: allocationRequired,
     vat_id_sources: {
       invoice: invoiceVatId,
       supplier_table: supplierTableVatId,

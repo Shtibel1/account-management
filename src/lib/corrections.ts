@@ -11,6 +11,7 @@ export const TRACKED_FIELDS = [
   'vat_amount',
   'total_amount',
   'expense_category',
+  'allocation_number',
   'bank_name',
   'bank_branch_code',
   'bank_branch_name',

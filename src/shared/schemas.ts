@@ -16,6 +16,7 @@ export const BboxMapSchema = z.object({
   vat_amount: FieldBboxSchema.optional(),
   total_amount: FieldBboxSchema.optional(),
   expense_category: FieldBboxSchema.optional(),
+  allocation_number: FieldBboxSchema.optional(),
 });
 
 export const VatIdSourcesSchema = z.object({
@@ -33,6 +34,7 @@ export const ValidationResultSchema = z.object({
   warnings: z.array(z.string()),
   requires_manual_review: z.boolean(),
   not_an_invoice: z.boolean().optional(),
+  allocation_required: z.boolean().optional(),
   vat_id_sources: VatIdSourcesSchema.optional(),
 });
 
@@ -45,6 +47,7 @@ export const ExtractedDataSchema = z.object({
   vat_amount: z.number().nullable(),
   total_amount: z.number().nullable(),
   expense_category: z.string().nullable(),
+  allocation_number: z.string().nullable().optional(),
   validation_flags: ValidationResultSchema.optional(),
   bboxes: BboxMapSchema.optional(),
 });

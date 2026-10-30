@@ -12,7 +12,8 @@ export interface FieldBbox {
 
 export type BboxMap = Partial<Record<
   'supplier_name' | 'supplier_vat_id' | 'invoice_number' |
-  'invoice_date' | 'amount_before_vat' | 'vat_amount' | 'total_amount' | 'expense_category',
+  'invoice_date' | 'amount_before_vat' | 'vat_amount' | 'total_amount' | 'expense_category' |
+  'allocation_number',
   FieldBbox
 >>;
 
@@ -25,6 +26,7 @@ export interface ExtractedData {
   vat_amount: number | null;
   total_amount: number | null;
   expense_category: string | null;
+  allocation_number?: string | null;  // ITA מספר הקצאה
   bank_name?: string | null;
   bank_branch_code?: string | null;
   bank_branch_name?: string | null;
@@ -57,6 +59,7 @@ export interface ValidationResult {
   warnings: string[];
   requires_manual_review: boolean;
   not_an_invoice?: boolean;
+  allocation_required?: boolean;
   vat_id_sources?: VatIdSources;
 }
 
