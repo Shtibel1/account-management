@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { AlertTriangle, Download, FileSpreadsheet, Loader2, RefreshCw, Sparkles, Upload } from 'lucide-react';
 import { createClient } from '@/utils/supabase/client';
@@ -8,14 +8,33 @@ import type { BankTransaction, Client, MatchableInvoice } from '@/shared/types';
 import { Button } from '@/components/ui/Button';
 import { useToast } from '@/components/ui/Toast';
 import { StatementImport } from '@/components/Bank/StatementImport';
-import { BankRowAction, TransactionsTable } from '@/components/Bank/TransactionsTable';
+import { BankRowAction, BankTableFilters, TransactionsTable } from '@/components/Bank/TransactionsTable';
 import { MatchPicker } from '@/components/Bank/MatchPicker';
 import { formatAmount } from '@/components/Bank/format';
-import { bankTransactionAction, BankOverviewResponse, fetchBankOverview, runBankAutoMatch } from '@/lib/api';
-import { downloadMissingInvoicesXlsx, missingInvoiceTransactions } from '@/lib/exporters/missingInvoices';
-import { usedInvoiceIds } from '@/shared/bankMatch';
+import {
+  bankTransactionAction,
+  BankOverviewResponse,
+  BankRequestError,
+  fetchAllBankLines,
+  fetchBankOverview,
+  runBankAutoMatch,
+} from '@/lib/api';
+import { downloadMissingInvoicesXlsx } from '@/lib/exporters/missingInvoices';
+import { DEFAULT_BANK_PAGE_SIZE, summarizeBankTransactions } from '@/shared/bankOverview';
 
-const EMPTY: BankOverviewResponse = { transactions: [], invoices: [], candidates: {} };
+const EMPTY: BankOverviewResponse = {
+  transactions: [],
+  total: 0,
+  page: 1,
+  pageSize: DEFAULT_BANK_PAGE_SIZE,
+  totalPages: 1,
+  summary: summarizeBankTransactions([]),
+  invoices: [],
+  available: [],
+  candidates: {},
+};
+
+const DEFAULT_FILTERS: BankTableFilters = { status: 'all', account: null, search: '' };
 
 export default function BankPage() {
   const supabase = createClient();
@@ -26,9 +45,14 @@ export default function BankPage() {
   const [loading, setLoading] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [tab, setTab] = useState<'all' | 'missing'>('all');
+  const [filters, setFilters] = useState<BankTableFilters>(DEFAULT_FILTERS);
+  const [page, setPage] = useState(1);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [matching, setMatching] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [pickerFor, setPickerFor] = useState<BankTransaction | null>(null);
+  // Only the newest request may update the page (filters / paging can change while one is in flight).
+  const requestSeq = useRef(0);
 
   useEffect(() => {
     supabase.from('clients').select('*').order('name').then(({ data }) => {
@@ -37,61 +61,77 @@ export default function BankPage() {
     });
   }, []);
 
-  const load = useCallback(async (id: string) => {
-    if (!id) return;
+  // The server filters and pages the lines; the page only ever holds one page of them.
+  const load = useCallback(async () => {
+    if (!clientId) return;
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
-      setOverview(await fetchBankOverview(id));
+      const next = await fetchBankOverview(clientId, {
+        mode: tab,
+        status: filters.status,
+        account: filters.account,
+        search: filters.search,
+        page,
+        pageSize: DEFAULT_BANK_PAGE_SIZE,
+      });
+      if (seq !== requestSeq.current) return;
+      setOverview(next);
+      if (next.page !== page) setPage(next.page); // the list shrank under the current page
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       console.error('[bank] Failed to load overview:', err);
       toast(err instanceof Error ? err.message : 'שגיאה בטעינת התנועות', 'error');
       setOverview(EMPTY);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
-  }, [toast]);
+  }, [clientId, tab, filters, page, toast]);
 
   useEffect(() => {
+    load();
+  }, [load]);
+
+  // New client: start over (filters of one client's accounts make no sense for another).
+  useEffect(() => {
     setShowImport(false);
-    load(clientId);
-  }, [clientId, load]);
+    setFilters(DEFAULT_FILTERS);
+    setPage(1);
+  }, [clientId]);
+
+  const handleFiltersChange = useCallback((patch: Partial<BankTableFilters>) => {
+    setFilters((f) => ({ ...f, ...patch }));
+    setPage(1);
+  }, []);
 
   const invoicesById = useMemo(
-    () => new Map<string, MatchableInvoice>(overview.invoices.map((i) => [i.id, i])),
-    [overview.invoices]
+    () => new Map<string, MatchableInvoice>([...overview.available, ...overview.invoices].map((i) => [i.id, i])),
+    [overview.available, overview.invoices]
   );
 
-  // Invoices free for a manual match: approved/exported and not used by any other line.
-  const availableInvoices = useMemo(() => {
-    const used = usedInvoiceIds(overview.transactions);
-    return overview.invoices.filter((i) => !used.has(i.id) && (i.status === 'approved' || i.status === 'exported'));
-  }, [overview]);
-
   const stats = useMemo(() => {
-    const t = overview.transactions;
-    const missing = missingInvoiceTransactions(t);
-    const debits = t.filter((x) => x.amount < 0 && x.match_status !== 'ignored');
-    const matched = debits.filter((x) => x.match_status === 'auto' || x.match_status === 'manual');
-    return {
-      total: t.length,
-      debits: debits.length,
-      matched: matched.length,
-      missing: missing.length,
-      missingSum: missing.reduce((s, x) => s + Math.abs(x.amount), 0),
-      ignored: t.filter((x) => x.match_status === 'ignored').length,
-      accountLabels: [...new Set(t.map((x) => x.account_label).filter(Boolean))].sort(),
-      coverage: debits.length ? Math.round((matched.length / debits.length) * 100) : null,
-    };
-  }, [overview.transactions]);
+    const s = overview.summary;
+    return { ...s, coverage: s.debits ? Math.round((s.matched / s.debits) * 100) : null };
+  }, [overview.summary]);
 
   const clientName = clients.find((c) => c.id === clientId)?.name ?? '';
 
   const runAction = async (txn: BankTransaction, action: Exclude<BankRowAction, 'match'> | { invoiceId: string }) => {
     setBusyId(txn.id);
     try {
-      const body = typeof action === 'string' ? { action } : { action: 'match' as const, invoiceId: action.invoiceId };
-      await bankTransactionAction(txn.id, body);
-      await load(clientId);
+      if (typeof action === 'string') {
+        await bankTransactionAction(txn.id, { action });
+      } else {
+        try {
+          await bankTransactionAction(txn.id, { action: 'match', invoiceId: action.invoiceId });
+        } catch (err) {
+          // Invoice total differs from the charge: only on the reviewer's explicit confirmation.
+          if (!(err instanceof BankRequestError) || err.code !== 'amount_mismatch') throw err;
+          if (!window.confirm(`${err.message}.\nלהתאים בכל זאת?`)) return;
+          await bankTransactionAction(txn.id, { action: 'match', invoiceId: action.invoiceId, force: true });
+        }
+      }
+      await load();
     } catch (err) {
       console.error('[bank] Action failed:', err);
       toast(err instanceof Error ? err.message : 'הפעולה נכשלה', 'error');
@@ -113,7 +153,7 @@ export default function BankPage() {
         result.matched > 0 ? `הותאמו ${result.matched} תנועות נוספות` : 'לא נמצאו התאמות חדשות',
         result.matched > 0 ? 'success' : 'info'
       );
-      await load(clientId);
+      await load();
     } catch (err) {
       console.error('[bank] Auto-match failed:', err);
       toast(err instanceof Error ? err.message : 'ההתאמה נכשלה', 'error');
@@ -123,11 +163,16 @@ export default function BankPage() {
   };
 
   const handleExportMissing = async () => {
+    setExporting(true);
     try {
-      await downloadMissingInvoicesXlsx(overview.transactions, clientName);
+      // Every missing line, not just the page on screen (fetched page by page).
+      const missing = await fetchAllBankLines(clientId, { mode: 'missing' });
+      await downloadMissingInvoicesXlsx(missing, clientName);
     } catch (err) {
       console.error('[bank] Missing invoices export failed:', err);
-      toast('שגיאה ביצירת קובץ האקסל', 'error');
+      toast(err instanceof Error ? err.message : 'שגיאה ביצירת קובץ האקסל', 'error');
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -148,7 +193,7 @@ export default function BankPage() {
             ))}
           </select>
           <button
-            onClick={() => load(clientId)}
+            onClick={() => load()}
             disabled={loading || !clientId}
             className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700 transition-colors px-3 py-2 rounded-lg hover:bg-slate-100"
           >
@@ -182,7 +227,7 @@ export default function BankPage() {
           onCancel={() => setShowImport(false)}
           onImported={() => {
             setShowImport(false);
-            load(clientId);
+            load();
           }}
         />
       ) : (
@@ -195,8 +240,8 @@ export default function BankPage() {
             {matching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
             הרץ התאמה אוטומטית
           </Button>
-          <Button variant="secondary" onClick={handleExportMissing} disabled={stats.missing === 0}>
-            <Download className="h-4 w-4" />
+          <Button variant="secondary" onClick={handleExportMissing} disabled={stats.missing === 0 || exporting}>
+            {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
             ייצוא חשבוניות חסרות לאקסל
           </Button>
         </div>
@@ -209,7 +254,10 @@ export default function BankPage() {
         ] as const).map(([key, label, count]) => (
           <button
             key={key}
-            onClick={() => setTab(key)}
+            onClick={() => {
+              setTab(key);
+              setPage(1);
+            }}
             className={clsx(
               'px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
               tab === key ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500 hover:text-slate-700'
@@ -235,6 +283,14 @@ export default function BankPage() {
       ) : (
         <TransactionsTable
           transactions={overview.transactions}
+          total={overview.total}
+          page={overview.page}
+          pageSize={overview.pageSize}
+          totalPages={overview.totalPages}
+          accounts={stats.accountLabels}
+          filters={filters}
+          onFiltersChange={handleFiltersChange}
+          onPageChange={setPage}
           invoicesById={invoicesById}
           candidates={overview.candidates}
           busyId={busyId}
@@ -246,7 +302,7 @@ export default function BankPage() {
       {pickerFor && (
         <MatchPicker
           transaction={pickerFor}
-          available={availableInvoices}
+          available={overview.available}
           candidateIds={overview.candidates[pickerFor.id] ?? []}
           onClose={() => setPickerFor(null)}
           onSelect={(invoiceId) => {

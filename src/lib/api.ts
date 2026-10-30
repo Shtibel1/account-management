@@ -1,7 +1,8 @@
 import type { BankTransaction, ClientContact, ClientNotification, ExtractedData, Invoice, NormalizedBankRow, SupplierAutomation, SupplierAutomationStatus, ValidationResult } from '@/shared/types';
 import type { FeatureFlag, FeatureFlagsResponse, OrgFeatureFlagsResponse } from '@/shared/featureFlags';
 import type { NotificationOutcome, ReturnReasonCode } from '@/shared/returns';
-import type { BankAction, BankOverview, ImportResult, MatchRunResult } from '@/lib/bankTransactions';
+import type { BankAction, BankLinesPage, BankOverview, ImportResult, MatchRunResult } from '@/lib/bankTransactions';
+import { MAX_BANK_PAGE_SIZE, type BankListQuery } from '@/shared/bankOverview';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -280,18 +281,59 @@ export interface BankOverviewResponse extends BankOverview {
   setupRequired?: boolean;
 }
 
+/** Failed bank API call; `code` is the server's machine-readable reason (e.g. 'amount_mismatch'). */
+export class BankRequestError extends Error {
+  constructor(message: string, public readonly status: number, public readonly code?: string) {
+    super(message);
+    this.name = 'BankRequestError';
+  }
+}
+
 async function bankRequest<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_URL}${url}`, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
   });
   const body = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(body?.error ?? 'שגיאה בתקשורת עם השרת');
+  if (!res.ok) {
+    throw new BankRequestError(
+      body?.error ?? 'שגיאה בתקשורת עם השרת',
+      res.status,
+      typeof body?.code === 'string' ? body.code : undefined
+    );
+  }
   return body as T;
 }
 
-export function fetchBankOverview(clientId: string) {
-  return bankRequest<BankOverviewResponse>(`/api/bank?clientId=${encodeURIComponent(clientId)}`);
+function bankListParams(clientId: string, query: Partial<BankListQuery>): URLSearchParams {
+  const params = new URLSearchParams({ clientId });
+  if (query.mode && query.mode !== 'all') params.set('mode', query.mode);
+  if (query.status && query.status !== 'all') params.set('status', query.status);
+  if (query.account != null) params.set('account', query.account);
+  if (query.search?.trim()) params.set('q', query.search.trim());
+  if (query.page) params.set('page', String(query.page));
+  if (query.pageSize) params.set('pageSize', String(query.pageSize));
+  return params;
+}
+
+/** One page of lines + summary + the invoices / candidates of that page. */
+export function fetchBankOverview(clientId: string, query: Partial<BankListQuery> = {}) {
+  return bankRequest<BankOverviewResponse>(`/api/bank?${bankListParams(clientId, query)}`);
+}
+
+/** Every line matching the filters, fetched page by page (e.g. the full missing-invoices list). */
+export async function fetchAllBankLines(
+  clientId: string,
+  query: Partial<Pick<BankListQuery, 'mode' | 'status' | 'account' | 'search'>>
+): Promise<BankTransaction[]> {
+  const lines: BankTransaction[] = [];
+  for (let page = 1; ; page++) {
+    const params = bankListParams(clientId, { ...query, page, pageSize: MAX_BANK_PAGE_SIZE });
+    params.set('view', 'lines');
+    const res = await bankRequest<BankLinesPage>(`/api/bank?${params}`);
+    lines.push(...res.transactions);
+    if (res.page >= res.totalPages || res.transactions.length === 0) return lines;
+  }
 }
 
 export function importBankStatement(payload: {
@@ -300,7 +342,7 @@ export function importBankStatement(payload: {
   fileName: string | null;
   rows: NormalizedBankRow[];
 }) {
-  return bankRequest<ImportResult & MatchRunResult>('/api/bank/import', {
+  return bankRequest<ImportResult & MatchRunResult & { matchError?: string }>('/api/bank/import', {
     method: 'POST',
     body: JSON.stringify(payload),
   });

@@ -2,7 +2,23 @@ import { randomUUID } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { BankTransaction, Invoice, MatchableInvoice, NormalizedBankRow } from '@/shared/types';
 import { bankDedupeKeys } from '@/shared/bankStatement';
-import { autoMatch, findCandidates, isMatchableDebit, MAX_CANDIDATES, toMatchableInvoice, usedInvoiceIds } from '@/shared/bankMatch';
+import {
+  AMOUNT_TOLERANCE,
+  autoMatch,
+  findCandidates,
+  isMatchableDebit,
+  MAX_CANDIDATES,
+  toMatchableInvoice,
+  usedInvoiceIds,
+} from '@/shared/bankMatch';
+import {
+  filterBankTransactions,
+  paginate,
+  summarizeBankTransactions,
+  type BankListQuery,
+  type BankSummary,
+} from '@/shared/bankOverview';
+import { formatIsoDateHe } from '@/lib/exporters/missingInvoices';
 
 // Repository for bank_transactions. Every function takes the db client so routes can pass the
 // real Supabase client or the local mock (which has no upsert/range - handled below).
@@ -11,6 +27,7 @@ const TABLE = 'bank_transactions';
 const PAGE_SIZE = 1000;          // PostgREST's default max rows per request
 const KEY_LOOKUP_CHUNK = 100;    // keeps the `in (...)` URL short (~45 chars per key)
 const INSERT_CHUNK = 500;
+const IMPORT_RPC = 'import_bank_transactions';
 
 export class BankTableMissingError extends Error {
   constructor() {
@@ -19,8 +36,22 @@ export class BankTableMissingError extends Error {
 }
 
 export class BankActionError extends Error {
-  constructor(message: string, public readonly status: number = 400) {
+  constructor(
+    message: string,
+    public readonly status: number = 400,
+    /** Machine-readable reason for the UI, e.g. 'amount_mismatch' (confirm and retry with force). */
+    public readonly code?: string,
+    public readonly details?: Record<string, unknown>
+  ) {
     super(message);
+  }
+}
+
+/** A database / storage failure. The message is Hebrew and safe to show; the cause is only logged. */
+export class BankDbError extends Error {
+  constructor(public readonly context: string, public readonly cause: DbError) {
+    super('שגיאה בגישה לנתוני הבנק - נסו שוב מאוחר יותר');
+    this.name = 'BankDbError';
   }
 }
 
@@ -42,7 +73,8 @@ function isMissingTable(error: DbError | null): boolean {
 function throwDbError(error: DbError | null, context: string): void {
   if (!error) return;
   if (isMissingTable(error)) throw new BankTableMissingError();
-  throw new Error(`[bank] ${context}: ${error.message}`);
+  console.error(`[bank] ${context}:`, error.code ?? '', error.message);
+  throw new BankDbError(context, error);
 }
 
 type PageResult<T> = PromiseLike<{ data: T[] | null; error: DbError | null }>;
@@ -103,6 +135,71 @@ export async function loadMatchableInvoices(db: SupabaseClient, clientId: string
   return rows.map(toMatchableInvoice);
 }
 
+type BankInsertRow = Omit<BankTransaction, 'id' | 'created_at'>;
+
+/** PostgREST PGRST202 / Postgres 42883: the import function isn't deployed yet. */
+function isMissingFunction(error: DbError | null): boolean {
+  return !!error && (error.code === 'PGRST202' || error.code === '42883');
+}
+
+/**
+ * Inserts every new line or none. Preferred path: the import_bank_transactions() SQL function (one
+ * statement = one transaction). Fallback (mock DB / function not deployed yet): chunked inserts,
+ * and on any failure the lines of this batch already written are deleted again.
+ */
+async function insertAllOrNothing(
+  db: SupabaseClient,
+  batch: { clientId: string; accountLabel: string; batchId: string; sourceFile: string | null },
+  rows: BankInsertRow[]
+): Promise<number> {
+  if (rows.length === 0) return 0;
+
+  if (typeof db.rpc === 'function') {
+    const { data, error } = await db.rpc(IMPORT_RPC, {
+      p_client_id: batch.clientId,
+      p_account_label: batch.accountLabel,
+      p_batch_id: batch.batchId,
+      p_source_file: batch.sourceFile,
+      p_rows: rows.map((r) => ({
+        txn_date: r.txn_date,
+        description: r.description,
+        amount: r.amount,
+        reference: r.reference,
+        dedupe_key: r.dedupe_key,
+      })),
+    });
+    if (!isMissingFunction(error)) {
+      throwDbError(error, 'import transactions');
+      return typeof data === 'number' ? data : Number(data ?? 0);
+    }
+    console.warn(`[bank] ${IMPORT_RPC}() not deployed, falling back to chunked inserts with rollback`);
+  }
+
+  let inserted = 0;
+  try {
+    for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
+      const chunk = rows.slice(i, i + INSERT_CHUNK);
+      const builder = db.from(TABLE);
+      // The unique index is the real guard (two imports racing); the mock client has no upsert.
+      const { data, error } =
+        typeof builder.upsert === 'function'
+          ? await builder
+              .upsert(chunk, { onConflict: 'client_id,account_label,dedupe_key', ignoreDuplicates: true })
+              .select('id')
+          : await builder.insert(chunk);
+      throwDbError(error, 'insert transactions');
+      inserted += Array.isArray(data) ? data.length : chunk.length;
+    }
+  } catch (err) {
+    if (inserted > 0) {
+      const { error: undoError } = await db.from(TABLE).delete().eq('import_batch_id', batch.batchId);
+      if (undoError) console.error(`[bank] Failed to roll back import batch ${batch.batchId}:`, undoError.message);
+    }
+    throw err;
+  }
+  return inserted;
+}
+
 export interface ImportResult {
   batchId: string;
   inserted: number;
@@ -149,21 +246,7 @@ export async function importBankRows(
     }))
     .filter((r) => !existing.has(r.dedupe_key));
 
-  let inserted = 0;
-  for (let i = 0; i < toInsert.length; i += INSERT_CHUNK) {
-    const chunk = toInsert.slice(i, i + INSERT_CHUNK);
-    const builder = db.from(TABLE);
-    // The unique index is the real guard (two imports racing); the mock client has no upsert.
-    const { data, error } =
-      typeof builder.upsert === 'function'
-        ? await builder
-            .upsert(chunk, { onConflict: 'client_id,account_label,dedupe_key', ignoreDuplicates: true })
-            .select('id')
-        : await builder.insert(chunk);
-    throwDbError(error, 'insert transactions');
-    inserted += Array.isArray(data) ? data.length : chunk.length;
-  }
-
+  const inserted = await insertAllOrNothing(db, { clientId, accountLabel, batchId, sourceFile }, toInsert);
   return { batchId, inserted, duplicates: rows.length - inserted };
 }
 
@@ -198,48 +281,137 @@ export async function runAutoMatch(db: SupabaseClient, clientId: string): Promis
   return { matched, ambiguous: Object.keys(result.ambiguous).length };
 }
 
-export interface BankOverview {
+export interface BankLinesPage {
+  /** One page of lines (after filters), display order. */
   transactions: BankTransaction[];
-  /** Matchable invoices plus any invoice a line is matched to (for display). */
+  /** Lines matching the filters, across all pages. */
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface BankOverview extends BankLinesPage {
+  /** Counts over ALL the client's lines (not just this page). */
+  summary: BankSummary;
+  /** Invoices the lines of this page are matched to or could be matched to (for display). */
   invoices: MatchableInvoice[];
-  /** Unmatched debit id -> plausible invoice ids, best first. */
+  /** Approved/exported invoices not matched to any line - the manual picker's list. */
+  available: MatchableInvoice[];
+  /** Unmatched debit id (of this page) -> plausible invoice ids, best first. */
   candidates: Record<string, string[]>;
 }
 
-export async function loadBankOverview(db: SupabaseClient, clientId: string): Promise<BankOverview> {
-  const [transactions, invoices] = await Promise.all([
+type InvoiceDisplayRow = Pick<Invoice, 'id' | 'file_name' | 'status' | 'validated_data' | 'extracted_data'>;
+
+/** Invoices the client's lines are matched to but that aren't matchable any more (display only). */
+async function loadMatchedInvoices(db: SupabaseClient, clientId: string, ids: string[]): Promise<MatchableInvoice[]> {
+  const result: MatchableInvoice[] = [];
+  for (let i = 0; i < ids.length; i += KEY_LOOKUP_CHUNK) {
+    const { data, error } = await db
+      .from('invoices')
+      .select('id, file_name, status, validated_data, extracted_data')
+      .eq('client_id', clientId) // never show another client's invoice on this client's page
+      .in('id', ids.slice(i, i + KEY_LOOKUP_CHUNK));
+    if (error) {
+      console.error('[bank] Failed to load matched invoices:', error.message);
+      continue;
+    }
+    for (const row of (data ?? []) as InvoiceDisplayRow[]) result.push(toMatchableInvoice(row));
+  }
+  return result;
+}
+
+/**
+ * Summary over all lines + one filtered page of lines with the invoices / candidates it needs.
+ * The response size no longer grows with the number of lines (only with the page size).
+ * `linesOnly` skips invoices, candidates and the summary (paged export of the missing list).
+ */
+export async function loadBankOverview(
+  db: SupabaseClient,
+  clientId: string,
+  query: BankListQuery,
+  options: { linesOnly?: boolean } = {}
+): Promise<BankOverview> {
+  const [transactions, matchable] = await Promise.all([
     loadTransactions(db, clientId),
     loadMatchableInvoices(db, clientId),
   ]);
 
-  // A matched invoice may since have moved out of approved/exported (e.g. reopened for review).
-  const known = new Set(invoices.map((i) => i.id));
-  const missingIds = [...usedInvoiceIds(transactions)].filter((id) => !known.has(id));
+  const used = usedInvoiceIds(transactions);
+  const invoicesById = new Map<string, MatchableInvoice>(matchable.map((i) => [i.id, i]));
+  // Safety net: a matched invoice that is no longer approved/exported (the DB trigger releases
+  // those lines, see migration 20261030163000) is still shown, never offered for a new match.
+  const missingIds = [...used].filter((id) => !invoicesById.has(id));
   if (missingIds.length > 0) {
-    const { data, error } = await db
-      .from('invoices')
-      .select('id, file_name, status, validated_data, extracted_data')
-      .in('id', missingIds);
-    if (error) console.error('[bank] Failed to load matched invoices:', error.message);
-    for (const row of (data ?? []) as Pick<Invoice, 'id' | 'file_name' | 'status' | 'validated_data' | 'extracted_data'>[]) {
-      invoices.push(toMatchableInvoice(row));
-    }
+    for (const inv of await loadMatchedInvoices(db, clientId, missingIds)) invoicesById.set(inv.id, inv);
   }
 
-  const used = usedInvoiceIds(transactions);
-  const matchable = invoices.filter((i) => i.status === 'approved' || i.status === 'exported');
+  const filtered = filterBankTransactions(transactions, query, invoicesById);
+  const page = paginate(filtered, query.page, query.pageSize);
+  const lines: BankLinesPage = {
+    transactions: page.rows,
+    total: page.total,
+    page: page.page,
+    pageSize: page.pageSize,
+    totalPages: page.totalPages,
+  };
+  if (options.linesOnly) {
+    return { ...lines, summary: summarizeBankTransactions([]), invoices: [], available: [], candidates: {} };
+  }
+
   const candidates: Record<string, string[]> = {};
-  for (const txn of transactions) {
+  const pageInvoiceIds = new Set<string>();
+  for (const txn of page.rows) {
+    if (txn.matched_invoice_id) pageInvoiceIds.add(txn.matched_invoice_id);
     if (!isMatchableDebit(txn)) continue;
     const list = findCandidates(txn, matchable, used);
     if (list.length > 0) candidates[txn.id] = list.slice(0, MAX_CANDIDATES).map((c) => c.invoiceId);
   }
 
-  return { transactions, invoices, candidates };
+  // Candidates are always free matchable invoices, so they are in `available`.
+  const available = matchable.filter((i) => !used.has(i.id));
+  const invoices = [...pageInvoiceIds]
+    .map((id) => invoicesById.get(id))
+    .filter((i): i is MatchableInvoice => !!i);
+
+  return { ...lines, summary: summarizeBankTransactions(transactions), invoices, available, candidates };
+}
+
+/**
+ * Releases the lines matched to an invoice (it moved to another client or left approved/exported).
+ * The DB trigger invoices_release_bank_matches does the same for every write path; this keeps the
+ * API path explicit and covers the mock DB. Never throws: returns how many lines were released.
+ */
+export async function releaseBankMatchesForInvoice(db: SupabaseClient, invoiceId: string): Promise<number> {
+  try {
+    const { data, error } = await db
+      .from(TABLE)
+      .update({ matched_invoice_id: null, match_status: 'unmatched' })
+      .eq('matched_invoice_id', invoiceId)
+      .select('id');
+    if (error) {
+      if (!isMissingTable(error)) console.error(`[bank] Failed to release bank matches of invoice ${invoiceId}:`, error.message);
+      return 0;
+    }
+    return Array.isArray(data) ? data.length : 0;
+  } catch (err) {
+    console.error(`[bank] Failed to release bank matches of invoice ${invoiceId}:`, err);
+    return 0;
+  }
+}
+
+/** True when an invoice update means its bank lines must be released. */
+export function invoiceUpdateReleasesBankMatch(
+  before: { client_id?: unknown; status?: unknown },
+  after: { client_id?: unknown; status?: unknown }
+): boolean {
+  if (before.client_id !== after.client_id) return true;
+  return before.status !== after.status && after.status !== 'approved' && after.status !== 'exported';
 }
 
 export type BankAction =
-  | { action: 'match'; invoiceId: string }
+  | { action: 'match'; invoiceId: string; force?: boolean }
   | { action: 'unmatch' }
   | { action: 'ignore' }
   | { action: 'restore' };
@@ -254,9 +426,16 @@ export async function applyBankAction(db: SupabaseClient, transactionId: string,
   let update: Partial<BankTransaction>;
   switch (body.action) {
     case 'match': {
+      // Only debits need a supplier invoice (same rule as auto-match and the "התאם" button).
+      if (!(txn.amount < 0)) {
+        throw new BankActionError('ניתן להתאים חשבונית רק לחיוב (תנועה בסכום שלילי)', 409, 'not_a_debit');
+      }
+      if (txn.match_status === 'ignored') {
+        throw new BankActionError('התנועה הוחרגה - יש לשחזר אותה לפני התאמה', 409, 'ignored');
+      }
       const { data: invoice } = await db
         .from('invoices')
-        .select('id, client_id, status')
+        .select('id, client_id, status, file_name, validated_data, extracted_data')
         .eq('id', body.invoiceId)
         .single();
       if (!invoice || invoice.client_id !== txn.client_id) {
@@ -266,13 +445,33 @@ export async function applyBankAction(db: SupabaseClient, transactionId: string,
       if (invoice.status !== 'approved' && invoice.status !== 'exported') {
         throw new BankActionError('ניתן להתאים רק חשבונית מאושרת', 409);
       }
+      // A total outside the auto-match tolerance is allowed only as an explicit, confirmed override.
+      const total = toMatchableInvoice(invoice as InvoiceDisplayRow).total_amount;
+      const charge = Math.abs(txn.amount);
+      const diff = total == null ? null : Math.round(Math.abs(charge - total) * 100) / 100;
+      if ((diff == null || diff > AMOUNT_TOLERANCE) && body.force !== true) {
+        throw new BankActionError(
+          total == null
+            ? 'לחשבונית אין סכום כולל - יש לאשר את ההתאמה'
+            : `סכום החשבונית (${total.toFixed(2)}) שונה מסכום החיוב (${charge.toFixed(2)}) - יש לאשר התאמה בסכום שונה`,
+          409,
+          'amount_mismatch',
+          { invoiceTotal: total, amount: charge, difference: diff }
+        );
+      }
       const { data: taken, error: takenError } = await db
         .from(TABLE)
-        .select('id')
+        .select('id, client_id, txn_date, description, account_label')
         .eq('matched_invoice_id', body.invoiceId);
       throwDbError(takenError, 'check invoice usage');
-      if (((taken ?? []) as { id: string }[]).some((t) => t.id !== txn.id)) {
-        throw new BankActionError('החשבונית כבר מותאמת לתנועה אחרת', 409);
+      type Holder = Pick<BankTransaction, 'id' | 'client_id' | 'txn_date' | 'description' | 'account_label'>;
+      const holder = ((taken ?? []) as Holder[]).find((t) => t.id !== txn.id);
+      if (holder) {
+        const where =
+          holder.client_id === txn.client_id
+            ? ` (${formatIsoDateHe(holder.txn_date)} · ${holder.description}${holder.account_label ? ` · ${holder.account_label}` : ''})`
+            : ' של לקוח אחר';
+        throw new BankActionError(`החשבונית כבר מותאמת לתנועה אחרת${where} - יש לבטל שם את ההתאמה`, 409, 'invoice_taken');
       }
       update = { matched_invoice_id: body.invoiceId, match_status: 'manual' };
       break;

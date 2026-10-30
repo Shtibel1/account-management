@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { requireClientAccess, requireInvoiceAccess } from '@/lib/auth';
+import { invoiceUpdateReleasesBankMatch, releaseBankMatchesForInvoice } from '@/lib/bankTransactions';
 
 /** Columns the client may not set through PATCH. */
 const PROTECTED_COLUMNS = [
@@ -40,7 +41,7 @@ export async function PATCH(
 ) {
   const { id } = await params;
 
-  const access = await requireInvoiceAccess(id);
+  const access = await requireInvoiceAccess<{ id: string; client_id: string; status: string }>(id, 'id, client_id, status');
   if (!access.ok) return access.response;
 
   try {
@@ -72,6 +73,12 @@ export async function PATCH(
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    // Moved to another client, or no longer approved/exported: its bank line is not a valid match
+    // any more (the DB trigger invoices_release_bank_matches does the same for other write paths).
+    if (data && invoiceUpdateReleasesBankMatch(access.value.invoice, data as { client_id?: unknown; status?: unknown })) {
+      await releaseBankMatchesForInvoice(supabase, id);
     }
 
     return NextResponse.json(data);

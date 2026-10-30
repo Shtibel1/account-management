@@ -121,12 +121,13 @@ export async function dismissDuplicate(
   otherInvoiceId: string
 ): Promise<ValidationResult | null> {
   if (invoiceId === otherInvoiceId) {
-    throw new DuplicateDismissalError('An invoice cannot be dismissed against itself', 400);
+    throw new DuplicateDismissalError('לא ניתן לסמן חשבונית ככפילות של עצמה', 400);
   }
   const [invoice, other] = await Promise.all([getInvoice(db, invoiceId), getInvoice(db, otherInvoiceId)]);
-  if (!invoice || !other) throw new DuplicateDismissalError('Invoice not found', 404);
-  if (invoice.client_id !== other.client_id) {
-    throw new DuplicateDismissalError('Invoices belong to different clients', 400);
+  // A pair is always within one client. Missing and other-client invoices get the same 404, so the
+  // response never tells whether an invoice id of another client / office exists.
+  if (!invoice || !other || invoice.client_id !== other.client_id) {
+    throw new DuplicateDismissalError('החשבונית לא נמצאה', 404);
   }
 
   const dismissed = await loadDismissedOtherIds(db, invoiceId);

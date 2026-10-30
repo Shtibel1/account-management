@@ -59,10 +59,18 @@ export async function getSupplierAutomation(
   }
 }
 
-/** Fails closed: any error means "not opted in". */
+/**
+ * True only for an opt-in made through setSupplierAutoApprove (eligibility checked, enabled_at set).
+ * A row written any other way (auto_approve without enabled_at) is ignored. Fails closed: any error
+ * means "not opted in".
+ */
+export function isEffectiveOptIn(row: Pick<SupplierAutomation, 'auto_approve' | 'enabled_at'> | null | undefined): boolean {
+  return row?.auto_approve === true && !!row.enabled_at;
+}
+
 export async function isAutoApproveEnabled(db: SupabaseClient, clientId: string, supplierVatId: string): Promise<boolean> {
   const row = await getSupplierAutomation(db, clientId, supplierVatId);
-  return row?.auto_approve === true;
+  return isEffectiveOptIn(row);
 }
 
 interface ReviewedInvoiceRow {
@@ -143,7 +151,7 @@ export async function fetchSupplierAutomationStatus(
     };
     statuses.set(vatId, {
       ...base,
-      auto_approve: o.auto_approve === true,
+      auto_approve: isEffectiveOptIn(o),
       disabled_reason: o.disabled_reason ?? null,
       disabled_at: o.disabled_at ?? null,
     });
