@@ -12,13 +12,17 @@ import {
   MAX_DOCUMENTS_PER_MESSAGE,
   MIN_EMAIL_IMAGE_BYTES,
   normalizeInboundEmail,
+  readBodyText,
   safeEqual,
 } from '@/lib/ingestHelpers';
 
 export const runtime = 'nodejs';
 
-/** Whole webhook body cap: 10 attachments of up to 20MB, base64-inflated (~4/3), plus headroom. */
-const MAX_BODY_BYTES = 40 * 1024 * 1024;
+/**
+ * Whole webhook body cap. Postmark accepts inbound messages up to 35MB; base64 inflates that by ~4/3,
+ * so 50MB lets the largest Postmark payload through (a 413 would make the provider retry forever).
+ */
+const MAX_BODY_BYTES = 50 * 1024 * 1024;
 
 interface AttachmentOutcome {
   fileName: string;
@@ -46,15 +50,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const declaredLength = Number(request.headers.get('content-length') ?? '0');
-  if (declaredLength > MAX_BODY_BYTES) {
-    return NextResponse.json({ error: 'Payload too large' }, { status: 413 });
-  }
-
   let body: unknown;
   try {
-    const raw = await request.text();
-    if (raw.length > MAX_BODY_BYTES) {
+    const raw = await readBodyText(request, MAX_BODY_BYTES);
+    if (raw === null) {
       return NextResponse.json({ error: 'Payload too large' }, { status: 413 });
     }
     body = JSON.parse(raw);
@@ -131,7 +130,9 @@ export async function POST(request: Request) {
       outcomes.push(
         result.status === 'success'
           ? { fileName, status: 'ingested', invoiceId: result.id }
-          : { fileName, status: 'error', reason: result.error }
+          : result.duplicate
+            ? { fileName, status: 'skipped', reason: 'duplicate' }
+            : { fileName, status: 'error', reason: result.error }
       );
     }
 

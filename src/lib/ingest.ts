@@ -26,7 +26,7 @@ export interface StoredDocument {
 
 export type RegisterResult =
   | { fileName: string; status: 'success'; id: string; fileUrl: string }
-  | { fileName: string; status: 'error'; id?: string; error: string };
+  | { fileName: string; status: 'error'; id?: string; error: string; duplicate?: boolean };
 
 interface DbError {
   code?: string;
@@ -103,6 +103,17 @@ export async function registerStoredDocument(doc: StoredDocument): Promise<Regis
     { client_id: clientId, file_url: fileUrl, file_name: fileName, status: 'processing' },
     doc
   );
+
+  if (dbErr?.code === '23505' && doc.sourceRef) {
+    // A concurrent webhook retry won the race on invoices_source_ref_key - the document is already in.
+    console.warn(`[Ingest] Duplicate source_ref ${doc.sourceRef}, ignoring.`);
+    try {
+      await supabase.storage.from(RAW_BUCKET).remove([filePath]); // drop the orphaned copy
+    } catch (err) {
+      console.warn(`[Ingest] Could not remove duplicate file ${filePath}:`, err);
+    }
+    return { fileName, status: 'error', error: 'Duplicate document', duplicate: true };
+  }
 
   if (dbErr || !invoice) {
     console.error('Database insertion failed:', dbErr);

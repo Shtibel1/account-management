@@ -93,7 +93,7 @@ but recommended - it makes provider retries idempotent. Postmark's native inboun
 - Each attachment is filtered by declared type / extension (PDF, JPG, PNG), then verified by magic bytes.
   Everything else (`.p7s`, `.ics`, HTML, ZIP...) is skipped.
 - Images under 15 KB are skipped (signature logos, tracking pixels).
-- Limits: 20 MB per document, 10 documents per email, 40 MB request body (413 above).
+- Limits: 20 MB per document, 10 documents per email, 50 MB request body (413 above; fits Postmark's 35 MB message limit after base64).
 - Responses: `401` bad secret · `400` malformed body · `200 {status:'unknown_recipient'}` (no retry) ·
   `200 {status:'ok'|'no_documents', ingested, attachments:[...]}` · `500` only when every document failed
   (so the provider retries; already-ingested attachments are skipped on retry via `source_ref`).

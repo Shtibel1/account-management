@@ -88,6 +88,33 @@ export function ensureExtension(fileName: string, mime: SupportedMimeType): stri
   return lower.endsWith(wanted) ? base : `${base}${wanted}`;
 }
 
+// ── Request bodies ────────────────────────────────────────────────────────────
+
+/**
+ * Reads a request body as UTF-8 text, giving up (null) once it exceeds `maxBytes`.
+ * Unlike request.text() this doesn't buffer an unbounded body when Content-Length is missing or wrong.
+ */
+export async function readBodyText(request: Request, maxBytes: number): Promise<string | null> {
+  const declared = Number(request.headers.get('content-length') ?? '0');
+  if (declared > maxBytes) return null;
+  if (!request.body) return '';
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 // ── Secrets ───────────────────────────────────────────────────────────────────
 
 /** Constant-time string comparison (hashing first so differing lengths don't leak through timing). */

@@ -8,6 +8,7 @@ import {
   MAX_DOCUMENT_BYTES,
   normalizePhone,
   parseTwilioMedia,
+  readBodyText,
   validateTwilioSignature,
   whatsappReplyText,
   type TwilioMedia,
@@ -18,6 +19,9 @@ export const runtime = 'nodejs';
 
 /** Twilio waits ~15s for the webhook; keep each media download well under that. */
 const MEDIA_TIMEOUT_MS = 10_000;
+
+/** Twilio webhook bodies are a few KB; cap what we read before the signature is checked. */
+const MAX_WEBHOOK_BODY_BYTES = 256 * 1024;
 
 function twiml(message: string | null, status = 200): Response {
   return new Response(buildTwimlMessage(message), {
@@ -92,7 +96,9 @@ export async function POST(request: Request) {
 
   let params: URLSearchParams;
   try {
-    params = new URLSearchParams(await request.text());
+    const raw = await readBodyText(request, MAX_WEBHOOK_BODY_BYTES);
+    if (raw === null) return new Response('Payload too large', { status: 413 });
+    params = new URLSearchParams(raw);
   } catch (err) {
     console.error('[Ingest WhatsApp] Could not read request body:', err);
     return new Response('Bad request', { status: 400 });
@@ -147,6 +153,7 @@ export async function POST(request: Request) {
         continue;
       }
 
+      // Sequential on purpose: the local mock DB's read-modify-write isn't safe for parallel inserts.
       const stamp = new Date().toISOString().slice(0, 10);
       const result = await ingestDocument({
         clientId: match.clientId,
@@ -157,7 +164,7 @@ export async function POST(request: Request) {
         sender,
         sourceRef,
       });
-      if (result.status === 'success') {
+      if (result.status === 'success' || result.duplicate) {
         outcome.received++;
       } else {
         console.error(`[Ingest WhatsApp] Ingest failed: ${result.error}`);
