@@ -13,7 +13,7 @@ UI `src/app/(dashboard)/integrations` ("חיבור להנהלת חשבונות")
 | id        | kind | What it does |
 |-----------|------|--------------|
 | `movein`  | file | `movein.dat` (Windows-1255, fixed width) via the existing `MoveinExporter`. Byte-for-byte the same output as `POST /api/export`; invoices whose values don't fit the fixed-width fields fail validation (see *Move-in file format* below). |
-| `excel`   | file | `.xlsx` (RTL) with invoice fields + resolved account codes (supplier / expense / VAT) and a totals row. |
+| `excel`   | file | `.xlsx` (RTL) with invoice fields + resolved account codes (supplier / expense / VAT) and a totals row. The invoice date is a real Excel date (serial number, format `dd/mm/yyyy`), not text (QA N19). |
 | `webhook` | api  | POSTs each invoice as JSON to an https URL of the office (own middleware, Make / Zapier, an import hook). Optional Bearer token and HMAC signature. Reference implementation of an API plugin. |
 | `morning` | api  | Morning / Green Invoice (חשבונית ירוקה): one expense per invoice (`POST /expenses`) + the stored PDF attached. See below. |
 | `icount`  | api  | iCount API v3: one expense (`expense/create`) per invoice, **draft by default**. See [iCount](#icount) below. |
@@ -55,12 +55,40 @@ visual order. Field widths (`MOVEIN_FIELD_WIDTHS`): reference (invoice number) 9
 amounts 12, supplier name 50, bank details 50.
 
 - **Identifying values are never cut.** An invoice number longer than 9 characters, an account code / VAT id longer
-  than 15 or an amount wider than 12 fails validation (`validateMoveinInvoice`): `POST /api/export` answers 422
-  `{ error, invalid: ["<invoice>: <Hebrew reason>"], invoiceIds }` and exports / marks nothing; the `movein` plugin
-  fails those invoices with the same reasons (`validateInvoice`). Fix the value in review (e.g. shorten the
-  invoice number to what the accountant books as the reference) and export again.
+  than 15 or an amount wider than 12 fails validation (`validateMoveinInvoice`) **for that invoice only**: `POST
+  /api/export` leaves it out of the file and lists it (Hebrew reason) in the `X-Export-Skipped` header
+  (URI-encoded JSON array of the first 8, total in `X-Export-Skipped-Count`; the review table shows it in a toast); only when NO
+  invoice is exportable it answers 422 `{ error, invalid: ["<invoice>: <Hebrew reason>"], invoiceIds }`. The
+  `movein` plugin fails those invoices with the same reasons (`validateInvoice`). Fix the value in review (e.g.
+  shorten the invoice number to what the accountant books as the reference) and export again. Approval does not
+  block a long invoice number (other targets accept it) but warns: the approve response has `warnings[]`
+  (`exportCompatibilityWarnings`, shown as a toast) and the review form shows a hint under the field (QA N13).
+- **Invalid stored data** (QA #12): rows approved before approval validation existed may hold e.g. `total_amount:
+  "abc"` or `invoice_date: "31/02/2026"`. `exportDataProblems` (`src/shared/exportData.ts`) checks every invoice
+  before export (dates must be real YYYY-MM-DD, the three amounts finite numbers, text fields strings); such an
+  invoice is skipped with a Hebrew reason on `/api/export` and fails with reason `invalid_data` in the plugin
+  runner - it never fails the batch (it used to answer 500). **Repair:** reopen the invoice (`POST
+  /api/invoices/<id>/reopen`), fix the values in review and approve again (approval validates them). To find such
+  rows: `select id, client_id, validated_data->>'total_amount', validated_data->>'invoice_date' from invoices where
+  status = 'approved' and (jsonb_typeof(validated_data->'total_amount') is distinct from 'number' or
+  jsonb_typeof(validated_data->'amount_before_vat') is distinct from 'number' or
+  jsonb_typeof(validated_data->'vat_amount') is distinct from 'number' or coalesce(validated_data->>'invoice_date',
+  '') !~ '^\d{4}-\d{2}-\d{2}$');` (a regex match still lets e.g. 2026-02-31 through; the export check catches it).
 - **Free text is cut to its width on purpose:** supplier name and bank details keep their first 50 characters
-  (cut before the visual-order reversal, so the start of the name is kept).
+  (cut before the visual-order conversion, so the start of the name is kept).
+- **Visual order** (`toVisualHebrew`, QA N7): the line is read left-to-right, so RTL runs are reversed, but Latin
+  and number runs keep their order ("QA-ספק" -> "קפס-QA", "IKEA ישראל" -> "לארשי IKEA"); spaces / punctuation
+  between two Latin / digit characters stay inside that run ("IKEA Ltd", "12.50"); brackets in Hebrew runs are
+  mirrored.
+- **One export per invoice** (QA N1): `/api/export` claims every invoice in `invoice_exports` under plugin `movein`
+  (the same row the `movein` plugin claims: unique insert / conditional update on status + attempts) BEFORE it
+  builds the file, so parallel requests (double click, two tabs) never return the same invoice twice; a loser
+  answers 409 when nothing is left. The claimed rows end `success` (`external_id = movein.dat#<correlation id>`)
+  and the invoices become `exported`. A `success` row is re-exported by `/api/export` only when the invoice was
+  approved again after that export (reopen -> fix -> approve).
+- **Download again** (QA N9): the `movein` / `excel` plugins rebuild the file of already exported invoices when run
+  with `force` ("ייצוא חוזר / הורדה חוזרת של הקובץ") or as a dry run (decision `redownload`: no claim, no record
+  change, result message warns not to import the same invoice twice). API plugins keep "already exported".
 - Characters outside Windows-1255 become `?`; Latin-1 letters are not passed through (0xE0-0xFA are Hebrew there).
 - **Download:** `POST /api/export` returns the bytes as `application/octet-stream` (`Content-Disposition:
   attachment; filename="movein.dat"`, `X-Content-Charset: windows-1255`). It must not be served as `text/*`: on
@@ -136,8 +164,9 @@ toggle is ON by default** (`is_draft: true`; only an explicit "off" creates fina
 - **Credit notes** (negative total): `creditDocType` (default `refund`) with absolute amounts.
 - **Expense type**: `defaultExpenseTypeId`, or (toggle) the category's account code from the account mappings is the
   iCount `expense_type_id`. "בדוק חיבור" lists the expense types and checks the doc types against `expense/doctypes`.
-- **Errors**: `{ status: false, reason, error_description }` (usually HTTP 200) become `IcountApiError` with the
-  reason in the message; such a failure is certain (not "uncertain"). Reads are retried on 5xx / timeouts, writes
+- **Errors**: `{ status: false, reason, error_description }` (usually HTTP 200) become `IcountApiError` with
+  a Hebrew message (known reasons such as `token_not_found` mapped; the vendor text stays in the log); such a
+  failure is certain (not "uncertain"). Reads are retried on 5xx / timeouts, writes
   (`supplier/add`, `expense/create`) only on 429 / not-sent errors.
 - Not yet: attaching the PDF (`scan` upload; needs a binary file loader in the plugin context).
 
@@ -150,7 +179,8 @@ toggle is ON by default** (`is_draft: true`; only an explicit "off" creates fina
    plugins need an enabled row).
 3. Per invoice, the idempotency decision (`src/integrations/idempotency.ts`, unit-tested) on `invoice_exports`
    (unique per invoice + plugin):
-   - `success` -> skipped "already exported" (also with `force`: delete it in the target first);
+   - `success` -> skipped "already exported" (also with `force`: delete it in the target first); for a **file**
+     plugin with `force` or `dryRun` -> `redownload` (the invoice goes into the file again, nothing recorded);
    - `pending` younger than 10 min -> skipped "in progress";
    - `pending` older (the earlier run died mid-request) -> `findExisting` if the plugin has it, else **blocked**
      until the user re-runs with `force` ("ייצוא חוזר בכל זאת") after checking the target;
@@ -199,6 +229,11 @@ timeoutMs?, idempotent? })`; never `fetch` directly. It provides:
   status, response body - both truncated to 20 KB, duration, attempt, outcome `ok` / `retry` / `error`, error code /
   message, `invoice_id`, `correlation_id`) and one structured JSON console line (`event: "integration_http"`, no
   bodies) for CloudWatch. A failing log insert never fails the call.
+- **Error envelopes in a 200** (QA N10): iCount (`{ status: false, reason }`) and SUMIT (`Status` 1 / 2) report
+  errors with HTTP 200. Their requests pass `bodyError` (`icountBodyError` / `sumitBodyError`), so such an attempt
+  is logged with outcome `error`, `error_code` (iCount reason / `business_error` / `technical_error`) and the
+  vendor's own text in `error_message`. The message shown to the user (test result, `invoice_exports.last_error`)
+  is Hebrew (`describeIcountError`, `sumitUserMessage`, QA N18); English vendor text stays in the log.
 - **Correlation id**: one UUID per export run / connection test, on every row and console line (also sent to the
   webhook as `X-Correlation-Id`). The export dialog and the test result link to the log filtered by it.
 

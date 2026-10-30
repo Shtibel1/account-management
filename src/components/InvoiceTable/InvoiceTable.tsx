@@ -86,7 +86,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
     if (!selected.size) return;
     setExporting(true);
     try {
-      const blob = await exportInvoices([...selected]);
+      const { blob, skipped, skippedCount } = await exportInvoices([...selected]);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -95,6 +95,9 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
       URL.revokeObjectURL(url);
       setSelected(new Set());
       setMissingMappings(null);
+      if (skippedCount > 0) {
+        toast(`${skippedCount} חשבוניות לא נכללו בקובץ: ${skipped.join(' · ')}`, 'error');
+      }
       onExported?.();
     } catch (err) {
       if (err instanceof MissingMappingsError) {

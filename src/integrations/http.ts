@@ -308,7 +308,16 @@ export function createIntegrationHttpClient(options: HttpClientOptions): Integra
       const decision = failure
         ? decideRetry({ attempt, failure, idempotent, policy, now: now(), random: random() })
         : null;
-      const outcome: IntegrationLogRow['outcome'] = !failure ? 'ok' : decision?.retry ? 'retry' : 'error';
+      // A 2xx answer whose body is a vendor error envelope is an error too (QA N10).
+      let envelopeError: { code: string; message: string } | null = null;
+      if (!failure && response && req.bodyError) {
+        try {
+          envelopeError = req.bodyError({ status: response.status, body: response.body, text: response.text });
+        } catch {
+          envelopeError = null;
+        }
+      }
+      const outcome: IntegrationLogRow['outcome'] = envelopeError ? 'error' : !failure ? 'ok' : decision?.retry ? 'retry' : 'error';
 
       await writeLog({
         ...baseRow,
@@ -317,10 +326,14 @@ export function createIntegrationHttpClient(options: HttpClientOptions): Integra
         duration_ms: durationMs,
         attempt,
         outcome,
-        error_code: response && !response.ok ? `http_${response.status}` : errCode,
-        error_message: response && !response.ok
-          ? `HTTP ${response.status}${decision && !decision.retry ? ` (${decision.reason})` : ''}`
-          : errMessage,
+        error_code: envelopeError
+          ? envelopeError.code.slice(0, 100)
+          : response && !response.ok ? `http_${response.status}` : errCode,
+        error_message: envelopeError
+          ? scrubString(envelopeError.message, redaction.secretValues).slice(0, 2000)
+          : response && !response.ok
+            ? `HTTP ${response.status}${decision && !decision.retry ? ` (${decision.reason})` : ''}`
+            : errMessage,
       });
 
       if (!failure && response) return response;

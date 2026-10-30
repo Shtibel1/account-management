@@ -280,13 +280,26 @@ export async function exportInvoices(ids: string[]) {
     if (res.status === 422 && body?.missing?.length) {
       throw new MissingMappingsError(body.missing as string[]);
     }
-    if (res.status === 422 && Array.isArray(body?.invalid) && body.invalid.length) {
+    if ((res.status === 422 || res.status === 409) && Array.isArray(body?.invalid) && body.invalid.length) {
       // Values that don't fit the Move-in format (e.g. an invoice number longer than 9 characters)
       throw new Error([body.error, ...(body.invalid as string[])].join('\n'));
     }
     throw new Error(body?.error ?? 'שגיאה בייצוא');
   }
-  return res.blob();
+  // Invoices left out of the file (invalid stored data, not Move-in compatible, already being
+  // exported elsewhere) - the others are in the file (QA #12 / N1).
+  let skipped: string[] = [];
+  const header = res.headers.get('X-Export-Skipped');
+  if (header) {
+    try {
+      const parsed = JSON.parse(decodeURIComponent(header));
+      if (Array.isArray(parsed)) skipped = parsed.filter((l): l is string => typeof l === 'string');
+    } catch {
+      skipped = [];
+    }
+  }
+  const skippedCount = Number(res.headers.get('X-Export-Skipped-Count') ?? skipped.length) || skipped.length;
+  return { blob: await res.blob(), skipped, skippedCount };
 }
 
 export async function splitInvoice(

@@ -1,5 +1,6 @@
 import type { AccountMapping, Invoice } from '@/shared/types';
 import { toVisualHebrew, encodeWindows1255 } from '@/utils/encoding';
+import { exportDataProblems, MOVEIN_INVOICE_NUMBER_WIDTH } from '@/shared/exportData';
 
 /**
  * Field widths of the Move-in fixed-width line (332 characters, see buildLine). Identifying fields
@@ -8,7 +9,7 @@ import { toVisualHebrew, encodeWindows1255 } from '@/utils/encoding';
  * name, bank details) are cut to their width on purpose - see docs/integrations.md.
  */
 export const MOVEIN_FIELD_WIDTHS = {
-  invoiceNumber: 9,
+  invoiceNumber: MOVEIN_INVOICE_NUMBER_WIDTH,
   account: 15,
   vatId: 15,
   amount: 12,
@@ -41,11 +42,19 @@ function lookupCode(mappings: AccountMapping[], type: 'supplier' | 'category', k
   return '???';
 }
 
-/** Problems that would make the Move-in line wrong (values longer than their field). Pure. */
+/**
+ * Problems that would make the Move-in line wrong: invalid stored data (QA #12: e.g. an amount
+ * "abc" or a date "31/02/2026" from before approval validation existed) or values longer than their
+ * field. Pure; never throws whatever the stored JSON holds.
+ */
 export function validateMoveinInvoice(inv: Invoice, mappings: AccountMapping[], clientVatAccount: string): MoveinValidationProblem[] {
   const data = inv.validated_data ?? inv.extracted_data;
-  if (!data) return [];
-  const label = (data.invoice_number ?? '').trim() || inv.file_name || inv.id;
+  const rawNumber = data && typeof data.invoice_number === 'string' ? data.invoice_number.trim() : '';
+  const label = rawNumber || inv.file_name || inv.id;
+  const dataProblems = exportDataProblems(data);
+  if (!data || dataProblems.length > 0) {
+    return dataProblems.map((message) => ({ invoiceId: inv.id, label, message }));
+  }
   const problems: MoveinValidationProblem[] = [];
   const check = (value: string, width: number, message: string) => {
     if (value.length > width) problems.push({ invoiceId: inv.id, label, message });

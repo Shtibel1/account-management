@@ -132,9 +132,9 @@ export function IntegrationExportDialog({
                 <input type="checkbox" className="accent-blue-600" checked={dryRun} onChange={(e) => { setDryRun(e.target.checked); setResult(null); }} />
                 הדמיה בלבד (בניית הנתונים בלי לשלוח)
               </label>
-              <label className="flex items-center gap-2 cursor-pointer" title="שליחה חוזרת של חשבוניות שייצוא קודם שלהן לא הסתיים">
+              <label className="flex items-center gap-2 cursor-pointer" title={plugin?.kind === 'file' ? 'בניית הקובץ מחדש גם עבור חשבוניות שכבר יוצאו (הורדה חוזרת)' : 'שליחה חוזרת של חשבוניות שייצוא קודם שלהן לא הסתיים'}>
                 <input type="checkbox" className="accent-amber-600" checked={force} onChange={(e) => setForce(e.target.checked)} />
-                ייצוא חוזר בכל זאת
+                {plugin?.kind === 'file' ? 'ייצוא חוזר / הורדה חוזרת של הקובץ' : 'ייצוא חוזר בכל זאת'}
               </label>
             </div>
 
