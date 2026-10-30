@@ -83,7 +83,9 @@ function trackUncertainWrites(http: IntegrationHttpClient): { http: IntegrationH
   let uncertain = false;
   const wrap = (inner: IntegrationHttpClient): IntegrationHttpClient => ({
     async request<T>(req: HttpRequestOptions) {
-      const isWrite = !READ_METHODS.has(String(req.method).toUpperCase());
+      // A call the plugin declared idempotent (e.g. a POST search) is safe to repeat, so its failure
+      // never makes the outcome uncertain.
+      const isWrite = req.idempotent !== true && !READ_METHODS.has(String(req.method).toUpperCase());
       try {
         const res = await inner.request<T>(req);
         if (isWrite && writeMayHaveBeenProcessed({ status: res.status }) && !res.ok) uncertain = true;

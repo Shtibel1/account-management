@@ -9,6 +9,7 @@ import {
   type SumitConfig,
   type SumitExpensePayload,
 } from '@/integrations/plugins/sumit/mapping';
+import { ensureExtension } from '@/lib/ingestHelpers';
 import { addExpense, getVatRate, listExpenseDocuments, SumitApiError } from '@/integrations/plugins/sumit/client';
 
 const configSchema: z.ZodType<SumitConfig> = z.object({
@@ -96,7 +97,8 @@ export const sumitPlugin: ApiExportPlugin<SumitConfig, SumitExpensePayload> = {
       if (!ctx.files) throw new Error('צירוף קובץ החשבונית אינו זמין');
       const file = await ctx.files.load(invoice);
       payload.ExpenseFile = toBase64(file.bytes);
-      payload.ExpenseFilename = file.fileName;
+      // The extension must match the real file type (SUMIT keeps the name as given).
+      payload.ExpenseFilename = ensureExtension(file.fileName, file.contentType);
     }
     const documentId = await addExpense(ctx, payload);
     return { externalId: String(documentId) };

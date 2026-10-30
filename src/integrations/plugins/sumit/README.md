@@ -47,7 +47,7 @@ the parser accepts numbers or names, and a `text/plain` body that holds JSON).
 | `Lines[0].Amount` | see VAT below |
 | `Description` | `מספר הקצאה: <allocation_number> \| [invoice-scan:<invoice id>]` |
 | `IsDraft` | `documentMode` (default draft) |
-| `ExpenseFile` / `ExpenseFilename` | the invoice's own file (base64), loaded via `ctx.files` (only the client's own `raw-invoices` object, PDF / JPEG / PNG by magic bytes, max 20 MB). `attachFile = no` sends neither |
+| `ExpenseFile` / `ExpenseFilename` | the invoice's own file (base64; `ExpenseFilename` gets the extension of the detected type; in `integration_logs` the base64 is summarized as `[base64 N chars]`), loaded via `ctx.files` (only the client's own `raw-invoices` object, PDF / JPEG / PNG by magic bytes, max 20 MB). `attachFile = no` sends neither |
 
 One line per invoice: our line items have no per-line expense category, and one line keeps SUMIT's total equal
 to the invoice total.
@@ -61,6 +61,10 @@ VAT itself (from its VAT rate and the supplier's `NoVAT`). We therefore send:
   This matches the SUMIT expense screen, where the amount is entered including VAT - *unverified via the API*.
 - `amountMode = net`: the amount **before VAT** (`amount_before_vat`, or total - VAT), for companies where SUMIT
   treats expense amounts as net.
+
+A missing value is derived only from the other two (total = before + VAT, before = total - VAT). An amount that
+cannot be derived blocks the export (e.g. `net` mode with only the total known) instead of guessing, and an
+**unknown** VAT is never treated as zero VAT: `Supplier.NoVAT` is sent only when the VAT is known to be 0.
 
 Our extracted `vat_amount` is not sent. If an invoice's VAT is not the standard rate (partial deduction, e.g.
 vehicles), the VAT SUMIT computes will differ from the document: check / fix such expenses in SUMIT.

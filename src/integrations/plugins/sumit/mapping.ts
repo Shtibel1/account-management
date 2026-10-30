@@ -87,16 +87,23 @@ export interface SumitExpensePayload {
 }
 
 export interface SumitAmounts {
-  gross: number;
-  net: number;
-  vat: number;
+  /** Total including VAT, or null when it cannot be derived from the extracted fields. */
+  gross: number | null;
+  /** Amount before VAT, or null when it cannot be derived. */
+  net: number | null;
+  /** VAT amount, or null when unknown (NOT the same as 0: an unknown VAT must never become "no VAT"). */
+  vat: number | null;
   isCredit: boolean;
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
-/** Gross / net / VAT of the invoice, filling one missing value from the other two. Null if unknown. */
+/**
+ * Gross / net / VAT of the invoice, filling one missing value from the other two (pure). A value that
+ * cannot be derived stays null - e.g. only total_amount known: net and VAT are unknown, so the net
+ * amount mode is blocked and the supplier is not flagged NoVAT. Null when no amount is known at all.
+ */
 export function sumitAmounts(invoice: ExportInvoice): SumitAmounts | null {
   const d = invoice.data;
   const before = num(d.amount_before_vat);
@@ -105,10 +112,15 @@ export function sumitAmounts(invoice: ExportInvoice): SumitAmounts | null {
   const gross = total ?? (before !== null && vatIn !== null ? before + vatIn : null);
   const net = before ?? (total !== null && vatIn !== null ? total - vatIn : null);
   if (gross === null && net === null) return null;
-  const vat = vatIn ?? (gross !== null && net !== null ? gross - net : 0);
-  const g = gross ?? (net as number) + vat;
-  const n = net ?? g - vat;
-  return { gross: round2(g), net: round2(n), vat: round2(vat), isCredit: g < 0 || n < 0 };
+  const vat = vatIn ?? (gross !== null && net !== null ? gross - net : null);
+  const r = (n: number | null) => (n === null ? null : round2(n));
+  return { gross: r(gross), net: r(net), vat: r(vat), isCredit: (gross ?? 0) < 0 || (net ?? 0) < 0 };
+}
+
+/** The line Amount for the configured mode, or null when that amount is not known. */
+export function lineAmountOf(amounts: SumitAmounts | null, mode: SumitAmountMode): number | null {
+  if (!amounts) return null;
+  return mode === 'net' ? amounts.net : amounts.gross;
 }
 
 /** Marker in the expense description (bracketed, so "inv-1" never matches "inv-10"): lets findExisting recognise a document we created. */
@@ -149,7 +161,8 @@ export function itemRef(code: string, settings: SumitSettings): SumitExpenseItem
 
 /**
  * Problems that block exporting this invoice to SUMIT (Hebrew). With `settings` null (validateInvoice
- * has no config) the amount mode defaults to gross and the expense-item checks are skipped.
+ * has no config) only "some amount is known" is checked; the amount-mode and expense-item checks run
+ * in exportInvoice, with the config, before any request.
  */
 export function validateForSumit(invoice: ExportInvoice, mapping: InvoiceMapping, settings: SumitSettings | null): string[] {
   const d = invoice.data;
@@ -158,12 +171,11 @@ export function validateForSumit(invoice: ExportInvoice, mapping: InvoiceMapping
   if (!d.invoice_number?.trim()) problems.push('מספר חשבונית');
   if (!isValidIsoDate(d.invoice_date)) problems.push('תאריך חשבונית');
   const amounts = sumitAmounts(invoice);
-  if (!amounts) {
-    problems.push('סכום');
-  } else {
-    const amount = settings?.amountMode === 'net' ? amounts.net : amounts.gross;
-    if (amount === 0) problems.push('סכום (0)');
-  }
+  const mode: SumitAmountMode = settings?.amountMode ?? 'gross';
+  const amount = lineAmountOf(amounts, mode);
+  if (!amounts) problems.push('סכום');
+  else if (amount === null && settings) problems.push(mode === 'net' ? 'סכום לפני מע"מ (או סה"כ ומע"מ)' : 'סכום כולל מע"מ (או סכום לפני מע"מ ומע"מ)');
+  else if (amount === 0) problems.push('סכום (0)');
   if (!settings) return problems;
   const code = itemCodeFor(mapping, settings);
   if (!code) problems.push('סעיף הוצאה ב-SUMIT (מיפוי קטגוריה או סעיף ברירת מחדל)');
@@ -188,20 +200,21 @@ function descriptionFor(invoice: ExportInvoice): string {
  */
 export function toSumitExpense(invoice: ExportInvoice, mapping: InvoiceMapping, settings: SumitSettings): SumitExpensePayload {
   const d = invoice.data;
-  const amounts = sumitAmounts(invoice) ?? { gross: 0, net: 0, vat: 0, isCredit: false };
+  const amounts = sumitAmounts(invoice);
   const vatId = (d.supplier_vat_id ?? '').replace(/\D/g, '') || null;
   const supplier: SumitSupplier = {
     Name: (d.supplier_name ?? '').trim(),
     CompanyNumber: vatId,
     SearchMode: vatId ? SUPPLIER_SEARCH_MODE.CompanyNumber : SUPPLIER_SEARCH_MODE.Name,
   };
-  if (amounts.vat === 0 && amounts.net !== 0) supplier.NoVAT = true;
+  // Only a KNOWN zero VAT (exempt dealer) is NoVAT; an unknown VAT is left to SUMIT's default.
+  if (amounts && amounts.vat === 0 && amounts.net !== null && amounts.net !== 0) supplier.NoVAT = true;
   const code = itemCodeFor(mapping, settings) ?? '';
   return {
     Supplier: supplier,
     ExpenseNumber: (d.invoice_number ?? '').trim(),
     Date: d.invoice_date ?? '',
-    Lines: [{ Item: itemRef(code, settings), Amount: settings.amountMode === 'net' ? amounts.net : amounts.gross }],
+    Lines: [{ Item: itemRef(code, settings), Amount: lineAmountOf(amounts, settings.amountMode) ?? 0 }],
     Description: descriptionFor(invoice),
     IsDraft: settings.isDraft,
     ExpenseFilename: settings.attachFile ? invoice.fileName || 'invoice.pdf' : null,
@@ -236,7 +249,9 @@ export function matchExistingDocument(invoice: ExportInvoice, docs: SumitListedD
   if (!number) return null;
   const supplier = normalizeName(invoice.data.supplier_name);
   const amounts = sumitAmounts(invoice);
-  const candidates = amounts ? [amounts.gross, amounts.net].map(Math.abs) : [];
+  const candidates = amounts
+    ? [amounts.gross, amounts.net].filter((v): v is number => v !== null).map(Math.abs)
+    : [];
   return withId.find((doc) => {
     if (normalizeDocNumber(doc.ExternalReference) !== number) return false;
     const sameName = !!supplier && normalizeName(doc.CustomerName) === supplier;
