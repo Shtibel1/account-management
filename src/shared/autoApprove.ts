@@ -63,6 +63,16 @@ export interface AutoApproveCheck {
   lineItemWarnings?: readonly string[];
   /** Fields the model itself reported low confidence for (rule-filled / auto-corrected fields excluded). */
   lowConfidenceFields?: readonly string[];
+  /** VAT amount doesn't match the statutory rate for the invoice date (src/shared/vatRate.ts). */
+  vatRateMismatch?: boolean;
+  /** VAT was missing and the exempt-supplier guess filled it with 0. */
+  exemptGuessed?: boolean;
+  /** VAT is 0 but the supplier's human-reviewed invoices carried VAT. */
+  zeroVatContradictsHistory?: boolean;
+  /** VAT is 0 and the supplier's VAT history could not be loaded (fail closed). */
+  zeroVatHistoryUnknown?: boolean;
+  /** The extracted VAT ID looked like the buyer's and was swapped / removed (src/shared/buyerVatId.ts). */
+  buyerVatIdSuspected?: boolean;
 }
 
 /** True when any amount differs between the AI output and the edge-case-corrected data. */
@@ -90,6 +100,11 @@ export function autoApproveBlockers(check: AutoApproveCheck): string[] {
   if (result.duplicate_found) blockers.push('נמצאה חשבונית כפולה');
   else if (!check.duplicateCheckRan) blockers.push('בדיקת כפילות לא הושלמה');
   if (check.lineItemWarnings && check.lineItemWarnings.length > 0) blockers.push(...check.lineItemWarnings);
+  if (check.buyerVatIdSuspected) blockers.push('ח.פ. שזוהה נראה כשל הלקוח (הנמען) ולא של הספק');
+  if (check.vatRateMismatch) blockers.push('שיעור המע"מ אינו תואם לתאריך החשבונית');
+  if (check.exemptGuessed) blockers.push('סכום המע"מ חסר והושלם כ-0 (ניחוש עוסק פטור)');
+  if (check.zeroVatContradictsHistory) blockers.push('מע"מ 0, אך בחשבוניות קודמות של הספק היה מע"מ');
+  else if (check.zeroVatHistoryUnknown) blockers.push('מע"מ 0 ולא ניתן היה לבדוק את היסטוריית המע"מ של הספק');
   if (check.lowConfidenceFields && check.lowConfidenceFields.length > 0) {
     blockers.push(`ביטחון נמוך בשדות: ${check.lowConfidenceFields.join(', ')}`);
   }

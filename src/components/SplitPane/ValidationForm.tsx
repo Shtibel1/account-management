@@ -1,10 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Children, cloneElement, isValidElement, useEffect, useState } from 'react';
 import { ExtractedData, Invoice, AccountMapping, ConfidenceField, LineItem } from '@/shared/types';
 import { approveInvoice, reapplySupplierRules } from '@/lib/api';
 import { allocationThreshold, isAllocationNumberWellFormed, isAllocationRequired } from '@/shared/allocation';
-import { findSupplierRule, normalizeVatId, VARIOUS_SUPPLIERS_ACCOUNT } from '@/shared/supplierRules';
+import { findSupplierRule, isGenericSupplierName, normalizeVatId, VARIOUS_SUPPLIERS_ACCOUNT } from '@/shared/supplierRules';
+import { accountCodeError, mappingDbErrorMessage } from '@/shared/mappingValidation';
+import { VAT_RATE_WARNING_PREFIX, vatRateWarning } from '@/shared/vatRate';
 import { dismissDuplicateInFlags } from '@/shared/duplicates';
 import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
 import { checkLineItemsSum, hasMixedVat, isLineItemWarning, lineItemWarnings, normalizeLineItems } from '@/shared/lineItems';
@@ -133,7 +135,8 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
 
   // Dynamic Gov.il API search on supplier name change (with debounce)
   useEffect(() => {
-    if (!data.supplier_name || data.supplier_name.trim().length < 2) {
+    // The catch-all placeholder (ספקים שונים) is not a business: a registrar hit would be an unrelated company
+    if (!data.supplier_name || data.supplier_name.trim().length < 2 || isGenericSupplierName(data.supplier_name)) {
       setWebSearchVat(null);
       return;
     }
@@ -288,11 +291,20 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
     isVatAmountEmpty ||
     isTotalAmountEmpty;
 
+  // Account codes go into the export: digits only
+  const supplierCodeError = supplierStatus === 'unknown' && supplierCode.trim() ? accountCodeError(supplierCode) : null;
+  const categoryCodeError =
+    categoryStatus === 'unknown' && data.expense_category && categoryCode.trim() ? accountCodeError(categoryCode) : null;
+
   const hasBankData = !!(data.bank_name || data.bank_branch_name || data.bank_branch_code || data.bank_account);
 
   const handleApprove = async () => {
     if (isDateEmpty || isAmountBeforeVatEmpty || isVatAmountEmpty || isTotalAmountEmpty) {
       setError('יש למלא את כל שדות החובה: תאריך חשבונית, לפני מע״מ, מע"מ, וסה״כ לתשלום.');
+      return;
+    }
+    if (supplierCodeError || categoryCodeError) {
+      setError(supplierCodeError ?? categoryCodeError ?? '');
       return;
     }
     setSaving(true); setError('');
@@ -312,7 +324,10 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
           // A catch-all supplier gets no default category from a single invoice
           expense_category: accountCode !== VARIOUS_SUPPLIERS_ACCOUNT ? data.expense_category || null : null,
         });
-        if (insertErr) throw insertErr;
+        if (insertErr) {
+          console.error('[ValidationForm] Failed to save supplier mapping:', insertErr);
+          throw new Error(mappingDbErrorMessage(insertErr) ?? 'שמירת קוד הספק נכשלה');
+        }
         changedRules.push({ name: originalName, vatId: supplierVatId });
       }
       if (saveCategoryAsDefault && canSaveCategoryAsDefault && originalSupplierMapping) {
@@ -320,7 +335,10 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
           .from('account_mappings')
           .update({ expense_category: data.expense_category })
           .eq('id', originalSupplierMapping.id);
-        if (updateErr) throw updateErr;
+        if (updateErr) {
+          console.error('[ValidationForm] Failed to update supplier default category:', updateErr);
+          throw new Error(mappingDbErrorMessage(updateErr) ?? 'עדכון קטגוריית ברירת המחדל של הספק נכשל');
+        }
         changedRules.push({
           name: originalSupplierMapping.key,
           vatId: normalizeVatId(originalSupplierMapping.vat_id) ?? supplierVatId,
@@ -378,10 +396,16 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
           math_ok: mathOk,
           rule_violations: ruleViolations,
           allocation_required: allocationRequired,
-          warnings: [
-            ...(updatedData.validation_flags.warnings ?? []).filter((w) => !isLineItemWarning(w)),
-            ...lineItemWarnings(amounts),
-          ],
+          warnings: (() => {
+            const rateWarning = vatRateWarning({ ...amounts, invoice_date: updatedData.invoice_date ?? null });
+            return [
+              ...(updatedData.validation_flags.warnings ?? []).filter(
+                (w) => !isLineItemWarning(w) && !w.startsWith(VAT_RATE_WARNING_PREFIX)
+              ),
+              ...lineItemWarnings(amounts),
+              ...(rateWarning ? [rateWarning] : []),
+            ];
+          })(),
           line_items_sum_ok: checkLineItemsSum(amounts).ok,
           mixed_vat: hasMixedVat(lineItems),
         };
@@ -454,6 +478,8 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
     mathError ||
     supplierStatus === 'loading' ||
     (supplierStatus === 'unknown' && !supplierCode.trim()) ||
+    !!supplierCodeError ||
+    !!categoryCodeError ||
     isDateEmpty ||
     isAmountBeforeVatEmpty ||
     isVatAmountEmpty ||
@@ -626,13 +652,16 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
                 ) : (
                   <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />
                 )}
-                <label className={clsx(
+                <label htmlFor="vf-supplier-code" className={clsx(
                   "text-xs shrink-0 font-semibold",
                   supplierCode.trim() ? "text-emerald-800" : "text-amber-800"
                 )}>
                   קוד חשבון ספק:
                 </label>
                 <input
+                  id="vf-supplier-code"
+                  inputMode="numeric"
+                  aria-invalid={!!supplierCodeError || undefined}
                   className={clsx(
                     "input-base py-1 text-sm font-mono flex-1 disabled:opacity-75 disabled:bg-slate-50/80",
                     supplierCode.trim()
@@ -645,6 +674,9 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
                   disabled={isReadOnly}
                 />
               </div>
+            )}
+            {supplierCodeError && !isReadOnly && (
+              <p className="text-xs text-red-600 -mt-2">{supplierCodeError}</p>
             )}
 
             <Field label="ח.פ. / עוסק מורשה" error={fieldError('supplier_vat_id') || !isVatIdOk} fieldKey="supplier_vat_id" onFieldFocus={onFieldFocus} confidence={confidenceFor('supplier_vat_id')}>
@@ -787,7 +819,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
               </Field>
             </div>
 
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <Field label="לפני מע״מ" error={mathError || isAmountBeforeVatEmpty} fieldKey="amount_before_vat" onFieldFocus={onFieldFocus} confidence={confidenceFor('amount_before_vat')}>
                 <input
                   type="number"
@@ -879,8 +911,11 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
             {categoryStatus === 'unknown' && data.expense_category && !isReadOnly && (
               <div className="flex items-center gap-2 -mt-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg animate-in fade-in duration-200">
                 <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />
-                <label className="text-xs text-amber-800 shrink-0">קוד חשבון קטגוריה:</label>
+                <label htmlFor="vf-category-code" className="text-xs text-amber-800 shrink-0">קוד חשבון קטגוריה:</label>
                 <input
+                  id="vf-category-code"
+                  inputMode="numeric"
+                  aria-invalid={!!categoryCodeError || undefined}
                   className="input-base py-1 text-sm font-mono flex-1 disabled:opacity-75 disabled:bg-slate-50/80"
                   placeholder="לדוג׳ 4001 — ריק = ייצוא ייחסם"
                   value={categoryCode}
@@ -888,6 +923,9 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
                   disabled={isReadOnly}
                 />
               </div>
+            )}
+            {categoryCodeError && !isReadOnly && (
+              <p className="text-xs text-red-600 -mt-2">{categoryCodeError}</p>
             )}
 
             {initialLineItems.length > 0 && (
@@ -1045,6 +1083,19 @@ function Field({ label, error, fieldKey, onFieldFocus, badge, confidence, childr
 }) {
   const lowConfidence = isLowConfidence(confidence);
   const pct = confidence != null ? Math.round(confidence * 100) : null;
+  // Tie the label to the field's input (first input / select / textarea child) for screen readers
+  const inputId = fieldKey ? `vf-${fieldKey}` : undefined;
+  let labelled = false;
+  const content = Children.map(children, (child) => {
+    if (
+      !labelled && inputId && isValidElement<{ id?: string }>(child) &&
+      typeof child.type === 'string' && ['input', 'select', 'textarea'].includes(child.type) && !child.props.id
+    ) {
+      labelled = true;
+      return cloneElement(child, { id: inputId });
+    }
+    return child;
+  });
   return (
     <div
       onMouseEnter={() => fieldKey && onFieldFocus?.(fieldKey)}
@@ -1052,7 +1103,7 @@ function Field({ label, error, fieldKey, onFieldFocus, badge, confidence, childr
       className={clsx(lowConfidence && !error && 'border-r-2 border-amber-400 pr-2 -mr-2.5')}
     >
       <div className="flex items-center justify-between gap-1.5 mb-1.5">
-        <label className={clsx('text-sm font-semibold flex items-center gap-1.5 min-w-0', error ? 'text-red-600' : 'text-slate-700')}>
+        <label htmlFor={labelled ? inputId : undefined} className={clsx('text-sm font-semibold flex items-center gap-1.5 min-w-0', error ? 'text-red-600' : 'text-slate-700')}>
           <span className="truncate">{label}{error && <span className="text-red-500 mr-0.5">*</span>}</span>
           {pct != null && (
             lowConfidence ? (
@@ -1071,7 +1122,7 @@ function Field({ label, error, fieldKey, onFieldFocus, badge, confidence, childr
         </label>
         {badge}
       </div>
-      {children}
+      {content}
     </div>
   );
 }

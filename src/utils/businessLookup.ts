@@ -1,9 +1,13 @@
+import { isGenericSupplierName } from '@/shared/supplierRules';
+
 /**
  * Helper function to look up the official VAT ID (ח.פ. / מספר תאגיד) 
  * from the Israeli Government open data portal (data.gov.il) CKAN API.
  */
 export async function searchVatIdByName(supplierName: string): Promise<string | null> {
   if (!supplierName || supplierName.trim().length < 2) return null;
+  // A placeholder like "ספקים שונים" is not a business: any registrar hit would be unrelated
+  if (isGenericSupplierName(supplierName)) return null;
   
   const query = supplierName.trim();
   
@@ -102,17 +106,8 @@ export async function searchVatIdByName(supplierName: string): Promise<string | 
       }
     }
 
-    // Fallback: If no direct substring match but we got records, return the first one returned by CKAN rank
-    if (companyRecords.length > 0 && companyRecords[0]['מספר חברה']) {
-      return String(companyRecords[0]['מספר חברה']).trim();
-    }
-    if (partnershipRecords.length > 0 && partnershipRecords[0]['מספר שותפות']) {
-      return String(partnershipRecords[0]['מספר שותפות']).trim();
-    }
-    if (nonProfitRecords.length > 0 && nonProfitRecords[0]['מספר עמותה']) {
-      return String(nonProfitRecords[0]['מספר עמותה']).trim();
-    }
-
+    // No record whose name matches: return nothing. (The top full-text hit for a name that matches
+    // no record is an unrelated business, and its number would be autofilled as the supplier's.)
     return null;
   } catch (err) {
     console.error('[businessLookup] Unhandled lookup exception:', err);

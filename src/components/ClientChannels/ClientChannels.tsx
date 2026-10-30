@@ -13,6 +13,7 @@ import { formatPhoneForDisplay, normalizePhone } from '@/lib/phone';
 import { useToast } from '@/components/ui/Toast';
 import type { ClientContact } from '@/shared/types';
 import { ClientNotifyEmailSection } from '@/components/ReviewLoop/ClientNotifyEmail';
+import { useEscapeKey } from '@/components/ui/useEscapeKey';
 
 /** Loads inbound email aliases + WhatsApp contacts for all clients (reloads when `reloadKey` changes). */
 export function useClientChannels(reloadKey: unknown) {
@@ -151,11 +152,15 @@ export function ClientChannelsDialog({
     }
   };
 
-  const handleRemove = async (contactId: string) => {
+  const handleRemove = async (contact: ClientContact) => {
+    const label = formatPhoneForDisplay(contact.phone) + (contact.name ? ` (${contact.name})` : '');
+    if (!window.confirm(`להסיר את המספר ${label}? מסמכים שיישלחו ממנו לא ייקלטו עוד ללקוח זה.`)) return;
+    const contactId = contact.id;
     setRemovingId(contactId);
     try {
       await removeClientContact(clientId, contactId);
       onContactsChange(contacts.filter((c) => c.id !== contactId));
+      toast('המספר הוסר', 'success');
     } catch (err) {
       toast(err instanceof Error ? err.message : 'שגיאה במחיקת מספר', 'error');
     } finally {
@@ -163,12 +168,18 @@ export function ClientChannelsDialog({
     }
   };
 
+  useEscapeKey(onClose);
+
   return (
     <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" style={{ direction: 'rtl' }} onClick={onClose}>
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-xl max-w-lg w-full p-6 space-y-5 text-right" onClick={(e) => e.stopPropagation()}>
+      <div
+        role="dialog" aria-modal="true" aria-labelledby="client-channels-title"
+        className="bg-white rounded-2xl border border-slate-100 shadow-xl max-w-lg w-full p-6 space-y-5 text-right max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-          <h3 className="text-lg font-bold text-slate-900">ערוצי קליטה · {clientName}</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors text-lg font-bold">✕</button>
+          <h3 id="client-channels-title" className="text-lg font-bold text-slate-900 min-w-0 truncate">ערוצי קליטה · {clientName}</h3>
+          <button onClick={onClose} aria-label="סגור" className="text-slate-400 hover:text-slate-600 transition-colors text-lg font-bold">✕</button>
         </div>
 
         {/* Email */}
@@ -189,13 +200,13 @@ export function ClientChannelsDialog({
           ) : (
             <p className="text-xs text-slate-500">
               {!settings?.emailDomain
-                ? 'לא הוגדר דומיין לקליטת מייל (INBOUND_EMAIL_DOMAIN). ראו docs/ingestion.md.'
-                : 'לא נמצאה כתובת ללקוח זה - ודאו שהמיגרציה של ערוצי הקליטה הורצה.'}
+                ? 'קליטת חשבוניות במייל עדיין לא הופעלה במערכת. לפרטים פנו לתמיכה.'
+                : 'לא נמצאה כתובת מייל לקליטה עבור לקוח זה. לפרטים פנו לתמיכה.'}
             </p>
           )}
           {settings && settings.emailDomain && !settings.emailEnabled && (
             <p className="text-xs text-amber-600 flex items-center gap-1">
-              <AlertTriangle className="h-3.5 w-3.5" /> קליטת המייל אינה פעילה בשרת (חסר INGEST_EMAIL_SECRET).
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> קליטת המייל אינה פעילה כרגע. לפרטים פנו לתמיכה.
             </p>
           )}
         </section>
@@ -212,7 +223,7 @@ export function ClientChannelsDialog({
           </p>
           {settings && !settings.whatsappEnabled && (
             <p className="text-xs text-amber-600 flex items-center gap-1">
-              <AlertTriangle className="h-3.5 w-3.5" /> קליטת וואטסאפ אינה פעילה בשרת (חסרים פרטי Twilio).
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> קליטת וואטסאפ אינה פעילה כרגע. לפרטים פנו לתמיכה.
             </p>
           )}
 
@@ -223,7 +234,7 @@ export function ClientChannelsDialog({
                   <span className="font-mono text-sm text-slate-700" dir="ltr">{formatPhoneForDisplay(c.phone)}</span>
                   <span className="text-sm text-slate-500 flex-1 truncate">{c.name}</span>
                   <button
-                    onClick={() => handleRemove(c.id)} disabled={removingId === c.id} title="הסר"
+                    onClick={() => handleRemove(c)} disabled={removingId === c.id} title="הסר" aria-label={`הסר את ${formatPhoneForDisplay(c.phone)}`}
                     className="text-slate-300 hover:text-red-500 disabled:opacity-50 transition-colors"
                   >
                     {removingId === c.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
@@ -233,14 +244,16 @@ export function ClientChannelsDialog({
             </div>
           )}
 
-          <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-2">
             <input
+              aria-label="מספר טלפון"
               value={phone} onChange={(e) => setPhone(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleAdd(); }}
               placeholder="050-1234567" dir="ltr"
               className="input-base text-left"
             />
             <input
+              aria-label="שם איש קשר"
               value={name} onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleAdd(); }}
               placeholder="שם איש קשר (רשות)"

@@ -16,6 +16,17 @@ import type { AccountMapping, ExtractedData, SupplierRuleField, SupplierRuleTrac
 export const VARIOUS_SUPPLIERS_ACCOUNT = '3499';
 export const VARIOUS_SUPPLIERS_NAME = 'ספקים שונים';
 
+/** Placeholder names that stand for "some supplier", not a real business (never looked up in the registrar). */
+const GENERIC_SUPPLIER_NAME_KEYS = new Set([VARIOUS_SUPPLIERS_NAME, 'ספק כללי', 'ספקים כלליים', 'ספק שונה', 'שונים'].map(
+  (n) => n.replace(/\s+/g, ' ').trim()
+));
+
+/** True for the catch-all supplier name (ספקים שונים) and similar placeholders. */
+export function isGenericSupplierName(name: string | null | undefined): boolean {
+  if (!name) return false;
+  return GENERIC_SUPPLIER_NAME_KEYS.has(String(name).replace(/["'״׳.]/g, '').replace(/\s+/g, ' ').trim());
+}
+
 export const SUPPLIER_RULE_FIELDS: readonly SupplierRuleField[] = ['supplier_name', 'expense_category'];
 
 /** Digits only, 8-digit IDs padded to 9 (same convention as validation). Null when empty. */

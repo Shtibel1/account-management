@@ -8,6 +8,14 @@ import { useToast } from '@/components/ui/Toast';
 import { fetchSupplierAutomation, reapplySupplierRules, setSupplierAutoApprove } from '@/lib/api';
 import { normalizeVatId } from '@/shared/supplierRules';
 import { AUTO_APPROVE_HISTORY_SIZE } from '@/shared/autoApprove';
+import { normalizeVatId as toNineDigitVatId } from '@/shared/vatId';
+import {
+  accountCodeError,
+  mappingDbErrorMessage,
+  supplierVatIdError,
+  validateMappingInput,
+  type MappingErrors,
+} from '@/shared/mappingValidation';
 import { Plus, Trash2, Info, Upload, Loader2, X, ChevronLeft, ChevronRight, Users, Tag, Pencil, Zap } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -54,6 +62,7 @@ export default function MappingsPage() {
   const [expenseCategory, setExpenseCategory] = useState('');
   
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [formErrors, setFormErrors] = useState<MappingErrors>({});
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState('');
@@ -131,6 +140,7 @@ export default function MappingsPage() {
   const resetForm = () => {
     setKey(''); setCode(''); setSupplierNumber(''); setVatId(''); setExpenseCategory('');
     setEditingId(null);
+    setFormErrors({});
   };
 
   const handleEdit = (m: AccountMapping) => {
@@ -145,17 +155,27 @@ export default function MappingsPage() {
     setShowForm(true);
   };
 
-  const handleAdd = async () => {
-    if (!key.trim() || !code.trim()) return;
+  const handleAdd = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (saving) return;
+    // Account codes feed the exports and the VAT ID is the rule's match key: validate before saving
+    const errors = validateMappingInput({ mapping_type: type, key, account_code: code, vat_id: vatId });
+    setFormErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      toast(Object.values(errors)[0] ?? 'יש לתקן את השדות המסומנים', 'error');
+      return;
+    }
     setSaving(true);
     const values = {
       mapping_type: type,
       key: key.trim(),
       account_code: code.trim(),
       supplier_number: type === 'supplier' ? supplierNumber.trim() || null : null,
-      vat_id: type === 'supplier' ? vatId.trim() || null : null,
+      // Stored as 9 digits (8-digit IDs get their leading zero), like the review form does
+      vat_id: type === 'supplier' ? toNineDigitVatId(vatId) : null,
       expense_category: type === 'supplier' ? expenseCategory || null : null,
     };
+    const wasEditing = !!editingId;
     const previous = editingId ? mappings.find((m) => m.id === editingId) : undefined;
     const { error: saveErr } = editingId
       ? await supabase.from('account_mappings').update(values).eq('id', editingId)
@@ -163,12 +183,17 @@ export default function MappingsPage() {
     setSaving(false);
     if (saveErr) {
       console.error('[Mappings] Failed to save mapping:', saveErr);
-      toast('שמירת המיפוי נכשלה', 'error');
+      toast(mappingDbErrorMessage(saveErr) ?? 'שמירת המיפוי נכשלה', 'error');
       return;
     }
     resetForm();
     setShowForm(false);
+    // Show the saved row: switch to its tab and clear a search that could hide it
+    setActiveTab(values.mapping_type);
+    setSearchQuery('');
     await loadMappings(selectedClient);
+    toast(wasEditing ? 'המיפוי עודכן' : 'המיפוי נשמר', 'success');
+    if (values.mapping_type === 'supplier') loadAutomation(selectedClient);
 
     // A saved / changed supplier rule applies to that supplier's invoices still in review
     if (values.mapping_type === 'supplier' || previous?.mapping_type === 'supplier') {
@@ -249,6 +274,7 @@ export default function MappingsPage() {
           }
 
           const parsedRows: Partial<AccountMapping>[] = [];
+          const invalidRows: string[] = [];
           for (let i = headerRowIndex + 1; i < rawData.length; i++) {
             const row = rawData[i];
             if (!row || row.length === 0) continue;
@@ -269,19 +295,30 @@ export default function MappingsPage() {
               ? String(row[colIndex.expense_category]).trim() 
               : null;
 
+            // Same checks as the mappings form; an invalid row is skipped and reported
+            const rowError = accountCodeError(account_code) ?? supplierVatIdError(vat_id);
+            if (rowError) {
+              invalidRows.push(`שורה ${i + 1} (${name}): ${rowError}`);
+              continue;
+            }
+
             parsedRows.push({
               client_id: selectedClient,
               mapping_type: 'supplier',
               key: name,
               account_code,
               supplier_number,
-              vat_id,
+              vat_id: toNineDigitVatId(vat_id),
               expense_category,
             });
           }
 
           if (parsedRows.length === 0) {
-            throw new Error('לא נמצאו שורות תקינות לייבוא');
+            throw new Error(
+              invalidRows.length > 0
+                ? `לא נמצאו שורות תקינות לייבוא. ${invalidRows.slice(0, 5).join('; ')}`
+                : 'לא נמצאו שורות תקינות לייבוא'
+            );
           }
 
           // Fetch existing mappings to avoid duplicates
@@ -317,7 +354,10 @@ export default function MappingsPage() {
           // Perform updates and inserts in database
           if (toInsert.length > 0) {
             const { error: insErr } = await supabase.from('account_mappings').insert(toInsert);
-            if (insErr) throw insErr;
+            if (insErr) {
+              console.error('[Mappings] Excel import insert failed:', insErr);
+              throw new Error(mappingDbErrorMessage(insErr) ?? 'שמירת הספקים מהקובץ נכשלה');
+            }
           }
 
           for (const upd of toUpdate) {
@@ -325,12 +365,21 @@ export default function MappingsPage() {
               .from('account_mappings')
               .update(upd.data)
               .eq('id', upd.id);
-            if (updErr) throw updErr;
+            if (updErr) {
+              console.error('[Mappings] Excel import update failed:', updErr);
+              throw new Error(mappingDbErrorMessage(updErr) ?? 'עדכון הספקים מהקובץ נכשל');
+            }
           }
 
           // Refresh mappings
-          loadMappings(selectedClient);
-          alert(`יובאו בהצלחה ${parsedRows.length} ספקים! (${toInsert.length} חדשים, ${toUpdate.length} עודכנו)`);
+          await loadMappings(selectedClient);
+          loadAutomation(selectedClient);
+          toast(`יובאו בהצלחה ${parsedRows.length} ספקים (${toInsert.length} חדשים, ${toUpdate.length} עודכנו)`, 'success');
+          if (invalidRows.length > 0) {
+            setImportError(
+              `${invalidRows.length} שורות לא יובאו: ${invalidRows.slice(0, 5).join('; ')}${invalidRows.length > 5 ? ' ...' : ''}`
+            );
+          }
           // Imported rules apply to every invoice still in review
           reapplyRules();
         } catch (err: any) {
@@ -385,7 +434,7 @@ export default function MappingsPage() {
   return (
     <div className="space-y-6 max-w-5xl">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">מיפוי חשבונות</h2>
           <p className="text-sm text-slate-500 mt-1">קוד ספק וקטגוריה לייצוא Move-in</p>
@@ -427,8 +476,9 @@ export default function MappingsPage() {
 
       {/* Client selector */}
       <div className="flex items-center gap-3">
-        <label className="text-sm font-medium text-slate-700 shrink-0">לקוח:</label>
+        <label htmlFor="mappings-client" className="text-sm font-medium text-slate-700 shrink-0">לקוח:</label>
         <select
+          id="mappings-client"
           value={selectedClient}
           onChange={(e) => setSelectedClient(e.target.value)}
           className="input-base max-w-xs"
@@ -439,60 +489,73 @@ export default function MappingsPage() {
 
       {/* Add form */}
       {showForm && (
-        <div className="card p-5 space-y-4">
+        <form className="card p-4 sm:p-5 space-y-4" onSubmit={handleAdd} noValidate>
           <h3 className="font-semibold text-slate-900">{editingId ? 'עריכת מיפוי' : 'מיפוי חדש'}</h3>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">סוג</label>
-              <select value={type} onChange={(e) => setType(e.target.value as MappingType)} className="input-base" disabled={!!editingId}>
+              <label htmlFor="mapping-type" className="block text-sm font-medium text-slate-700 mb-1.5">סוג</label>
+              <select id="mapping-type" value={type} onChange={(e) => setType(e.target.value as MappingType)} className="input-base" disabled={!!editingId}>
                 <option value="supplier">ספק</option>
                 <option value="category">קטגוריה</option>
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">
+              <label htmlFor="mapping-key" className="block text-sm font-medium text-slate-700 mb-1.5">
                 {type === 'supplier' ? 'שם ספק' : 'שם קטגוריה'}
               </label>
               <input
-                value={key} onChange={(e) => setKey(e.target.value)}
+                id="mapping-key"
+                value={key} onChange={(e) => { setKey(e.target.value); setFormErrors((p) => ({ ...p, key: undefined })); }}
                 placeholder={type === 'supplier' ? 'אופיס דיפו' : 'ציוד משרדי'}
-                className="input-base"
+                aria-invalid={!!formErrors.key || undefined}
+                className={clsx('input-base', formErrors.key && 'input-error')}
               />
+              {formErrors.key && <p className="text-xs text-red-600 mt-1">{formErrors.key}</p>}
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">
+              <label htmlFor="mapping-code" className="block text-sm font-medium text-slate-700 mb-1.5">
                 {type === 'supplier' ? 'מספר כרטיס (קוד)' : 'קוד חשבון'}
               </label>
               <input
-                value={code} onChange={(e) => setCode(e.target.value)}
+                id="mapping-code"
+                value={code} onChange={(e) => { setCode(e.target.value); setFormErrors((p) => ({ ...p, account_code: undefined })); }}
                 placeholder="4001"
-                className="input-base font-mono"
+                inputMode="numeric"
+                aria-invalid={!!formErrors.account_code || undefined}
+                className={clsx('input-base font-mono', formErrors.account_code && 'input-error')}
               />
+              {formErrors.account_code && <p className="text-xs text-red-600 mt-1">{formErrors.account_code}</p>}
             </div>
           </div>
 
           {/* Supplier extra fields row */}
           {type === 'supplier' && (
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">מספר ספק</label>
+                <label htmlFor="mapping-supplier-number" className="block text-sm font-medium text-slate-700 mb-1.5">מספר ספק</label>
                 <input
+                  id="mapping-supplier-number"
                   value={supplierNumber} onChange={(e) => setSupplierNumber(e.target.value)}
                   placeholder="למשל: 12"
                   className="input-base font-mono"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">מספר תיק מע"מ</label>
+                <label htmlFor="mapping-vat-id" className="block text-sm font-medium text-slate-700 mb-1.5">מספר תיק מע"מ</label>
                 <input
-                  value={vatId} onChange={(e) => setVatId(e.target.value)}
+                  id="mapping-vat-id"
+                  value={vatId} onChange={(e) => { setVatId(e.target.value); setFormErrors((p) => ({ ...p, vat_id: undefined })); }}
                   placeholder="511234567"
-                  className="input-base font-mono"
+                  inputMode="numeric"
+                  aria-invalid={!!formErrors.vat_id || undefined}
+                  className={clsx('input-base font-mono', formErrors.vat_id && 'input-error')}
                 />
+                {formErrors.vat_id && <p className="text-xs text-red-600 mt-1">{formErrors.vat_id}</p>}
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">שם הוצאה ברירת מחדל</label>
+                <label htmlFor="mapping-category" className="block text-sm font-medium text-slate-700 mb-1.5">שם הוצאה ברירת מחדל</label>
                 <select
+                  id="mapping-category"
                   value={expenseCategory} onChange={(e) => setExpenseCategory(e.target.value)}
                   className="input-base"
                 >
@@ -504,15 +567,15 @@ export default function MappingsPage() {
           )}
 
           <div className="flex gap-2 pt-1">
-            <Button onClick={handleAdd} disabled={saving || !key.trim() || !code.trim()}>
+            <Button type="submit" disabled={saving || !key.trim() || !code.trim()}>
               {saving ? 'שומר...' : 'שמור'}
             </Button>
-            <Button variant="secondary" onClick={() => {
+            <Button type="button" variant="secondary" onClick={() => {
               setShowForm(false);
               resetForm();
             }}>ביטול</Button>
           </div>
-        </div>
+        </form>
       )}
 
       {/* Tabs Selection */}
@@ -520,7 +583,7 @@ export default function MappingsPage() {
         <button
           onClick={() => setActiveTab('supplier')}
           className={clsx(
-            'flex items-center gap-2 px-6 py-3 border-b-2 font-medium text-sm transition-all focus:outline-none',
+            'flex items-center gap-2 px-3 sm:px-6 py-3 border-b-2 font-medium text-sm transition-all focus:outline-none',
             activeTab === 'supplier'
               ? 'border-blue-600 text-blue-600 font-semibold'
               : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
@@ -532,7 +595,7 @@ export default function MappingsPage() {
         <button
           onClick={() => setActiveTab('category')}
           className={clsx(
-            'flex items-center gap-2 px-6 py-3 border-b-2 font-medium text-sm transition-all focus:outline-none',
+            'flex items-center gap-2 px-3 sm:px-6 py-3 border-b-2 font-medium text-sm transition-all focus:outline-none',
             activeTab === 'category'
               ? 'border-blue-600 text-blue-600 font-semibold'
               : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
@@ -573,7 +636,8 @@ export default function MappingsPage() {
                 )}
               </div>
             </div>
-            <table className="w-full text-sm text-right">
+            <div className="overflow-x-auto">
+            <table className="w-full min-w-[720px] text-sm text-right">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-100">
                   <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">שם ספק</th>
@@ -611,7 +675,7 @@ export default function MappingsPage() {
                       />
                     </td>
                     <td className="px-4 py-3 text-center">
-                      <div className="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="flex items-center justify-center gap-2 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity">
                         <button
                           onClick={() => handleEdit(m)}
                           className="text-slate-300 hover:text-blue-600 transition-colors"
@@ -639,6 +703,7 @@ export default function MappingsPage() {
                 )}
               </tbody>
             </table>
+            </div>
 
             {/* Pagination controls */}
             {totalPages > 1 && (
@@ -733,6 +798,7 @@ export default function MappingsPage() {
               <p className="font-semibold text-slate-900">קטגוריות הוצאה</p>
               <p className="text-xs text-slate-500 mt-0.5">שם קטגוריה 🡨 קוד סעיף הוצאה</p>
             </div>
+            <div className="overflow-x-auto">
             <table className="w-full text-sm text-right">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-100">
@@ -749,7 +815,7 @@ export default function MappingsPage() {
                       <code className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded text-xs font-mono">{m.account_code || 'לא הוגדר'}</code>
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="flex items-center gap-2 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity">
                         <button
                           onClick={() => handleEdit(m)}
                           className="text-slate-300 hover:text-blue-600 transition-colors"
@@ -782,6 +848,7 @@ export default function MappingsPage() {
                 )}
               </tbody>
             </table>
+            </div>
           </div>
         )}
       </div>

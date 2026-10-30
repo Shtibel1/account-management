@@ -1,7 +1,7 @@
 import type { DuplicateMatch, ExtractedData, SupplierRuleTrace, TenantRules, ValidationResult } from '@/shared/types';
 import { supabase } from '@/lib/supabase';
 import { fetchSupplierMappings, isAutoApproveEnabled } from '@/lib/supplierAutomation';
-import { applySupplierRule, findSupplierRule, normalizeVatId } from '@/shared/supplierRules';
+import { applySupplierRule, findSupplierRule, isGenericSupplierName, normalizeVatId } from '@/shared/supplierRules';
 import { amountsChanged, autoApproveBlockers } from '@/shared/autoApprove';
 import { findDuplicatesForInvoice } from '@/lib/duplicates';
 import { duplicateViolationMessages } from '@/shared/duplicates';
@@ -15,6 +15,10 @@ import {
 import { isValidVatIdChecksum } from '@/shared/vatId';
 import { checkLineItemsSum, hasMixedVat, lineItemWarnings, normalizeLineItems } from '@/shared/lineItems';
 import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
+import { vatRateWarning } from '@/shared/vatRate';
+import { checkSupplierVatId, supplierVatIdWarning } from '@/shared/buyerVatId';
+import { isZeroVatInvoice, ZERO_VAT_WITH_HISTORY_WARNING } from '@/shared/supplierVatHistory';
+import { fetchClientOwnVatIds, fetchSupplierVatHistory } from '@/lib/validationHistory';
 
 const REQUIRED_FIELDS: (keyof ExtractedData)[] = [
   'supplier_name',
@@ -84,11 +88,17 @@ function checkVatId(vatId: string | null): boolean {
 
 // ─── Core Validation Entry Point ───────────────────────────────────────────────
 
+export interface ValidationContext {
+  /** Full OCR text of the document: used to tell the issuer's VAT ID from the buyer's. */
+  ocrText?: string | null;
+}
+
 export async function validateInvoice(
   invoiceId: string,
   tenantId: string,
   data: ExtractedData,
-  rules: TenantRules
+  rules: TenantRules,
+  context: ValidationContext = {}
 ): Promise<{ data: ExtractedData; validationResult: ValidationResult; supplierRule: SupplierRuleTrace | null }> {
   // 1. Run edge cases & auto-corrections
   const { data: corrected, warnings: edgeWarnings } = runEdgeCaseHandlers(data);
@@ -101,6 +111,23 @@ export async function validateInvoice(
     let clean = corrected.supplier_vat_id.replace(/\D/g, '');
     if (clean.length === 8) {
       corrected.supplier_vat_id = '0' + clean;
+    }
+  }
+
+  // 1.4 The supplier's VAT ID is the issuer's. An ID printed next to a buyer label ("לכבוד",
+  // "ח.פ לקוח") or known to be the client's own ID is the buyer's: swap it for the issuer's ID on
+  // the page, or remove it when there is no single candidate.
+  const readVatId = corrected.supplier_vat_id || null;
+  let buyerVatIdSuspected = false;
+  if (readVatId) {
+    const ownIds = await fetchClientOwnVatIds(supabase, tenantId, invoiceId, [normalizeVatId(readVatId) ?? readVatId]);
+    const vatCheck = checkSupplierVatId({ vatId: readVatId, ocrText: context.ocrText, clientOwnIds: ownIds });
+    if (vatCheck.reason) {
+      buyerVatIdSuspected = true;
+      console.log(`[Validation] supplier_vat_id ${readVatId} looks like the buyer's (${vatCheck.reason}); using ${vatCheck.replacement ?? 'none'}.`);
+      corrected.supplier_vat_id = vatCheck.vatId;
+      const warning = supplierVatIdWarning(readVatId, vatCheck);
+      if (warning) warnings.push(warning);
     }
   }
 
@@ -134,8 +161,8 @@ export async function validateInvoice(
       console.error('Failed to query account_mappings for supplier VAT ID fallback:', err);
     }
 
-    // 1.5.2 Web Search Lookup
-    try {
+    // 1.5.2 Web Search Lookup (never for the catch-all placeholder name: any hit would be unrelated)
+    if (!isGenericSupplierName(corrected.supplier_name)) try {
       const searchResult = await searchVatIdByName(corrected.supplier_name);
       if (searchResult) {
         // Pad the web search vat_id if it's 8 digits
@@ -229,6 +256,10 @@ export async function validateInvoice(
   const lineItemsWarnings = lineItemWarnings(corrected);
   warnings.push(...lineItemsWarnings);
 
+  // VAT vs. the statutory rate for the invoice date (18% from 2025, 17% before); VAT 0 is handled below
+  const rateWarning = vatRateWarning(corrected);
+  if (rateWarning) warnings.push(rateWarning);
+
   // Model confidences no longer apply to fields auto-corrected above (amounts, VAT ID from the supplier table)
   corrected.field_confidence = pruneFieldConfidence(data.field_confidence, data, corrected);
   if (!corrected.field_confidence) delete corrected.field_confidence;
@@ -265,6 +296,21 @@ export async function validateInvoice(
   // check passed (math, VAT ID, required fields, rules, duplicates, document type).
   const supplierVatKey = normalizeVatId(corrected.supplier_vat_id);
   const optedIn = supplierVatKey ? await isAutoApproveEnabled(supabase, tenantId, supplierVatKey) : false;
+
+  // VAT 0 ("exempt supplier"): guessed from a missing VAT amount, or contradicted by the supplier's
+  // reviewed invoices that carried VAT -> warn and block auto-approve. A supplier whose history is
+  // all VAT 0 (a real עוסק פטור) can still be auto-approved.
+  const exemptGuessed = data.vat_amount == null && corrected.vat_amount === 0;
+  let zeroVatContradictsHistory = false;
+  let zeroVatHistoryUnknown = false;
+  if (supplierVatKey && isZeroVatInvoice(corrected)) {
+    const history = await fetchSupplierVatHistory(supabase, tenantId, supplierVatKey);
+    if (!history) zeroVatHistoryUnknown = true;
+    else if (history.withVatCount > 0) {
+      zeroVatContradictsHistory = true;
+      warnings.push(ZERO_VAT_WITH_HISTORY_WARNING);
+    }
+  }
   const blockers = optedIn
     ? autoApproveBlockers({
         supplierVatId: supplierVatKey,
@@ -282,6 +328,11 @@ export async function validateInvoice(
         vatIdAutoFilled: normalizeVatId(invoiceVatId) !== supplierVatKey,
         lineItemWarnings: lineItemsWarnings,
         lowConfidenceFields,
+        vatRateMismatch: rateWarning != null,
+        exemptGuessed,
+        zeroVatContradictsHistory,
+        zeroVatHistoryUnknown,
+        buyerVatIdSuspected,
       })
     : [];
   const autoApproved = optedIn && blockers.length === 0;

@@ -153,7 +153,12 @@ export function matchBboxesWithOcr(
     'vat_amount',
     'total_amount',
     'expense_category',
+    'allocation_number',
   ];
+  // The model's own boxes for these fields are guesses (often a default region); with OCR words
+  // available, a box that can't be snapped to the printed value is dropped rather than drawn in
+  // the wrong place.
+  const dropUnmatched = new Set<keyof BboxMap>(['allocation_number']);
 
   for (const field of fields) {
     const val = extractedData[field];
@@ -161,7 +166,11 @@ export function matchBboxesWithOcr(
       const match = findExactBbox(val, ocrWords);
       if (match) {
         bboxes[field] = match;
+      } else if (dropUnmatched.has(field)) {
+        delete bboxes[field];
       }
+    } else if (dropUnmatched.has(field)) {
+      delete bboxes[field];
     }
   }
 
@@ -554,7 +563,8 @@ const graph = new StateGraph<any>({
       state.invoiceId,
       state.tenantId,
       state.extractedData,
-      state.tenantRules
+      state.tenantRules,
+      { ocrText: state.rawOcrText }
     );
     // A file that holds several invoices must not be auto-approved as one: force review and
     // store the suggestion so the review screen can pre-fill the split dialog.

@@ -237,7 +237,8 @@ export function IntegrationLogs({
       </div>
 
       <div className="card overflow-hidden">
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[720px] text-sm">
           <thead>
             <tr className="bg-slate-50 border-b border-slate-200">
               {['זמן', 'מערכת', 'פעולה', 'בקשה', 'סטטוס', 'משך', 'ניסיון', 'תוצאה', 'שגיאה'].map((h) => (
@@ -274,6 +275,7 @@ export function IntegrationLogs({
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       {nextBefore && (

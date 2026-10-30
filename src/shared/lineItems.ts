@@ -81,6 +81,47 @@ export function checkLineItemsSum(
   return { ok: matched != null, sum, matched };
 }
 
+/** Per-line tolerance for quantity x unit price vs. the line total: 0.05 ILS or 1%, whichever is larger. */
+export function lineTotalTolerance(expected: number): number {
+  return Math.max(0.05, Math.abs(expected) * 0.01);
+}
+
+/** quantity x unit price, rounded to agorot; null when either is missing. */
+export function expectedLineTotal(item: Pick<LineItem, 'quantity' | 'unit_price'>): number | null {
+  if (item.quantity == null || item.unit_price == null) return null;
+  if (!Number.isFinite(item.quantity) || !Number.isFinite(item.unit_price)) return null;
+  return round2(item.quantity * item.unit_price);
+}
+
+/** True when the line has quantity, unit price and total, and the total is not quantity x unit price (within tolerance). */
+export function isLineTotalMismatch(item: Pick<LineItem, 'quantity' | 'unit_price' | 'line_total'>): boolean {
+  const expected = expectedLineTotal(item);
+  if (expected == null || item.line_total == null || !Number.isFinite(item.line_total)) return false;
+  return Math.abs(item.line_total - expected) > lineTotalTolerance(expected);
+}
+
+/** Indexes of lines whose total doesn't equal quantity x unit price. */
+export function lineTotalMismatches(items: LineItem[] | null | undefined): number[] {
+  return (items ?? []).flatMap((item, i) => (isLineTotalMismatch(item) ? [i] : []));
+}
+
+/**
+ * The line after the reviewer changed its quantity or unit price: the total follows quantity x unit
+ * price when it matched the old values (or a value was empty); a total that didn't match before (e.g. a line
+ * discount) is kept, and shows up as a mismatch.
+ */
+export function updateLineItem(item: LineItem, patch: Partial<LineItem>): LineItem {
+  const next: LineItem = { ...item, ...patch };
+  const touchesFactors = 'quantity' in patch || 'unit_price' in patch;
+  if (!touchesFactors || 'line_total' in patch) return next;
+  const before = expectedLineTotal(item);
+  // A missing factor (e.g. the field was cleared while retyping) counts as "following"
+  const followsFactors = item.line_total == null || before == null || !isLineTotalMismatch(item);
+  const after = expectedLineTotal(next);
+  if (followsFactors && after != null) next.line_total = after;
+  return next;
+}
+
 /** True when the invoice mixes VAT-exempt lines with taxable ones. */
 export function hasMixedVat(items: LineItem[] | null | undefined): boolean {
   if (!items || items.length < 2) return false;
@@ -105,6 +146,14 @@ export function lineItemWarnings(
     if (data.total_amount != null) targets.push(`סה"כ ${ils(data.total_amount)}`);
     warnings.push(
       `${LINE_ITEMS_WARNING_PREFIX} הסכום (${ils(sumCheck.sum)}) אינו תואם לסכומי החשבונית (${targets.join(' / ')}) — ייתכן שחסרה שורה, הנחה או דמי משלוח`
+    );
+  }
+
+  const mismatched = lineTotalMismatches(items);
+  if (mismatched.length > 0) {
+    const rows = mismatched.slice(0, 5).map((i) => i + 1).join(', ');
+    warnings.push(
+      `${LINE_ITEMS_WARNING_PREFIX} בשורות ${rows}${mismatched.length > 5 ? ' ועוד' : ''} הסכום אינו שווה לכמות × מחיר ליחידה — ייתכן שנקראו שגוי או שיש הנחה בשורה`
     );
   }
 

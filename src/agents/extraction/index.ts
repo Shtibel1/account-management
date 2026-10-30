@@ -25,7 +25,7 @@ const TOOL_DEFINITION: Anthropic.Tool = {
     properties: {
       supplier_name:     { type: 'string', description: 'שם הספק / ספק השירות' },
       supplier_name_bbox: { '$ref': '#/$defs/bbox' },
-      supplier_vat_id:   { type: 'string', description: 'מספר עוסק מורשה / ח.פ. (9 ספרות)' },
+      supplier_vat_id:   { type: 'string', description: 'מספר עוסק מורשה / ח.פ. (9 ספרות) של הספק המנפיק את החשבונית (המוכר), מכותרת המסמך / פרטי העסק המנפיק. לעולם לא המספר שליד "לכבוד", "לקוח", "ח.פ לקוח" או בפרטי הקונה.' },
       supplier_vat_id_bbox: { '$ref': '#/$defs/bbox' },
       invoice_number:    { type: 'string', description: 'מספר חשבונית' },
       invoice_number_bbox: { '$ref': '#/$defs/bbox' },
@@ -104,6 +104,12 @@ const TOOL_DEFINITION: Anthropic.Tool = {
   },
 };
 
+// The buyer's ID is printed on every invoice too (customer block); the model must take the issuer's.
+const SUPPLIER_VAT_ID_RULE = `ח.פ. הספק (supplier_vat_id) — זהו מספר העוסק המורשה / ח.פ. של העסק שהנפיק את החשבונית (המוכר), שמופיע בכותרת או בתחתית המסמך ליד שם הספק. בחשבונית מופיע לעיתים גם מספר של הלקוח (הקונה) — ליד "לכבוד", "לקוח", "ח.פ לקוח", "עוסק מורשה לקוח", "מספר לקוח" או בבלוק פרטי הלקוח. לעולם אל תחזיר את המספר של הלקוח כ-supplier_vat_id. אם לא ברור איזה מספר שייך לספק — השאר את השדה ריק או תן ביטחון נמוך (0.5 ומטה).`;
+
+// A continuation page ("עמוד 2 מתוך 4") has line items but no totals: amounts must not be invented.
+const PRINTED_AMOUNTS_RULE = `סכומים (vat_amount, total_amount) — רק כפי שהם מודפסים בשורות הסיכום של המסמך (amount_before_vat מחושב מהם לפי הנוסחה). אם בעמוד אין שורת סיכום (למשל עמוד המשך "עמוד 2 מתוך 4" עם שורות פריטים בלבד) — אל תסכם את שורות הפריטים ואל תחשב מע"מ לפי שיעור משוער; השאר את הסכומים ריקים.`;
+
 const SYSTEM_PROMPT_TEXT_ONLY = `אתה מומחה לניתוח חשבוניות מס ישראליות מטקסט OCR.
 קרא בקפידה את טקסט ה-OCR המצורף וחלץ את כל הנתונים הרלוונטיים.
 
@@ -112,6 +118,8 @@ You will receive raw OCR text from bilingual Israeli invoices. The text may have
 השתמש תמיד ב-tool "save_invoice_data" להחזרת הנתונים — אל תכתוב JSON חופשי.
 אם שדה לא קיים, אל תכלול אותו (השאר null מרומז).
 שים לב: מספר עוסק מורשה ישראלי (ח.פ. / ע.מ.) הוא 9 ספרות בדיוק.
+${SUPPLIER_VAT_ID_RULE}
+${PRINTED_AMOUNTS_RULE}
 תאריכים — המר לפורמט YYYY-MM-DD.
 סכומים — ספרות בלבד, ללא סימן מטבע.
 מספר הקצאה — אם מופיע "מספר הקצאה" (רשות המסים), חלץ אותו כ-allocation_number. אל תבלבל עם מספר החשבונית או מספר העוסק.
@@ -135,6 +143,8 @@ You will receive raw OCR text from bilingual Israeli invoices. The text may have
 השתמש תמיד ב-tool "save_invoice_data" להחזרת הנתונים.
 אם שדה לא קיים, אל תכלול אותו.
 חלץ גם פרטי העברה בנקאית של הספק (בנק, סניף, חשבון) אם רשומים במסמך.
+${SUPPLIER_VAT_ID_RULE}
+${PRINTED_AMOUNTS_RULE}
 חלץ את "מספר הקצאה" של רשות המסים כ-allocation_number אם מופיע (לא מספר החשבונית ולא ח.פ.).
 חלץ את שורות הפריטים ל-line_items (עד ${MAX_LINE_ITEMS} שורות, vat_exempt=true לשורה פטורה ממע"מ) ומלא field_confidence (0-1) לכל שדה שחילצת.
 הנוסחה תמיד: amount_before_vat = total_amount - vat_amount.`;

@@ -2,15 +2,16 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { Logo } from '@/components/ui/Logo';
 import {
-  Upload, ClipboardCheck, Users, BookOpen, LayoutDashboard, Landmark, LogOut, Building2, FlaskConical, Plug, ScrollText,
+  Upload, ClipboardCheck, Users, BookOpen, LayoutDashboard, Landmark, LogOut, Building2, FlaskConical, Plug, ScrollText, Menu, X, UserCog,
 } from 'lucide-react';
 import versionData from '@/shared/version.json';
 import { SessionProvider, useSession } from '@/components/Auth/SessionContext';
 import { isSupabaseConfigured } from '@/lib/supabaseConfig';
+import { useEscapeKey } from '@/components/ui/useEscapeKey';
 
 const navItems = [
   { href: '/clients',  label: 'לקוחות',          icon: Users },
@@ -24,6 +25,7 @@ const navItems = [
 
 /** Shown only to office owners (and in local mock mode, where the page explains the env default). */
 const ownerNavItems = [
+  { href: '/settings/members', label: 'משתמשי המשרד', icon: UserCog },
   { href: '/settings/experimental', label: 'תכונות ניסיוניות', icon: FlaskConical },
 ];
 
@@ -77,24 +79,58 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
   const { me } = useSession();
   const isOwner = !!me && (me.mock || me.organizations.some((o) => o.role === 'owner'));
   const items = isOwner ? [...navItems, ...ownerNavItems] : navItems;
+  // Below md the sidebar is an off-canvas drawer opened from the top bar
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // Navigating closes the drawer
+  useEffect(() => { setDrawerOpen(false); }, [pathname]);
+  useEscapeKey(() => setDrawerOpen(false), drawerOpen);
+
+  const pageTitle = [...navItems, ...ownerNavItems].find(i => pathname.startsWith(i.href))?.label ?? 'מערכת חשבוניות';
 
   return (
     <div className="flex flex-row min-h-screen bg-slate-100">
-      {/* Sidebar — ימין (RTL) */}
-      <aside className="w-64 shrink-0 bg-slate-900 flex flex-col h-screen sticky top-0">
+      {/* Drawer backdrop (mobile only) */}
+      {drawerOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-slate-900/50 md:hidden"
+          onClick={() => setDrawerOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Sidebar — ימין (RTL). Static from md; an off-canvas drawer below it. */}
+      <aside
+        id="dashboard-sidebar"
+        className={clsx(
+          'w-64 shrink-0 bg-slate-900 flex flex-col h-screen',
+          'fixed inset-y-0 right-0 z-40 transition-transform duration-200 md:sticky md:top-0 md:right-auto md:translate-x-0',
+          drawerOpen ? 'translate-x-0 shadow-2xl' : 'translate-x-full'
+        )}
+        aria-label="ניווט ראשי"
+      >
         {/* Logo */}
-        <div className="px-5 py-6 border-b border-white/10">
+        <div className="px-5 py-6 border-b border-white/10 flex items-center justify-between gap-2">
           <Logo size="md" variant="dark" />
+          <button
+            type="button"
+            onClick={() => setDrawerOpen(false)}
+            className="md:hidden text-slate-400 hover:text-white p-1 rounded-lg"
+            aria-label="סגור תפריט"
+          >
+            <X className="h-5 w-5" />
+          </button>
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 px-3 py-4 space-y-1">
+        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
           {items.map(({ href, label, icon: Icon }) => {
             const active = pathname === href || pathname.startsWith(href + '/');
             return (
               <Link
                 key={href}
                 href={href}
+                aria-current={active ? 'page' : undefined}
                 className={clsx('sidebar-item', active && 'sidebar-item-active')}
               >
                 <Icon className="h-4 w-4 shrink-0" />
@@ -115,11 +151,21 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
       {/* Main content */}
       <main className="flex-1 flex flex-col min-w-0">
         {/* Top bar */}
-        <header className="bg-white border-b border-slate-200 px-8 py-4 flex items-center justify-between sticky top-0 z-10">
-          <h1 className="text-lg font-semibold text-slate-800">
-            {[...navItems, ...ownerNavItems].find(i => pathname.startsWith(i.href))?.label ?? 'מערכת חשבוניות'}
-          </h1>
-          <div className="flex items-center gap-2">
+        <header className="bg-white border-b border-slate-200 px-4 sm:px-6 md:px-8 py-3 md:py-4 flex items-center justify-between gap-3 sticky top-0 z-10">
+          <div className="flex items-center gap-2 min-w-0">
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(true)}
+              className="md:hidden -mr-1 p-2 rounded-lg text-slate-600 hover:bg-slate-100"
+              aria-label="פתח תפריט"
+              aria-controls="dashboard-sidebar"
+              aria-expanded={drawerOpen}
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+            <h1 className="text-lg font-semibold text-slate-800 truncate">{pageTitle}</h1>
+          </div>
+          <div className="hidden sm:flex items-center gap-2 shrink-0">
             <span className="text-xs text-slate-400 bg-slate-100 px-3 py-1 rounded-full">
               {new Date().toLocaleDateString('he-IL', { weekday: 'long', day: 'numeric', month: 'long' })}
             </span>
@@ -127,14 +173,14 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
         </header>
 
         {!isSupabaseConfigured() && (
-          <div className="bg-amber-50 border-b border-amber-200 px-8 py-2.5 flex items-center gap-3 text-sm text-amber-800">
+          <div className="bg-amber-50 border-b border-amber-200 px-4 sm:px-6 md:px-8 py-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-amber-800">
             <span className="flex h-2 w-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
             <span className="font-semibold">סימולציה מקומית (Local Mock Mode):</span>
             <span>חיבור ה-Supabase אינו מוגדר. הנתונים נשמרים מקומית. כדי להתחבר לבסיס נתונים חי, הגדר קובץ .env.local</span>
           </div>
         )}
 
-        <div className="flex-1 p-8">
+        <div className="flex-1 min-w-0 p-4 sm:p-6 md:p-8">
           {children}
         </div>
 

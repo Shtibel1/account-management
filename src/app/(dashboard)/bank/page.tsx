@@ -168,7 +168,7 @@ export default function BankPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
         <StatCard label="תנועות" value={stats.total.toLocaleString('he-IL')} hint={stats.ignored ? `${stats.ignored} הוחרגו` : undefined} />
         <StatCard label="חיובים מותאמים" value={`${stats.matched} / ${stats.debits}`} hint={stats.coverage != null ? `${stats.coverage}% כיסוי` : undefined} tone="emerald" />
         <StatCard label="חשבוניות חסרות" value={stats.missing.toLocaleString('he-IL')} tone={stats.missing ? 'amber' : 'slate'} />
@@ -272,12 +272,12 @@ function StatCard({
   tone?: 'slate' | 'emerald' | 'amber';
 }) {
   return (
-    <div className="card px-5 py-4">
+    <div className="card px-3 py-3 sm:px-5 sm:py-4 min-w-0">
       <p className="text-xs font-semibold text-slate-500">{label}</p>
       <p
         dir="ltr"
         className={clsx(
-          'text-2xl font-bold mt-1 text-right tabular-nums',
+          'text-lg sm:text-2xl font-bold mt-1 text-right tabular-nums break-all',
           tone === 'emerald' && 'text-emerald-700',
           tone === 'amber' && 'text-amber-700',
           tone === 'slate' && 'text-slate-900'

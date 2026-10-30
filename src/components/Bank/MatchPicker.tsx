@@ -6,6 +6,7 @@ import { Search, Sparkles, X } from 'lucide-react';
 import type { BankTransaction, MatchableInvoice } from '@/shared/types';
 import { formatIsoDateHe } from '@/lib/exporters/missingInvoices';
 import { formatAmount } from '@/components/Bank/format';
+import { useEscapeKey } from '@/components/ui/useEscapeKey';
 
 interface Props {
   transaction: BankTransaction;
@@ -43,9 +44,11 @@ export function MatchPicker({ transaction, available, candidateIds, onSelect, on
 
   const candidateSet = new Set(candidateIds);
 
+  useEscapeKey(onClose);
+
   return (
     <div className="fixed inset-0 z-40 bg-slate-900/40 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="card w-full max-w-2xl max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-label="התאמת חשבונית לתנועה" className="card w-full max-w-2xl max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h3 className="font-bold text-slate-900">התאמת חשבונית לתנועה</h3>
