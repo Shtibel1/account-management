@@ -15,6 +15,7 @@ UI `src/app/(dashboard)/integrations` ("חיבור להנהלת חשבונות")
 | `movein`  | file | `movein.dat` (Windows-1255, fixed width) via the existing `MoveinExporter`. Byte-for-byte the same output as `POST /api/export`. |
 | `excel`   | file | `.xlsx` (RTL) with invoice fields + resolved account codes (supplier / expense / VAT) and a totals row. |
 | `webhook` | api  | POSTs each invoice as JSON to an https URL of the office (own middleware, Make / Zapier, an import hook). Optional Bearer token and HMAC signature. Reference implementation of an API plugin. |
+| `sumit`   | api  | SUMIT expense document (`/accounting/documents/addexpense/`) per invoice, PDF attached, **draft by default**, duplicate lookup via `documents/list`. No sandbox at SUMIT. Details, VAT / credit-note / allocation-number assumptions: `src/integrations/plugins/sumit/README.md`. |
 
 The legacy `POST /api/export` (Move-in download from the review table) is unchanged. Note: the only other Excel
 exporter in the codebase (`src/lib/exporters/missingInvoices.ts`) is the bank "missing invoices" sheet, which is not
@@ -58,7 +59,9 @@ expense category blocks the export with "קטגוריה: X").
 
 `ctx` gives the decrypted, schema-validated `config`, `environment`, `http` (below), `logger`
 (`info/warn/error` = redacted JSON console lines, `record()` = a non-HTTP row in `integration_logs`),
-`correlationId` and `dryRun`.
+`correlationId`, `dryRun` and `files` (`src/integrations/files.ts`: `files.load(invoice)` returns the invoice's own
+file - only an object of that client in the `raw-invoices` bucket, read with the Storage API, never `file_url` as a
+URL; PDF / JPEG / PNG by magic bytes, max 20 MB - for plugins with `attachPdf`).
 
 ## Export flow
 

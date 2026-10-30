@@ -2,6 +2,7 @@ import type { ZodError } from 'zod';
 import type {
   ExportPlugin,
   IntegrationEnvironment,
+  InvoiceFileLoader,
   IntegrationLogSink,
   PluginContext,
 } from '@/integrations/types';
@@ -9,6 +10,7 @@ import { createIntegrationHttpClient, createIntegrationLogger, type FetchLike } 
 import { secretsOf, type ConfigValues } from '@/integrations/config';
 import { decryptJson, encryptJson, integrationConfigAad } from '@/lib/secrets';
 import { getStoredIntegration, supabaseLogSink, type StoredIntegration } from '@/integrations/store';
+import { supabaseInvoiceFileLoader } from '@/integrations/files';
 
 /** SERVER-ONLY: config decryption + plugin context construction. */
 
@@ -53,6 +55,7 @@ export interface ContextOptions {
   dryRun: boolean;
   sink?: IntegrationLogSink;
   fetchImpl?: FetchLike;
+  files?: InvoiceFileLoader;
 }
 
 export function buildPluginContext(options: ContextOptions): PluginContext<unknown> {
@@ -78,6 +81,7 @@ export function buildPluginContext(options: ContextOptions): PluginContext<unkno
     logger: createIntegrationLogger(common),
     correlationId: options.correlationId,
     dryRun: options.dryRun,
+    files: options.files ?? supabaseInvoiceFileLoader(),
   };
 }
 

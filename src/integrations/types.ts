@@ -67,6 +67,18 @@ export interface InvoiceMapping {
   accountMappings: AccountMapping[];
 }
 
+/** The invoice's original file (PDF / image), for plugins that attach it (capabilities.attachPdf). */
+export interface InvoiceFile {
+  fileName: string;
+  contentType: 'application/pdf' | 'image/jpeg' | 'image/png';
+  bytes: Uint8Array;
+}
+
+/** Loads an invoice's own file from Storage (server-side; only the client's own raw-invoices objects). */
+export interface InvoiceFileLoader {
+  load(invoice: ExportInvoice): Promise<InvoiceFile>;
+}
+
 export interface ExportResult {
   externalId: string;
   url?: string;
@@ -189,6 +201,8 @@ export interface PluginContext<C = Record<string, unknown>> {
   logger: IntegrationLogger;
   correlationId: string;
   dryRun: boolean;
+  /** Invoice file access for plugins that attach the document (absent in some test contexts). */
+  files?: InvoiceFileLoader;
 }
 
 // ── Plugins ───────────────────────────────────────────────────────────────
