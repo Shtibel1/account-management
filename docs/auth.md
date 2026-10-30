@@ -11,6 +11,7 @@ auth.users ──< memberships (role owner|member) >── organizations ──<
                                                                                supplier_automation, client_contacts,
                                                                                duplicate_dismissals, bank_transactions
                                                                     invoices ──< invoice_corrections
+                                                         clients ──< client_integrations, invoice_exports, integration_logs
 ```
 
 - **organization** = one bookkeeping office. **membership** = (org, user, role), unique per pair.
@@ -41,6 +42,9 @@ auth.users ──< memberships (role owner|member) >── organizations ──<
   - `invoices`, `account_mappings`, `supplier_automation`, `client_contacts`: `client_id in (select accessible_client_ids())`.
   - `duplicate_dismissals`, `bank_transactions`: same, plus the referenced invoices must belong to the same client.
   - `invoice_corrections`: through the invoice.
+  - `client_integrations`, `invoice_exports`, `integration_logs` (migration `20261030150000_export_plugins.sql`):
+    same client scoping (+ with check), but read-only grants; `config_encrypted` is not selectable. Writes only via
+    the guarded server routes. See [integrations.md](integrations.md).
 - Helpers (all `security definer`, `stable`, `set search_path = ''`): `is_org_member(org)`, `is_org_owner(org)`,
   `accessible_client_ids()`, `can_access_storage_object(name)`.
 - Views `field_accuracy`, `supplier_accuracy`, `fewshot_accuracy` stay `security_invoker` → scoped by the policies above.

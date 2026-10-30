@@ -6,6 +6,7 @@ Welcome! This document serves as the source of truth for the codebase architectu
 - [Database Schema (docs/db_schema.md)](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/docs/db_schema.md): Detailed schemas, tables, relationships, and JSONB formats.
 - [Supplier Rules & Auto-Approve (docs/supplier_automation.md)](docs/supplier_automation.md): Per-supplier defaults, precedence, auto-approve eligibility and opt-in.
 - [Authentication & Tenancy (docs/auth.md)](docs/auth.md): Login, offices (organizations) + memberships, RLS model, route guards, inviting members.
+- [Export Plugins & Integrations (docs/integrations.md)](docs/integrations.md): Bookkeeping export plugins, per-client encrypted config, idempotent export flow, logging HTTP client, integration logs + retention.
 - [Coding Standards & AI Guidelines (docs/coding_standards.md)](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/docs/coding_standards.md): Mandatory conventions, type-safety, import rules, and Git commit guidelines.
 
 ---
@@ -34,7 +35,8 @@ src/
 │   ├── extraction/       # Anthropic Claude 3.5 Sonnet extraction engine
 │   ├── validation/       # Business rules & DB duplicate checks
 │   └── approval/         # Human-in-the-Loop approval node & resumption
-├── components/           # UI Components (UploadZone, InvoiceTable, SplitPane)
+├── components/           # UI Components (UploadZone, InvoiceTable, SplitPane, Integrations)
+├── integrations/         # Export plugin framework: types, registry, logging HTTP client, redaction, retry, idempotency, runner; plugins/<id>/ (movein, excel, webhook) - see docs/integrations.md
 ├── lib/                  # Services & Exporters (e.g., movein.ts for Move-in ERP format; ingest.ts = single ingestion entry point for upload/email/WhatsApp, see docs/ingestion.md)
 ├── shared/               # TypeScript interfaces (types.ts) and schemas
 └── utils/                # Utility helpers (e.g., encoding.ts, businessLookup.ts for Gov.il searches)
@@ -113,6 +115,7 @@ Make sure the following environment variables are present in `.env.local`:
 - `SUPABASE_SERVICE_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) - required since the auth/tenancy migration (anon has no table access)
 - `NEXT_PUBLIC_SITE_URL` (optional, origin for invite-email redirects)
 - `EXTRACTION_FEWSHOT` (optional, `off` disables per-supplier few-shot examples)
+- `INTEGRATIONS_ENCRYPTION_KEY` (32 random bytes, base64; AES-256-GCM key for per-client integration credentials, see [docs/integrations.md](docs/integrations.md))
 
 Optional ingestion channels (off unless set, see [docs/ingestion.md](docs/ingestion.md)):
 - `INGEST_EMAIL_SECRET`, `INBOUND_EMAIL_DOMAIN` (inbound email webhook)

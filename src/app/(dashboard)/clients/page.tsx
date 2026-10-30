@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { createClient } from '@/utils/supabase/client';
 import { Client } from '@/shared/types';
 import Link from 'next/link';
-import { Plus, Building2, ChevronLeft, Users, Loader2 } from 'lucide-react';
+import { Plus, Building2, ChevronLeft, Users, Loader2, Plug } from 'lucide-react';
 import { useSession } from '@/components/Auth/SessionContext';
 import { useToast } from '@/components/ui/Toast';
 import { ClientChannelsDialog, ClientChannelsSummary, useClientChannels } from '@/components/ClientChannels/ClientChannels';
@@ -171,6 +171,12 @@ export default function ClientsPage() {
                 settings={settings}
                 onManage={() => setChannelsClient(c)}
               />
+              <Link
+                href={`/integrations?clientId=${c.id}`}
+                className="flex items-center gap-2 border-t border-slate-100 px-5 py-2.5 text-xs font-medium text-blue-600 hover:text-blue-700 hover:bg-slate-50 transition-colors"
+              >
+                <Plug className="h-3.5 w-3.5" /> חיבור להנהלת חשבונות
+              </Link>
             </div>
           ))}
         </div>
