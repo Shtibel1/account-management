@@ -38,6 +38,21 @@ export const ValidationResultSchema = z.object({
   vat_id_sources: VatIdSourcesSchema.optional(),
 });
 
+export const SplitDocumentSchema = z.object({
+  start_page: z.number().int().min(1),
+  end_page: z.number().int().min(1),
+  confidence: z.number().min(0).max(1).nullable(),
+  reason: z.string().nullable(),
+});
+
+export const SplitSuggestionSchema = z.object({
+  page_count: z.number().int().min(1),
+  documents: z.array(SplitDocumentSchema).min(1),
+  confidence: z.number().min(0).max(1),
+  source: z.enum(['page_markers', 'llm']),
+  detected_at: z.string(),
+});
+
 export const ExtractedDataSchema = z.object({
   supplier_name: z.string().nullable(),
   supplier_vat_id: z.string().nullable(),
@@ -50,6 +65,7 @@ export const ExtractedDataSchema = z.object({
   allocation_number: z.string().nullable().optional(),
   validation_flags: ValidationResultSchema.optional(),
   bboxes: BboxMapSchema.optional(),
+  split_suggestion: SplitSuggestionSchema.nullable().optional(),
 });
 
 export const TenantRulesSchema = z.object({

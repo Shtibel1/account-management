@@ -4,6 +4,8 @@ import { preprocessInvoice } from '../preprocessor';
 import { extractInvoiceData } from '../extraction';
 import { validateInvoice } from '../validation';
 import { approvalNode } from '../approval';
+import { detectDocumentBoundaries } from '../splitter';
+import { isMultiDocument, shouldAutoSplit, type SplitSuggestion } from '@/shared/documentSplit';
 import { supabase } from '@/lib/supabase';
 import { PDFDocument } from 'pdf-lib';
 
@@ -303,6 +305,7 @@ const graph = new StateGraph<any>({
       default: () => ({ ocrOpCount: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 }),
     },
     useVisionFallback: { value: (a: boolean, b: boolean) => b ?? a, default: () => false },
+    splitSuggestion:  { value: (a: any, b: any) => b ?? a, default: () => null },
   },
 })
   // 1. Initialize Rules node
@@ -313,17 +316,38 @@ const graph = new StateGraph<any>({
 
   // 2. Preprocess node (Deterministic OCR Extraction)
   .addNode('preprocess', async (state: PipelineState) => {
-    const { rawOcrText, ocrMetadata, ocrOpCount, splits, pageTexts, ocrWords } = await preprocessInvoice(state.fileUrl, state.mimeType);
+    const { rawOcrText, ocrMetadata, ocrOpCount, pageTexts, ocrWords } = await preprocessInvoice(state.fileUrl, state.mimeType);
+
+    // Multi-invoice detection (heuristic pre-check first, LLM only when it can't decide)
+    let splitSuggestion: SplitSuggestion | null = null;
+    let splitInputTokens = 0;
+    let splitOutputTokens = 0;
+    if (pageTexts && pageTexts.length > 1) {
+      const detection = await detectDocumentBoundaries(pageTexts);
+      splitSuggestion = detection.suggestion;
+      splitInputTokens = detection.inputTokens;
+      splitOutputTokens = detection.outputTokens;
+    }
+
     const updatedMetrics = {
       ...state.costMetrics,
       ocrOpCount: state.costMetrics.ocrOpCount + ocrOpCount,
+      inputTokens: state.costMetrics.inputTokens + splitInputTokens,
+      outputTokens: state.costMetrics.outputTokens + splitOutputTokens,
     };
     updatedMetrics.estimatedCostUsd = calculateEstimatedCost(updatedMetrics);
 
     console.log(`[Supervisor] ⚙️ Preprocessing complete. OCR Ops: ${updatedMetrics.ocrOpCount}, Cost: $${updatedMetrics.estimatedCostUsd}`);
 
+    // Default: keep the file whole and suggest the split to the reviewer.
+    // Auto-split only behind AUTO_SPLIT_ENABLED and with high confidence.
+    const splits = shouldAutoSplit(splitSuggestion) && splitSuggestion ? splitSuggestion.documents : null;
+    if (isMultiDocument(splitSuggestion) && !splits) {
+      console.log(`[Supervisor] ✂️ ${splitSuggestion.documents.length} documents detected (confidence ${splitSuggestion.confidence}); suggesting a split in review.`);
+    }
+
     if (splits && splits.length > 1) {
-      console.log(`[Supervisor] ✂️ Multi-invoice PDF detected. Splitting into ${splits.length} parts...`);
+      console.log(`[Supervisor] ✂️ Multi-invoice PDF detected. Auto-splitting into ${splits.length} parts...`);
       try {
         const response = await fetch(state.fileUrl);
         if (!response.ok) {
@@ -452,6 +476,7 @@ const graph = new StateGraph<any>({
           ocrMetadata: primaryOcrMetadata,
           ocrWords: primaryOcrWords,
           costMetrics: updatedMetrics,
+          splitSuggestion: null,
         };
       } catch (err) {
         console.error('[Supervisor] Splitting PDF failed, proceeding with original PDF:', err);
@@ -463,6 +488,8 @@ const graph = new StateGraph<any>({
       ocrMetadata,
       ocrWords,
       costMetrics: updatedMetrics,
+      // Falls back to a review suggestion when an auto-split failed
+      splitSuggestion,
     };
   })
 
@@ -515,6 +542,17 @@ const graph = new StateGraph<any>({
       state.extractedData,
       state.tenantRules
     );
+    // A file that holds several invoices must not be auto-approved as one: force review and
+    // store the suggestion so the review screen can pre-fill the split dialog.
+    const splitSuggestion = state.splitSuggestion ?? null;
+    if (isMultiDocument(splitSuggestion)) {
+      const warning = `נראה שהקובץ מכיל ${splitSuggestion.documents.length} מסמכים נפרדים — מומלץ לפצל לפני אישור`;
+      if (!validationResult.warnings.includes(warning)) validationResult.warnings.push(warning);
+      validationResult.requires_manual_review = true;
+      validated.validation_flags = validationResult;
+    }
+    validated.split_suggestion = splitSuggestion;
+
     const errorMsg = validationResult.not_an_invoice ? 'המסמך לא זוהה כחשבונית' : null;
     return { extractedData: validated, validationResult, error: errorMsg };
   })

@@ -1,67 +1,5 @@
 import type { OcrMetadata, OcrWord } from '@/shared/types';
 import { PDFDocument } from 'pdf-lib';
-import Anthropic from '@anthropic-ai/sdk';
-
-const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
-
-async function detectInvoiceSplits(
-  pageTexts: string[]
-): Promise<{ start_page: number; end_page: number }[]> {
-  if (!anthropicApiKey) {
-    console.warn('[Preprocessor] Missing ANTHROPIC_API_KEY, skipping smart split.');
-    return [{ start_page: 1, end_page: pageTexts.length }];
-  }
-
-  const anthropic = new Anthropic({ apiKey: anthropicApiKey });
-  const formattedPages = pageTexts
-    .map((text, idx) => `[עמוד ${idx + 1}]:\n\"\"\"\n${text || 'עמוד ריק או ללא טקסט קריא'}\n\"\"\"`)
-    .join('\n\n');
-
-  const systemPrompt = `אתה עוזר פיננסי חכם שקובע כיצד לפצל קובץ PDF יחיד המכיל מספר חשבוניות מס ישראליות שונות.
-מצורף טקסט ה-OCR של כל עמוד במסמך.
-עליך לנתח את העמודים ולקבוע אילו עמודים שייכים לאותה חשבונית (רב-עמודית) ואילו עמודים מתחילים חשבונית חדשה.
-
-כללים לזיהוי חשבונית חדשה:
-1. שינוי שם הספק או מספר עוסק מורשה (ח.פ.).
-2. שינוי תאריך החשבונית או מספר החשבונית.
-3. עמוד שנראה בבירור כדף ראשון של מסמך (כותרת גדולה, לוגו, פרטי ספק).
-
-החזר את התשובה בפורמט JSON בלבד, במבנה הבא:
-{
-  "splits": [
-    { "start_page": 1, "end_page": 2 },
-    { "start_page": 3, "end_page": 3 }
-  ]
-}
-אל תוסיף שום הסבר או טקסט נוסף לפני או אחרי ה-JSON.`;
-
-  try {
-    const response = await anthropic.messages.create({
-      model: 'claude-3-haiku-20240307',
-      max_tokens: 1024,
-      system: systemPrompt,
-      messages: [
-        {
-          role: 'user',
-          content: `אנא קבע את גבולות החשבוניות עבור עמודי המסמך הבאים:\n\n${formattedPages}`,
-        },
-      ],
-    });
-
-    const text = response.content.find((b) => b.type === 'text')?.text || '';
-    const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    const result = JSON.parse(cleanText);
-    if (result && Array.isArray(result.splits)) {
-      console.log(`[Preprocessor] 🤖 AI split detection succeeded. Identified ${result.splits.length} parts:`, JSON.stringify(result.splits));
-      return result.splits;
-    }
-  } catch (err) {
-    console.error('[Preprocessor] Failed to parse splits JSON from AI response:', err);
-  }
-
-  // Fallback
-  return [{ start_page: 1, end_page: pageTexts.length }];
-}
 
 function extractWordsFromPage(pageRes: any, pageIndex: number): OcrWord[] {
   const words: OcrWord[] = [];
@@ -169,7 +107,6 @@ export async function preprocessInvoice(
   rawOcrText: string;
   ocrMetadata: OcrMetadata;
   ocrOpCount: number;
-  splits?: { start_page: number; end_page: number }[];
   pageTexts?: string[];
   ocrWords?: OcrWord[];
 }> {
@@ -201,7 +138,6 @@ export async function preprocessInvoice(
   let pageCount = 1;
   let confidence = 0.95;
   const detectedLanguages = new Set<string>();
-  let splits: { start_page: number; end_page: number }[] = [];
   let pageTexts: string[] = [];
   let ocrWords: OcrWord[] = [];
 
@@ -223,7 +159,6 @@ export async function preprocessInvoice(
       rawOcrText = ocrRes.pageTexts[0] || '';
       ocrWords = ocrRes.ocrWords;
       pageCount = 1;
-      splits = [{ start_page: 1, end_page: 1 }];
       pageTexts = [rawOcrText];
     } else {
       pageCount = pdfPageCount;
@@ -246,14 +181,8 @@ export async function preprocessInvoice(
       ocrWords = batchResults.flatMap((r) => r.ocrWords);
 
       rawOcrText = allPageTexts.join('\n\n');
+      // Per-page text (in page order) feeds multi-invoice boundary detection in the supervisor
       pageTexts = allPageTexts;
-
-      // Run AI split detection if PDF is multi-page
-      if (pdfPageCount > 1) {
-        splits = await detectInvoiceSplits(allPageTexts);
-      } else {
-        splits = [{ start_page: 1, end_page: 1 }];
-      }
     }
   } else {
     // Processing as Image
@@ -328,7 +257,6 @@ export async function preprocessInvoice(
         }
       }
     }
-    splits = [{ start_page: 1, end_page: 1 }];
     pageTexts = [rawOcrText];
   }
 
@@ -348,7 +276,6 @@ export async function preprocessInvoice(
       confidence,
     },
     ocrOpCount: Math.ceil(pageCount / 5),
-    splits,
     pageTexts,
     ocrWords,
   };

@@ -66,7 +66,7 @@ A mock Supabase client (`src/utils/supabase/mockClient.ts`) allows running the U
 ## Repository layout
 
 ```
-src/agents/      AI pipeline (supervisor, preprocessor, extraction, validation, approval)
+src/agents/      AI pipeline (supervisor, preprocessor, splitter, extraction, validation, approval)
 src/app/         Next.js routes – (dashboard), (marketing), api
 src/components/  UI: InvoiceTable, SplitPane viewer/form, UploadZone
 src/lib/         API client, exporters

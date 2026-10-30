@@ -1,3 +1,5 @@
+import type { SplitSuggestion } from '@/shared/documentSplit';
+
 export type InvoiceStatus = 'processing' | 'review' | 'approved' | 'exported' | 'error' | 'rejected';
 
 export type MappingType = 'supplier' | 'category';
@@ -33,6 +35,7 @@ export interface ExtractedData {
   bank_account?: string | null;
   validation_flags?: ValidationResult;
   bboxes?: BboxMap;
+  split_suggestion?: SplitSuggestion | null; // file looks like several documents (set by the pipeline)
 }
 
 export interface TenantRules {
@@ -150,5 +153,6 @@ export interface PipelineState {
   error: string | null;
   costMetrics: CostMetrics;
   useVisionFallback: boolean;
+  splitSuggestion?: SplitSuggestion | null;
 }
 

@@ -6,8 +6,9 @@ import dynamic from 'next/dynamic';
 import { createClient } from '@/utils/supabase/client';
 import { Invoice } from '@/shared/types';
 import { ValidationForm } from '@/components/SplitPane/ValidationForm';
-import { ArrowRight, Loader2, Eye, EyeOff, SlidersHorizontal, Scissors } from 'lucide-react';
+import { ArrowRight, Loader2, Eye, EyeOff, SlidersHorizontal, Scissors, Sparkles } from 'lucide-react';
 import { splitInvoice } from '@/lib/api';
+import { formatRangesForInput, usableSuggestion } from '@/shared/documentSplit';
 import { useToast } from '@/components/ui/Toast';
 
 const ImageViewer = dynamic(() => import('@/components/SplitPane/ImageViewer').then((m) => m.ImageViewer), {
@@ -112,6 +113,10 @@ export default function ReviewDetailPage() {
   const [parsedRanges, setParsedRanges] = useState<SplitRange[] | null>(null);
   const [rangeError, setRangeError] = useState<string | null>(null);
 
+  // Automatic split suggestion (set by the pipeline when the file looks like several documents)
+  const [suggestionDismissed, setSuggestionDismissed] = useState(false);
+  const [prefilledFromSuggestion, setPrefilledFromSuggestion] = useState(false);
+
   const load = async () => {
     const { data } = await supabase.from('invoices').select('*').eq('id', id).single();
     setInvoice(data as Invoice);
@@ -147,6 +152,21 @@ export default function ReviewDetailPage() {
       setRangeError(null);
     }
   }, [customRanges, splitMode, pageCount]);
+
+  // Only once the real page count is known, and only if the suggestion still fits this file
+  const splitSuggestion = pageCount
+    ? usableSuggestion(invoice?.extracted_data?.split_suggestion, pageCount)
+    : null;
+
+  const openSplitModal = () => {
+    // Pre-fill the custom ranges with the detected split unless the reviewer already typed ranges
+    if (splitSuggestion && !customRanges.trim()) {
+      setSplitMode('custom');
+      setCustomRanges(formatRangesForInput(splitSuggestion.documents));
+      setPrefilledFromSuggestion(true);
+    }
+    setShowSplitModal(true);
+  };
 
   const handlePerformSplit = async () => {
     if (!invoice || !pageCount) return;
@@ -246,6 +266,46 @@ export default function ReviewDetailPage() {
         )}
       </div>
 
+      {/* Automatic split suggestion */}
+      {splitSuggestion && !suggestionDismissed && (
+        <div className="mb-4 flex items-start gap-3 p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">
+          <Scissors className="h-4 w-4 mt-0.5 shrink-0 text-amber-500" />
+          <div className="flex-1 min-w-0 space-y-1.5">
+            <p className="font-semibold text-amber-900">
+              נראה שהקובץ מכיל {splitSuggestion.documents.length} מסמכים נפרדים
+              <span className="font-normal text-amber-700"> · ביטחון {Math.round(splitSuggestion.confidence * 100)}%</span>
+            </p>
+            <div className="flex flex-wrap gap-1.5 text-xs">
+              {splitSuggestion.documents.map((doc, idx) => (
+                <span
+                  key={doc.start_page}
+                  title={doc.reason ?? undefined}
+                  className="px-2 py-0.5 rounded-lg bg-white border border-amber-200 text-amber-800"
+                >
+                  חלק {idx + 1}:{' '}
+                  {doc.start_page === doc.end_page ? `עמוד ${doc.start_page}` : `עמודים ${doc.start_page}-${doc.end_page}`}
+                  {doc.reason && <span className="text-amber-600"> · {doc.reason}</span>}
+                </span>
+              ))}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={openSplitModal}
+              className="text-xs px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold transition-colors"
+            >
+              בדוק ופצל
+            </button>
+            <button
+              onClick={() => setSuggestionDismissed(true)}
+              className="text-xs px-2 py-1.5 text-amber-700 hover:text-amber-900 underline"
+            >
+              התעלם
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Split pane */}
       <div className="flex-1 grid grid-cols-2 gap-4 min-h-0">
         {/* Right — validation form (places it on the right side in RTL) */}
@@ -263,7 +323,7 @@ export default function ReviewDetailPage() {
             <span>מסמך מקורי</span>
             {pageCount && pageCount > 1 && (
               <button
-                onClick={() => setShowSplitModal(true)}
+                onClick={openSplitModal}
                 className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg bg-blue-50 text-blue-600 border border-blue-200 hover:bg-blue-100 hover:text-blue-700 transition-colors font-semibold shadow-sm"
               >
                 <Scissors className="h-3.5 w-3.5" /> פיצול מסמך ({pageCount} עמודים)
@@ -340,6 +400,14 @@ export default function ReviewDetailPage() {
 
             {splitMode === 'custom' && (
               <div className="space-y-2 pt-2 animate-in fade-in slide-in-from-top-1 duration-200">
+                {prefilledFromSuggestion && splitSuggestion && (
+                  <p className="flex items-start gap-2 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-xl p-2.5">
+                    <Sparkles className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                    <span>
+                      הטווחים מולאו מראש לפי זיהוי אוטומטי (ביטחון {Math.round(splitSuggestion.confidence * 100)}%). בדוק אותם מול המסמך ותקן במידת הצורך לפני הפיצול.
+                    </span>
+                  </p>
+                )}
                 <label className="block text-xs font-semibold text-slate-500">
                   הזן טווחים מופרדים בפסיקים (לדוגמה: 1-2, 3, 4-{pageCount}):
                 </label>

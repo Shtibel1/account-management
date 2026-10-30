@@ -152,8 +152,8 @@ export async function splitInvoice(
   });
 
   if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(errorText || 'שגיאה בפיצול הקובץ');
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? 'שגיאה בפיצול הקובץ');
   }
 
   const data = await res.json();

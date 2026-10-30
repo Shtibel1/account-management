@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { PDFDocument } from 'pdf-lib';
+import { validateSplitRanges } from '@/shared/documentSplit';
 
 function sanitizeStorageFilename(fileName: string): string {
   const lastDot = fileName.lastIndexOf('.');
@@ -28,9 +29,9 @@ export async function POST(
 
   try {
     const body = await request.json();
-    const { splits } = body as { splits: { startPage: number; endPage: number }[] };
+    const { splits: requestedSplits } = body as { splits: unknown };
 
-    if (!splits || !Array.isArray(splits) || splits.length === 0) {
+    if (!requestedSplits || !Array.isArray(requestedSplits) || requestedSplits.length === 0) {
       return NextResponse.json({ error: 'Missing or invalid splits parameter' }, { status: 400 });
     }
 
@@ -60,6 +61,17 @@ export async function POST(
     const nameWithoutExt = lastDot !== -1 ? originalFileName.substring(0, lastDot) : originalFileName;
 
     const originalDoc = await PDFDocument.load(fileBuffer);
+
+    // Ranges must be 1-based, contiguous, non-overlapping and cover every page of this file
+    const rangeCheck = validateSplitRanges(requestedSplits, originalDoc.getPageCount());
+    if (!rangeCheck.ok) {
+      return NextResponse.json({ error: rangeCheck.error }, { status: 400 });
+    }
+    if (rangeCheck.ranges.length < 2) {
+      return NextResponse.json({ error: 'נדרשים לפחות שני חלקים כדי לפצל את המסמך' }, { status: 400 });
+    }
+    const splits = rangeCheck.ranges.map((r) => ({ startPage: r.start_page, endPage: r.end_page }));
+
     const results: { id: string; fileUrl: string; mimeType: string }[] = [];
 
     // 3. Process each split range
