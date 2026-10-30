@@ -50,11 +50,26 @@ export interface VatIdSources {
   web_search: string | null;
 }
 
+// Why another invoice is suspected to be the same document, strongest first.
+export type DuplicateReason = 'same_file' | 'same_number' | 'fuzzy';
+
+export interface DuplicateMatch {
+  invoice_id: string;
+  reason: DuplicateReason;
+  // Snapshot of the other invoice for display, so the review UI needs no extra query
+  file_name?: string | null;
+  invoice_number?: string | null;
+  invoice_date?: string | null;
+  total_amount?: number | null;
+  status?: InvoiceStatus | null;
+}
+
 export interface ValidationResult {
   math_ok: boolean;
   vat_id_ok: boolean;
   fields_missing: string[];
   duplicate_found: boolean;
+  duplicate_matches?: DuplicateMatch[];
   rule_violations: string[];
   warnings: string[];
   requires_manual_review: boolean;
@@ -92,8 +107,17 @@ export interface Invoice {
   ai_confidence: number | null;
   error_message: string | null;
   exported_at: string | null;
+  file_hash?: string | null;          // SHA-256 (hex) of the stored file bytes
   created_at: string;
   updated_at: string;
+}
+
+export interface DuplicateDismissal {
+  id: string;
+  client_id: string;
+  invoice_id: string;
+  other_invoice_id: string;
+  dismissed_at: string;
 }
 
 export interface ExportRow {

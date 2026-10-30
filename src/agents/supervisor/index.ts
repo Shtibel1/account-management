@@ -5,6 +5,7 @@ import { extractInvoiceData } from '../extraction';
 import { validateInvoice } from '../validation';
 import { approvalNode } from '../approval';
 import { supabase } from '@/lib/supabase';
+import { saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
 import { PDFDocument } from 'pdf-lib';
 
 function parseNumber(text: string): number | null {
@@ -357,6 +358,7 @@ const graph = new StateGraph<any>({
         for (let idx = 0; idx < splits.length; idx++) {
           const split = splits[idx];
           const splitBuffer = await splitPdfBuffer(fileBuffer, split.start_page, split.end_page);
+          const splitFileHash = sha256Hex(splitBuffer);
           const splitFileName = `${nameWithoutExt}_חלק_${idx + 1}${ext}`;
           const sanitizedBase = sanitizeStorageFilename(nameWithoutExt);
           const storageFileName = `${sanitizedBase}_part_${idx + 1}${ext}`;
@@ -414,6 +416,8 @@ const graph = new StateGraph<any>({
                 updated_at: new Date().toISOString(),
               })
               .eq('id', state.invoiceId);
+            // The invoice now points at the split part, so its fingerprint changes with it
+            await saveInvoiceFileHash(supabase, state.invoiceId, splitFileHash);
           } else {
             const { data: newInvoice, error: insertErr } = await supabase
               .from('invoices')
@@ -430,6 +434,7 @@ const graph = new StateGraph<any>({
               console.error(`[Supervisor] Failed to insert split invoice part ${idx + 1}:`, insertErr);
               continue;
             }
+            await saveInvoiceFileHash(supabase, newInvoice.id, splitFileHash);
 
             console.log(`[Supervisor]   - Triggered child pipeline for part ${idx + 1}: ${newInvoice.id}`);
             childPromises.push(

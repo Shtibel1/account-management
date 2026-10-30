@@ -4,10 +4,12 @@ import { useEffect, useState } from 'react';
 import { ExtractedData, Invoice, AccountMapping } from '@/shared/types';
 import { approveInvoice } from '@/lib/api';
 import { allocationThreshold, isAllocationNumberWellFormed, isAllocationRequired } from '@/shared/allocation';
+import { dismissDuplicateInFlags } from '@/shared/duplicates';
 import { createClient } from '@/utils/supabase/client';
 import clsx from 'clsx';
 import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
+import { DuplicateAlert } from './DuplicateAlert';
 
 interface Props {
   invoice: Invoice;
@@ -361,6 +363,17 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const isError = invoice.status === 'error';
   const isReadOnly = isApproved || isRejected || isError || invoice.status === 'exported';
 
+  // The server already cleared the flag in validated_data; mirror it locally so approving
+  // right after a dismissal doesn't write the stale duplicate flag back.
+  const handleDuplicateDismissed = (otherInvoiceId: string) => {
+    setData((prev) =>
+      prev.validation_flags
+        ? { ...prev, validation_flags: dismissDuplicateInFlags(prev.validation_flags, otherInvoiceId, prev.invoice_number) }
+        : prev
+    );
+    onApproved();
+  };
+
   const isApproveDisabled =
     saving ||
     rejecting ||
@@ -397,6 +410,12 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
           סכומים לא מסתדרים — בדוק את הנתונים מול המסמך
         </div>
       )}
+      <DuplicateAlert
+        invoiceId={invoice.id}
+        flags={data.validation_flags}
+        readOnly={isReadOnly}
+        onDismissed={handleDuplicateDismissed}
+      />
       {warnings.map((w, i) => (
         <div key={i} className="mx-4 mt-2 flex items-start gap-2.5 p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">
           <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />

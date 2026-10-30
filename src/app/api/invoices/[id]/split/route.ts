@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { PDFDocument } from 'pdf-lib';
+import { saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
 
 function sanitizeStorageFilename(fileName: string): string {
   const lastDot = fileName.lastIndexOf('.');
@@ -80,6 +81,7 @@ export async function POST(
       copiedPages.forEach((page) => newDoc.addPage(page));
       const pdfBytes = await newDoc.save();
       const splitBuffer = Buffer.from(pdfBytes);
+      const splitFileHash = sha256Hex(splitBuffer);
 
       // Upload split file to storage
       const splitFileName = `${nameWithoutExt}_חלק_${idx + 1}${ext}`;
@@ -128,6 +130,8 @@ export async function POST(
         if (updateErr) {
           throw new Error(`Failed to update primary invoice with split file: ${updateErr.message}`);
         }
+        // The invoice now points at the split part, so its fingerprint changes with it
+        await saveInvoiceFileHash(supabase, id, splitFileHash);
 
         results.push({
           id,
@@ -150,6 +154,7 @@ export async function POST(
         if (insertErr || !newInvoice) {
           throw new Error(`Failed to insert split invoice record for part ${idx + 1}: ${insertErr?.message}`);
         }
+        await saveInvoiceFileHash(supabase, newInvoice.id, splitFileHash);
 
         results.push({
           id: newInvoice.id,

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { runOrchestrationPipeline } from '@/agents/supervisor';
+import { hashStoredFile, saveInvoiceFileHash } from '@/lib/fileHash';
 
 function sanitizeStorageFilename(fileName: string): string {
   const lastDot = fileName.lastIndexOf('.');
@@ -95,6 +96,11 @@ export async function POST(request: Request) {
         });
         continue;
       }
+
+      // 3. Fingerprint the stored bytes (exact-duplicate detection). Awaited so the hash is in
+      // place before the client triggers processing; failures only skip the same-file check.
+      const fileHash = await hashStoredFile(supabase, 'raw-invoices', filePath);
+      if (fileHash) await saveInvoiceFileHash(supabase, invoice.id, fileHash);
 
       results.push({
         fileName,

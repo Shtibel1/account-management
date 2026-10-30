@@ -1,4 +1,4 @@
-import type { ExtractedData } from '@/shared/types';
+import type { ExtractedData, ValidationResult } from '@/shared/types';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -176,4 +176,16 @@ export async function splitInvoice(
   }
 
   return data;
+}
+
+/** Marks `otherInvoiceId` as "not a duplicate" of invoice `id`; returns the invoice's updated validation flags. */
+export async function dismissDuplicate(id: string, otherInvoiceId: string): Promise<ValidationResult | null> {
+  const res = await fetch(`${API_URL}/api/invoices/${id}/duplicates/dismiss`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ otherInvoiceId }),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error ?? 'שגיאה בסימון החשבונית כלא כפולה');
+  return (body?.validation_flags ?? null) as ValidationResult | null;
 }

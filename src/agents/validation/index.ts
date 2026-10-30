@@ -1,5 +1,7 @@
-import type { ExtractedData, TenantRules, ValidationResult } from '@/shared/types';
+import type { DuplicateMatch, ExtractedData, TenantRules, ValidationResult } from '@/shared/types';
 import { supabase } from '@/lib/supabase';
+import { findDuplicatesForInvoice } from '@/lib/duplicates';
+import { duplicateViolationMessages } from '@/shared/duplicates';
 import { searchVatIdByName } from '@/utils/businessLookup';
 import {
   allocationThreshold,
@@ -220,25 +222,14 @@ export async function validateInvoice(
     warnings.push(`מספר ההקצאה ${corrected.allocation_number} אינו בן 9 ספרות — אנא ודא`);
   }
 
-  // 4. Duplicate checks
-  let duplicateFound = false;
-  if (rules.duplicateInvoiceCheck && corrected.supplier_vat_id && corrected.invoice_number) {
+  // 4. Duplicate checks: same file, same supplier + invoice number, or same supplier with
+  // near-identical total and date (see src/shared/duplicates.ts). Rejected invoices and
+  // pairs the reviewer dismissed are ignored.
+  let duplicateMatches: DuplicateMatch[] = [];
+  if (rules.duplicateInvoiceCheck) {
     try {
-      const { data: existing, error } = await supabase
-        .from('invoices')
-        .select('id')
-        .eq('client_id', tenantId)
-        // PostgreSQL JSONB querying syntax to check extracted_data or validated_data
-        .or(`extracted_data->>supplier_vat_id.eq.${corrected.supplier_vat_id},validated_data->>supplier_vat_id.eq.${corrected.supplier_vat_id}`)
-        .or(`extracted_data->>invoice_number.eq.${corrected.invoice_number},validated_data->>invoice_number.eq.${corrected.invoice_number}`)
-        .not('id', 'eq', invoiceId);
-
-      if (error) {
-        console.error('Error running duplicate check query:', error);
-      } else if (existing && existing.length > 0) {
-        duplicateFound = true;
-        ruleViolations.push(`חשבונית כפולה: מספר חשבונית ${corrected.invoice_number} עבור ספק זה כבר קיים במערכת`);
-      }
+      duplicateMatches = await findDuplicatesForInvoice(supabase, tenantId, invoiceId, corrected);
+      ruleViolations.push(...duplicateViolationMessages(duplicateMatches, corrected.invoice_number));
     } catch (err) {
       console.error('Failed to run duplicate invoice database check:', err);
     }
@@ -258,7 +249,8 @@ export async function validateInvoice(
     math_ok: mathOk,
     vat_id_ok: vatIdOk,
     fields_missing: missingFields,
-    duplicate_found: duplicateFound,
+    duplicate_found: duplicateMatches.length > 0,
+    duplicate_matches: duplicateMatches,
     rule_violations: ruleViolations,
     warnings,
     requires_manual_review: requiresManualReview,
