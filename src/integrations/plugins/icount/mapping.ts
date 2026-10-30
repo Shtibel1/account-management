@@ -76,6 +76,20 @@ export function normalizeVatId(value: string | number | null | undefined): strin
   return digits || null;
 }
 
+/**
+ * vat_id as sent to iCount: Israeli company / dealer numbers are 9 digits, so a shorter normalized id
+ * gets its leading zeros back ("51234567" -> "051234567"). Comparisons always use normalizeVatId.
+ */
+export function vatIdForApi(normalized: string): string {
+  return normalized.length < 9 ? normalized.padStart(9, '0') : normalized;
+}
+
+/** True when the VAT amount is given, or can be derived from the total and the amount before VAT. */
+export function vatKnown(invoice: ExportInvoice): boolean {
+  const { amount_before_vat: before, vat_amount: vat, total_amount: total } = invoice.data;
+  return typeof vat === 'number' || (typeof before === 'number' && typeof total === 'number');
+}
+
 export function isCreditNote(invoice: ExportInvoice): boolean {
   const d = invoice.data;
   const ref = d.total_amount ?? d.amount_before_vat;
@@ -117,6 +131,8 @@ export function invoiceProblems(invoice: ExportInvoice): string[] {
   if (!d.invoice_number?.trim()) problems.push('מספר חשבונית חסר');
   if (!d.invoice_date || !ISO_DATE.test(d.invoice_date)) problems.push('תאריך חשבונית חסר או לא תקין');
   if (!vatSplit(invoice)) problems.push('סכום לפני מע"מ חסר');
+  // Never send an expense as VAT-free just because the VAT amount was not read from the invoice.
+  else if (!vatKnown(invoice)) problems.push('סכום מע"מ חסר (ציינו 0 אם החשבונית פטורה ממע"מ)');
   if (!d.supplier_name?.trim() && !normalizeVatId(d.supplier_vat_id)) problems.push('שם ספק או ח.פ. חסרים');
   const alloc = d.allocation_number?.trim();
   if (alloc && !/^\d{1,15}$/.test(alloc)) problems.push('מספר הקצאה לא תקין');

@@ -70,12 +70,12 @@ toggle is ON by default** (`is_draft: true`; only an explicit "off" creates fina
 - **Auth**: API token (`Authorization: Bearer`, recommended) or `cid` + `user` + `pass` -> `auth/login` -> `sid` sent
   in the body. The sid is cached in memory per credentials (SHA-256 key, 20 min) and renewed once on an auth error
   (`auth_required` / `bad_auth` / ...). `pass`, `apiToken` are secret fields; `sid` is a redacted key in every log.
-- **Export** per invoice: supplier via `supplier/get_list` by `vat_id` (exact, leading zeros dropped; without a vat id
+- **Export** per invoice: supplier via `supplier/get_list` by `vat_id` (asked as the 9-digit form, then without leading zeros; matched on the normalized digits; without a vat id
   by exact name), else `supplier/add` (`supplier_name` + `vat_id`; `duplicate_*` -> looked up again). Then
   `expense/search` (supplier + `expense_doctype` + `expense_docnum`, drafts included, results re-filtered locally):
   an existing document is adopted. Then `expense/create` with `expense_type_id`, `expense_doctype`,
   `expense_docnum` = invoice number, `adv_expense: true`, `expense_sum` = amount before VAT, `expense_manual_vat` =
-  VAT (or `manual_no_vat` when VAT is 0), `invoice_date` = `vat_date`, `allocation_number`, `is_draft`, `comment`
+  VAT (or `manual_no_vat` when VAT is explicitly 0; an invoice whose VAT is unknown is blocked, never sent as VAT-free), `invoice_date` = `vat_date`, `allocation_number`, `is_draft`, `comment`
   = `invoice-scan:<invoice id>`. `expense_already_exists` -> searched again and adopted.
 - **Credit notes** (negative total): `creditDocType` (default `refund`) with absolute amounts.
 - **Expense type**: `defaultExpenseTypeId`, or (toggle) the category's account code from the account mappings is the

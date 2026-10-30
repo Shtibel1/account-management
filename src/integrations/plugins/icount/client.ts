@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { HttpResponse, PluginContext } from '@/integrations/types';
 import type { IcountConfig, IcountExpenseBody } from '@/integrations/plugins/icount/mapping';
-import { normalizeVatId } from '@/integrations/plugins/icount/mapping';
+import { normalizeVatId, vatIdForApi } from '@/integrations/plugins/icount/mapping';
 
 /**
  * iCount API v3 calls. Every call goes through ctx.http (logging, retries, redaction, URL guard).
@@ -216,9 +216,14 @@ const sameName = (a: string, b: string) => a.trim().replace(/\s+/g, ' ') === b.t
 /** Looks the supplier up by vat_id (exact, normalized), else by exact name. */
 export async function findSupplier(ctx: PluginContext<IcountConfig>, supplier: { name: string | null; vat_id: string | null }): Promise<number | null> {
   if (supplier.vat_id) {
-    const list = await getSuppliers(ctx, { vat_id: supplier.vat_id });
-    const hit = list.find((s) => s.vat_id === supplier.vat_id);
-    if (hit) return hit.supplier_id;
+    // iCount may keep the id with or without its leading zeros: ask with the 9-digit form first, then
+    // with the bare digits. Matches are always checked on the normalized value.
+    const forms = [...new Set([vatIdForApi(supplier.vat_id), supplier.vat_id])];
+    for (const form of forms) {
+      const list = await getSuppliers(ctx, { vat_id: form });
+      const hit = list.find((s) => s.vat_id === supplier.vat_id);
+      if (hit) return hit.supplier_id;
+    }
     return null; // a different supplier with the same name is not this one
   }
   if (supplier.name) {
@@ -240,8 +245,8 @@ export async function resolveSupplier(
 ): Promise<number> {
   const found = knownMissing ? null : await findSupplier(ctx, supplier);
   if (found !== null) return found;
-  const params: Record<string, unknown> = { supplier_name: supplier.name ?? `ספק ${supplier.vat_id}` };
-  if (supplier.vat_id) params.vat_id = supplier.vat_id;
+  const params: Record<string, unknown> = { supplier_name: supplier.name ?? `ספק ${supplier.vat_id ? vatIdForApi(supplier.vat_id) : ""}`.trim() };
+  if (supplier.vat_id) params.vat_id = vatIdForApi(supplier.vat_id);
   try {
     const out = await icountCall<{ supplier_id?: unknown }>(ctx, 'supplier/add', params, { operation: 'supplier_add', write: true });
     const id = toInt(out.supplier_id);
