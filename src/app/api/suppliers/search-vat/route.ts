@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { searchVatIdByName } from '@/utils/businessLookup';
 import { requireUser } from '@/lib/auth';
-import { isGenericSupplierName } from '@/shared/supplierRules';
+import { isSpecificSupplierName } from '@/shared/supplierNameMatch';
 
 export async function GET(request: Request) {
   // No tenant data involved (public registrar lookup), but it costs outbound calls: users only.
@@ -14,8 +14,9 @@ export async function GET(request: Request) {
   if (!name) {
     return NextResponse.json({ error: 'חסר שם ספק לחיפוש' }, { status: 400 });
   }
-  // The catch-all supplier (ספקים שונים) is not a business: never look it up
-  if (isGenericSupplierName(name)) {
+  // The catch-all supplier (ספקים שונים) and generic one-word names ("חברה", "דלק") are not one
+  // business: never look them up (any hit would be an unrelated company)
+  if (!isSpecificSupplierName(name)) {
     return NextResponse.json({ vatId: null });
   }
 

@@ -210,6 +210,7 @@ export interface Invoice {
   returned_by?: string | null;
   resubmitted_invoice_id?: string | null; // on the returned invoice: the corrected document
   resubmission_of?: string | null;        // on the corrected document: the returned invoice
+  reject_reason?: string | null;          // optional reason given with "לא מאושר" (migration 20261030183000_qa2_ui2)
   // Processing queue (src/lib/processingQueue.ts; migration 20261030161000_qa_pipeline)
   processing_run_id?: string | null;
   processing_started_at?: string | null;

@@ -1,13 +1,16 @@
-import { isGenericSupplierName } from '@/shared/supplierRules';
+import { isSpecificSupplierName, pickRegistrarMatch, type RegistrarRecord } from '@/shared/supplierNameMatch';
+
+/** Per-request cap: the lookup runs inside the review form and the pipeline (each HTTP request is cut at ~28s). */
+const REGISTRAR_TIMEOUT_MS = 6000;
 
 /**
  * Helper function to look up the official VAT ID (ח.פ. / מספר תאגיד) 
  * from the Israeli Government open data portal (data.gov.il) CKAN API.
  */
 export async function searchVatIdByName(supplierName: string): Promise<string | null> {
-  if (!supplierName || supplierName.trim().length < 2) return null;
-  // A placeholder like "ספקים שונים" is not a business: any registrar hit would be unrelated
-  if (isGenericSupplierName(supplierName)) return null;
+  // A placeholder ("ספקים שונים") or a generic word ("חברה", "דלק") is not one business: any
+  // registrar hit would be an unrelated company whose number gets autofilled as the supplier's
+  if (!isSpecificSupplierName(supplierName)) return null;
   
   const query = supplierName.trim();
   
@@ -31,7 +34,7 @@ export async function searchVatIdByName(supplierName: string): Promise<string | 
     // Query Gov.il APIs concurrently
     const responses = await Promise.all(
       endpoints.map(url => 
-        fetch(url)
+        fetch(url, { signal: AbortSignal.timeout(REGISTRAR_TIMEOUT_MS) })
           .then(async r => {
             if (!r.ok) {
               console.warn(`[businessLookup] Gov.il request failed: ${url} status ${r.status}`);
@@ -46,65 +49,15 @@ export async function searchVatIdByName(supplierName: string): Promise<string | 
       )
     );
     
-    const clean = (s: string) => 
-      s.replace(/["'׳״()~,\-\/]|בע.?מ|ע.?ר|בע"מ|בע~מ|למיקוד|בפירוק|LTD|L\.T\.D\.|שותפות|מוגבלת/gi, '')
-       .replace(/\s+/g, ' ')
-       .trim();
-
-    const isMatch = (q: string, c: string) => {
-      const cleanQ = clean(q).toLowerCase();
-      const cleanC = clean(c).toLowerCase();
-      if (!cleanQ || !cleanC) return false;
-
-      // 1. Substring matches
-      if (cleanC.includes(cleanQ) || cleanQ.includes(cleanC)) return true;
-
-      // 2. Token overlap matches
-      const wordsQ = cleanQ.split(/\s+/).filter(w => w.length >= 2);
-      const wordsC = cleanC.split(/\s+/).filter(w => w.length >= 2);
-      if (wordsQ.length === 0 || wordsC.length === 0) return false;
-
-      const intersect = wordsQ.filter(w => wordsC.includes(w));
-      const ratio = intersect.length / Math.min(wordsQ.length, wordsC.length);
-      if (ratio >= 0.6) return true;
-
-      // 3. First 2 words match exactly
-      if (wordsQ.length >= 2 && wordsC.length >= 2) {
-        if (wordsQ[0] === wordsC[0] && wordsQ[1] === wordsC[1]) return true;
-      }
-
-      return false;
-    };
-
-    // 1. Parse Companies
-    const companyRecords = responses[0]?.result?.records || [];
-    for (const rec of companyRecords) {
-      const name = rec['שם חברה'] || '';
-      const num = rec['מספר חברה'];
-      if (name && num && isMatch(query, name)) {
-        return String(num).trim();
-      }
-    }
-
-    // 2. Parse Partnerships
-    const partnershipRecords = responses[1]?.result?.records || [];
-    for (const rec of partnershipRecords) {
-      const name = rec['שם שותפות'] || '';
-      const num = rec['מספר שותפות'];
-      if (name && num && isMatch(query, name)) {
-        return String(num).trim();
-      }
-    }
-
-    // 3. Parse Non-Profits (Amutot)
-    const nonProfitRecords = responses[2]?.result?.records || [];
-    for (const rec of nonProfitRecords) {
-      const name = rec['שם עמותה בעברית'] || '';
-      const num = rec['מספר עמותה'];
-      if (name && num && isMatch(query, name)) {
-        return String(num).trim();
-      }
-    }
+    // A record must be the queried business as a whole, and an ambiguous query (several different
+    // businesses match and none is named exactly like it) gives nothing (see pickRegistrarMatch)
+    const records: RegistrarRecord[] = [
+      ...(responses[0]?.result?.records || []).map((rec: any) => ({ name: rec['שם חברה'], number: rec['מספר חברה'] })),
+      ...(responses[1]?.result?.records || []).map((rec: any) => ({ name: rec['שם שותפות'], number: rec['מספר שותפות'] })),
+      ...(responses[2]?.result?.records || []).map((rec: any) => ({ name: rec['שם עמותה בעברית'], number: rec['מספר עמותה'] })),
+    ];
+    const picked = pickRegistrarMatch(query, records);
+    if (picked) return picked;
 
     // No record whose name matches: return nothing. (The top full-text hit for a name that matches
     // no record is an unrelated business, and its number would be autofilled as the supplier's.)

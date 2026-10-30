@@ -8,18 +8,20 @@ import { approveInvoice, deleteInvoice, reapplySupplierRules, rejectInvoice, reo
 import { allocationThreshold, isAllocationRequired } from '@/shared/allocation';
 import { isAllocationNumberAcceptable } from '@/shared/approvalValidation';
 import { APPROVABLE_STATUSES, REJECTABLE_STATUSES, REOPENABLE_STATUSES } from '@/shared/invoiceStatus';
-import { findSupplierRule, isGenericSupplierName, normalizeVatId, VARIOUS_SUPPLIERS_ACCOUNT } from '@/shared/supplierRules';
+import { findSupplierRule, normalizeVatId, VARIOUS_SUPPLIERS_ACCOUNT } from '@/shared/supplierRules';
 import { accountCodeError, mappingDbErrorMessage } from '@/shared/mappingValidation';
 import { VAT_RATE_WARNING_PREFIX, vatRateWarning } from '@/shared/vatRate';
 import { dismissDuplicateInFlags } from '@/shared/duplicates';
 import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
 import { checkLineItemsSum, hasMixedVat, isLineItemWarning, lineItemWarnings, normalizeLineItems } from '@/shared/lineItems';
 import { createClient } from '@/utils/supabase/client';
+import { isSpecificSupplierName } from '@/shared/supplierNameMatch';
 import { LineItemsTable } from '@/components/SplitPane/LineItemsTable';
 import clsx from 'clsx';
 import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark, Zap, Undo2, RotateCcw, Trash2 } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
 import { DuplicateAlert } from './DuplicateAlert';
+import { RejectDialog } from '@/components/SplitPane/RejectDialog';
 import { toUserErrorMessage } from '@/shared/processing';
 
 interface Props {
@@ -42,6 +44,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
   const [saving, setSaving] = useState(false);
   const [activeFormTab, setActiveFormTab] = useState<'invoice' | 'bank'>('invoice');
   const [rejecting, setRejecting] = useState(false);
+  const [showRejectDialog, setShowRejectDialog] = useState(false);
   const [errorAction, setErrorAction] = useState<'retry' | 'delete' | 'reopen' | null>(null);
   const [error, setError] = useState('');
   const [categories, setCategories] = useState<string[]>([]);
@@ -142,8 +145,9 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
 
   // Dynamic Gov.il API search on supplier name change (with debounce)
   useEffect(() => {
-    // The catch-all placeholder (ספקים שונים) is not a business: a registrar hit would be an unrelated company
-    if (!data.supplier_name || data.supplier_name.trim().length < 2 || isGenericSupplierName(data.supplier_name)) {
+    // The catch-all placeholder (ספקים שונים) and generic one-word names ("חברה", "דלק") are not one
+    // business: a registrar hit would be an unrelated company
+    if (!isSpecificSupplierName(data.supplier_name)) {
       setWebSearchVat(null);
       return;
     }
@@ -175,7 +179,8 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
     return () => clearTimeout(delayDebounce);
   }, [data.supplier_name, initial?.supplier_name, initial?.validation_flags?.vat_id_sources?.web_search]);
 
-  // Autofill VAT ID if web search finds a result and the field is currently blank
+  // Autofill VAT ID if web search finds a result and the field is currently blank. An existing VAT ID
+  // is never replaced automatically: the sources panel offers the registrar's number with a confirm.
   useEffect(() => {
     if (!webSearchVat) {
       setLastAutofilledVat(null);
@@ -456,14 +461,18 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
     }
   };
 
-  const handleReject = async () => {
+  // "לא מאושר" opens a confirmation (with an optional reason); the dialog calls confirmReject
+  const handleReject = () => { setError(''); setShowRejectDialog(true); };
+  const confirmReject = async (reason: string) => {
     setRejecting(true); setError('');
     try {
-      await rejectInvoice(invoice.id);
+      await rejectInvoice(invoice.id, reason);
+      setShowRejectDialog(false);
       toast('החשבונית סומנה כלא מאושרת', 'info');
       onApproved();
-    } catch (e: any) {
-      setError(e.message);
+    } catch (e) {
+      setShowRejectDialog(false);
+      setError(e instanceof Error ? e.message : 'שגיאה בסימון החשבונית כלא מאושרת');
     } finally {
       setRejecting(false);
     }
@@ -555,10 +564,13 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
     isTotalAmountEmpty;
 
   return (
-    <div className="h-full flex flex-col" style={{ direction: 'rtl' }}>
+    // Mobile: the form flows with the page (no fixed-height box) and the action bar sticks to the
+    // bottom of the screen. From lg it fills its pane: header and action bar stay put, and the
+    // alerts scroll together with the fields, so banners never squeeze the fields into a sliver.
+    <div className="lg:h-full flex flex-col" style={{ direction: 'rtl' }}>
       {/* Header */}
       <div className="px-5 py-4 border-b border-slate-100 bg-white">
-        <h2 className="font-semibold text-slate-900 truncate">{invoice.file_name}</h2>
+        <h2 className="font-semibold text-slate-900 truncate"><bdi>{invoice.file_name}</bdi></h2>
         {invoice.ai_confidence != null && (
           <div className="flex items-center gap-2 mt-1.5">
             <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
@@ -577,6 +589,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
         )}
       </div>
 
+      <div className="lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
       {/* Alerts */}
       {flags?.auto_approved && (
         <div className="mx-4 mt-3 flex items-center gap-2.5 p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-sm text-emerald-800">
@@ -615,7 +628,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
       ))}
 
       {/* Tab Switcher Buttons */}
-      <div className="px-4 py-2 bg-slate-50/50 border-b border-slate-100 flex gap-2 shrink-0">
+      <div className="px-4 py-2 bg-slate-50 border-b border-slate-100 flex gap-2 shrink-0 lg:sticky lg:top-0 lg:z-10">
         <button
           type="button"
           onClick={() => setActiveFormTab('invoice')}
@@ -652,7 +665,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
       </div>
 
       {/* Fields */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div className="p-4 space-y-4">
         {activeFormTab === 'invoice' && (
           <div className="space-y-4 animate-in fade-in duration-200">
             <Field label="שם ספק" error={fieldError('supplier_name')} fieldKey="supplier_name" onFieldFocus={onFieldFocus} confidence={confidenceFor('supplier_name')}
@@ -850,7 +863,22 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
                             {isSearchingWeb ? (
                               <span className="text-slate-400 animate-pulse">מחפש...</span>
                             ) : hasWebSearchVat ? (
-                              webSearchVat
+                              <span className="flex items-center gap-1.5">
+                                {webSearchVat}
+                                {!isReadOnly && !!data.supplier_vat_id &&
+                                  normalizeVatId(webSearchVat) !== normalizeVatId(data.supplier_vat_id) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (!window.confirm(`להחליף את ח.פ. ${data.supplier_vat_id} במספר ${webSearchVat} שנמצא ברשם לפי שם הספק?`)) return;
+                                      set('supplier_vat_id', webSearchVat);
+                                    }}
+                                    className="font-sans text-[10px] text-blue-700 bg-blue-50 border border-blue-200 hover:bg-blue-100 px-1.5 py-0.5 rounded"
+                                  >
+                                    השתמש
+                                  </button>
+                                )}
+                              </span>
                             ) : (
                               "לא נמצא בחיפוש"
                             )}
@@ -1069,10 +1097,10 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
           </div>
         )}
       </div>
-
+      </div>
 
       {/* Footer */}
-      <div className="px-4 py-4 border-t border-slate-100 bg-white">
+      <div className="px-4 py-4 border-t border-slate-100 bg-white sticky bottom-0 z-10 lg:static shadow-[0_-4px_12px_-8px_rgba(15,23,42,0.25)] lg:shadow-none">
         {error && <p className="text-sm text-red-600 mb-3">{error}</p>}
         
         {isReadOnly ? (
@@ -1088,9 +1116,16 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
               </span>
             )}
             {isRejected && (
-              <span className="text-rose-700 bg-rose-50 border-rose-200 flex items-center gap-2 px-3 py-1 rounded-full border">
-                <XCircle className="h-4 w-4" /> חשבונית זו לא אושרה
-              </span>
+              <div className="flex flex-col items-center gap-2">
+                <span className="text-rose-700 bg-rose-50 border-rose-200 flex items-center gap-2 px-3 py-1 rounded-full border">
+                  <XCircle className="h-4 w-4" /> חשבונית זו לא אושרה
+                </span>
+                {invoice.reject_reason && (
+                  <p className="text-xs font-normal text-slate-600 text-center break-words max-w-full" dir="auto">
+                    סיבה: {invoice.reject_reason}
+                  </p>
+                )}
+              </div>
             )}
             {isError && (
               <div className="w-full flex flex-col items-center gap-3">
@@ -1184,6 +1219,15 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
           </div>
         )}
       </div>
+
+      {showRejectDialog && (
+        <RejectDialog
+          fileName={invoice.file_name}
+          busy={rejecting}
+          onConfirm={confirmReject}
+          onClose={() => setShowRejectDialog(false)}
+        />
+      )}
     </div>
   );
 }

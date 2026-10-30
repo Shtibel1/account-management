@@ -179,9 +179,10 @@ async function invoiceAction(id: string, action: 'reject' | 'retry' | 'reopen', 
   return body as { success: true; status: string };
 }
 
-/** "לא מאושרת": invoice in review, or a failed document. */
-export function rejectInvoice(id: string) {
-  return invoiceAction(id, 'reject', 'שגיאה בסימון החשבונית כלא מאושרת');
+/** "לא מאושרת": invoice in review, or a failed document, with an optional reason. */
+export function rejectInvoice(id: string, reason?: string) {
+  const trimmed = reason?.trim();
+  return invoiceAction(id, 'reject', 'שגיאה בסימון החשבונית כלא מאושרת', trimmed ? { reason: trimmed } : {});
 }
 
 /** Failed document: back to processing, then (fire-and-forget) re-runs the pipeline. */

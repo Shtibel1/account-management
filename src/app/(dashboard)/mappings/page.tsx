@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import { createClient } from '@/utils/supabase/client';
 import { AccountMapping, Client, MappingType, SupplierAutomationStatus } from '@/shared/types';
 import { Button } from '@/components/ui/Button';
@@ -18,6 +18,7 @@ import {
 } from '@/shared/mappingValidation';
 import { Plus, Trash2, Info, Upload, Loader2, X, ChevronLeft, ChevronRight, Users, Tag, Pencil, Zap } from 'lucide-react';
 import clsx from 'clsx';
+import { clientDisplayNames } from '@/shared/clientLabels';
 
 function getPageNumbers(currentPage: number, totalPages: number) {
   const pages: (number | string)[] = [];
@@ -43,6 +44,7 @@ export default function MappingsPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   const [clients, setClients] = useState<Client[]>([]);
+  const clientLabels = useMemo(() => clientDisplayNames(clients), [clients]);
   const [selectedClient, setSelectedClient] = useState<string>('');
   const [mappings, setMappings] = useState<AccountMapping[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -483,7 +485,7 @@ export default function MappingsPage() {
           onChange={(e) => setSelectedClient(e.target.value)}
           className="input-base max-w-xs"
         >
-          {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          {clients.map((c) => <option key={c.id} value={c.id}>{clientLabels.get(c.id) ?? c.name}</option>)}
         </select>
       </div>
 

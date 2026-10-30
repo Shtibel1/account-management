@@ -55,19 +55,20 @@ export function LineItemsTable({ items, amountBeforeVat, totalAmount, onChange }
         <ListOrdered className="h-4 w-4 text-slate-500 shrink-0" />
         <span>שורות פריטים</span>
         <span className="text-xs font-normal text-slate-500">({items.length})</span>
-        {sumCheck.ok === true && (
+        {/* "Matches" only when the sum matches and every row is quantity x price; otherwise the badges say what is wrong */}
+        {sumCheck.ok === true && rowMismatches.length === 0 && (
           <span className="flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">
             <CheckCircle2 className="h-3 w-3" /> תואם
           </span>
         )}
         {sumCheck.ok === false && (
           <span className="flex items-center gap-1 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full">
-            <AlertTriangle className="h-3 w-3" /> לא תואם
+            <AlertTriangle className="h-3 w-3" /> הסכום לא תואם
           </span>
         )}
         {rowMismatches.length > 0 && (
           <span className="flex items-center gap-1 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full">
-            <AlertTriangle className="h-3 w-3" /> {rowMismatches.length === 1 ? 'שורה אחת' : `${rowMismatches.length} שורות`} לא תואמות לכמות × מחיר
+            <AlertTriangle className="h-3 w-3" /> {rowMismatches.length === 1 ? 'שורה אחת לא תואמת' : `${rowMismatches.length} שורות לא תואמות`} לכמות × מחיר
           </span>
         )}
         {mixedVat && (
@@ -177,7 +178,7 @@ export function LineItemsTable({ items, amountBeforeVat, totalAmount, onChange }
               סכום השורות: <span className="font-mono font-semibold text-slate-800">₪{fmt(sumCheck.sum)}</span>
             </span>
             {sumCheck.ok === true && sumCheck.matched && (
-              <span className="text-emerald-700">תואם ל{BASIS_LABEL[sumCheck.matched]}</span>
+              <span className="text-emerald-700">תואם {BASIS_LABEL[sumCheck.matched]}</span>
             )}
             {sumCheck.ok === false && (
               <span className="text-amber-700">

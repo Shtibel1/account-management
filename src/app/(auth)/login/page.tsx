@@ -110,9 +110,10 @@ function LoginForm() {
         </FormMessage>
       ) : (
         <form onSubmit={mode === 'password' ? handlePassword : handleMagic} className="space-y-4">
-          <label className="block space-y-1.5">
-            <span className="text-sm font-medium text-slate-700">אימייל</span>
+          <div className="space-y-1.5">
+            <label htmlFor="login-email" className="block text-sm font-medium text-slate-700">אימייל</label>
             <input
+              id="login-email"
               type="email"
               required
               autoComplete="email"
@@ -122,12 +123,13 @@ function LoginForm() {
               className="input-base text-left"
               placeholder="name@office.co.il"
             />
-          </label>
+          </div>
 
           {mode === 'password' && (
-            <label className="block space-y-1.5">
-              <span className="text-sm font-medium text-slate-700">סיסמה</span>
+            <div className="space-y-1.5">
+              <label htmlFor="login-password" className="block text-sm font-medium text-slate-700">סיסמה</label>
               <input
+                id="login-password"
                 type="password"
                 required
                 autoComplete="current-password"
@@ -136,7 +138,7 @@ function LoginForm() {
                 onChange={(e) => setPassword(e.target.value)}
                 className="input-base text-left"
               />
-            </label>
+            </div>
           )}
 
           <button

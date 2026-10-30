@@ -9,6 +9,7 @@ import { useFeatureFlag } from '@/components/FeatureFlags/useFeatureFlags';
 import { useSession } from '@/components/Auth/SessionContext';
 import { Loader2, RefreshCw } from 'lucide-react';
 import { useProcessingTicks } from '@/components/Processing/ProcessingStatus';
+import { clientDisplayNames } from '@/shared/clientLabels';
 
 const STATUS_LABELS: Record<string, string> = {
   review:   'לבדיקה',
@@ -34,13 +35,11 @@ export default function ReviewPage() {
     if (!silent) setRefreshing(true);
     
     // Fetch client list to map client_id to client names
+    // (same-named clients get their VAT account / creation date so the filter options differ)
     const { data: clientsData } = await supabase
       .from('clients')
-      .select('id, name');
-    const clientMap: Record<string, string> = {};
-    (clientsData || []).forEach((c) => {
-      clientMap[c.id] = c.name;
-    });
+      .select('id, name, vat_account, created_at');
+    const clientMap: Record<string, string> = Object.fromEntries(clientDisplayNames(clientsData ?? []));
     setClients(clientMap);
 
     const { data } = await supabase

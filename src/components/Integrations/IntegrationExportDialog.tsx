@@ -145,7 +145,7 @@ export function IntegrationExportDialog({
               </Button>
               {result?.file && (
                 <Button variant="secondary" onClick={() => downloadBase64File(result.file!)}>
-                  <Download className="h-4 w-4" /> הורד {result.file.fileName}
+                  <Download className="h-4 w-4" /> הורד <bdi>{result.file.fileName}</bdi>
                 </Button>
               )}
               {result && !result.dryRun && plugin?.kind === 'api' && (

@@ -80,7 +80,7 @@ export function DuplicateAlert({ invoiceId, flags, readOnly, onDismissed }: Prop
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 text-red-800 font-medium hover:underline underline-offset-2 truncate"
             >
-              <span className="truncate">{match.file_name || 'חשבונית קיימת'}</span>
+              <bdi className="truncate">{match.file_name || 'חשבונית קיימת'}</bdi>
               <ExternalLink className="h-3 w-3 shrink-0" />
             </Link>
             <MatchDetails match={match} />

@@ -370,6 +370,8 @@ export interface RunValidationInput {
   /** Page count of the file (a split suggestion for another page count is stale). */
   pageCount: number | null;
   splitDetectionFailed: boolean;
+  /** OCR words of the file (lets validation check values against the document). */
+  ocrWords?: OcrWord[];
 }
 
 export interface RunValidationOutput {
@@ -386,7 +388,7 @@ export async function applyRunValidation(input: RunValidationInput): Promise<Run
     input.tenantId,
     input.extractedData,
     input.tenantRules,
-    { ocrText: input.rawOcrText }
+    { ocrText: input.rawOcrText, ocrWords: input.ocrWords }
   );
   // A file that holds several invoices must not be auto-approved as one: force review and
   // store the suggestion so the review screen can pre-fill the split dialog.
@@ -572,6 +574,7 @@ export async function finalizeQueuedExtraction(input: QueuedExtractionInput): Pr
     splitSuggestion: input.splitSuggestion,
     pageCount: input.ocrMetadata.pageCount ?? null,
     splitDetectionFailed: input.splitDetectionFailed,
+    ocrWords: input.ocrWords,
   });
   const route = routeAfterValidation(validation.validationResult, input.retryCount);
   if (route === 'retry') return { outcome: 'retry' };
@@ -914,6 +917,7 @@ const graph = new StateGraph<any>({
       splitSuggestion: state.splitSuggestion ?? null,
       pageCount: state.ocrMetadata?.pageCount ?? null,
       splitDetectionFailed: (state as PipelineRunState).splitDetectionFailed === true,
+      ocrWords: state.ocrWords,
     });
   })
 

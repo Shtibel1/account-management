@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/utils/supabase/client';
 import type { Client } from '@/shared/types';
+import { clientDisplayNames } from '@/shared/clientLabels';
 
 /**
  * The client chosen via ?clientId= (falls back to the first client). Changing it updates the URL so
@@ -46,11 +47,13 @@ export function ClientSelect({
   value: string;
   onChange: (id: string) => void;
 }) {
+  // Same-named clients get their VAT account / creation date so the options differ
+  const labels = clientDisplayNames(clients);
   return (
-    <select className="input-base w-56" value={value} onChange={(e) => onChange(e.target.value)} aria-label="לקוח">
+    <select className="input-base w-56 max-w-full" value={value} onChange={(e) => onChange(e.target.value)} aria-label="לקוח">
       {clients.length === 0 && <option value="">אין לקוחות</option>}
       {clients.map((c) => (
-        <option key={c.id} value={c.id}>{c.name}</option>
+        <option key={c.id} value={c.id}>{labels.get(c.id) ?? c.name}</option>
       ))}
     </select>
   );

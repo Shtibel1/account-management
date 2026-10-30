@@ -202,15 +202,16 @@ export function IntegrationLogs({
             <option value="error">שגיאה</option>
           </select>
         </div>
+        {/* Full width on phones (a fixed 288px input overflowed the card), fixed width from sm */}
         <form
-          className="flex items-center gap-2"
+          className="flex items-center gap-2 w-full min-w-0 sm:w-auto"
           onSubmit={(e) => { e.preventDefault(); onFiltersChange({ ...filters, invoiceId: invoiceDraft.trim() }); }}
         >
           <label className="text-xs font-semibold text-slate-600" htmlFor="log-invoice">חשבונית:</label>
           <input
             id="log-invoice" dir="ltr" value={invoiceDraft} onChange={(e) => setInvoiceDraft(e.target.value)}
             placeholder="מזהה חשבונית"
-            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 w-72 font-mono text-left"
+            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 flex-1 min-w-0 sm:flex-none sm:w-72 font-mono text-left"
           />
         </form>
         {filters.correlationId && (
@@ -237,6 +238,17 @@ export function IntegrationLogs({
       </div>
 
       <div className="card overflow-hidden">
+        {/* The empty state sits outside the wide (horizontally scrolling) table, so it is fully visible on phones */}
+        {logs.length === 0 ? (
+          <div className="p-12 text-center text-slate-400 text-sm">
+            {loading ? <Loader2 className="h-6 w-6 animate-spin inline" aria-label="טוען" /> : (
+              <span className="inline-flex flex-col items-center gap-2">
+                <ScrollText className="h-8 w-8 text-slate-300" />
+                אין רשומות ביומן{hasFilters ? ' התואמות את הסינון' : ''}
+              </span>
+            )}
+          </div>
+        ) : (
         <div className="overflow-x-auto">
         <table className="w-full min-w-[720px] text-sm">
           <thead>
@@ -247,18 +259,7 @@ export function IntegrationLogs({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {logs.length === 0 ? (
-              <tr>
-                <td colSpan={9} className="p-12 text-center text-slate-400">
-                  {loading ? <Loader2 className="h-6 w-6 animate-spin inline" /> : (
-                    <span className="inline-flex flex-col items-center gap-2">
-                      <ScrollText className="h-8 w-8 text-slate-300" />
-                      אין רשומות ביומן{hasFilters ? ' התואמות את הסינון' : ''}
-                    </span>
-                  )}
-                </td>
-              </tr>
-            ) : logs.map((log) => (
+            {logs.map((log) => (
               <tr key={log.id} onClick={() => setOpenId(log.id)} className="hover:bg-slate-50/60 cursor-pointer">
                 <td className="p-3 text-slate-500 tabular-nums whitespace-nowrap">{format(new Date(log.created_at), 'dd/MM HH:mm:ss')}</td>
                 <td className="p-3 text-slate-700">{pluginName(log.plugin_id)}</td>
@@ -276,6 +277,7 @@ export function IntegrationLogs({
           </tbody>
         </table>
         </div>
+        )}
       </div>
 
       {nextBefore && (

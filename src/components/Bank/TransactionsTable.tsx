@@ -182,7 +182,7 @@ export function TransactionsTable({
                   <td className="px-4 py-3 text-xs">
                     {invoice ? (
                       <Link href={`/review/${invoice.id}`} className="text-blue-600 hover:underline">
-                        {invoice.supplier_name || invoice.file_name}
+                        <bdi>{invoice.supplier_name || invoice.file_name}</bdi>
                         {invoice.invoice_number && <span className="text-slate-400"> · {invoice.invoice_number}</span>}
                       </Link>
                     ) : t.match_status === 'unmatched' && isDebit && candidateCount > 0 ? (
