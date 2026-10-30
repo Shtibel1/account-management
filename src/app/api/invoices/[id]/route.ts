@@ -4,7 +4,7 @@ import { requireClientAccess, requireInvoiceAccess } from '@/lib/auth';
 import { isClientStorageFileUrl } from '@/lib/ingestHelpers';
 import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
 import { dbErrorResponse, readJsonObject, transitionInvoice } from '@/lib/invoiceTransitions';
-import { canTransition, DELETABLE_STATUSES, transitionRefusedMessage } from '@/shared/invoiceStatus';
+import { canTransition, DELETABLE_STATUSES, isInvoiceStatus, STATUS_LABELS, transitionRefusedMessage } from '@/shared/invoiceStatus';
 import type { InvoiceStatus } from '@/shared/types';
 
 /** Columns the client may not set through PATCH. */
@@ -66,7 +66,11 @@ export async function PATCH(
       // PATCH may only make the plain "reject" transition (src/shared/invoiceStatus.ts).
       if (!canTransition(current, body.status, 'reject')) {
         return NextResponse.json(
-          { error: `לא ניתן לשנות את סטטוס החשבונית מ"${current}" ל"${String(body.status)}" בעדכון ישיר` },
+          {
+            error: `לא ניתן לשנות את סטטוס החשבונית מ"${STATUS_LABELS[current] ?? current}" ל"${
+              isInvoiceStatus(body.status) ? STATUS_LABELS[body.status] : 'סטטוס לא מוכר'
+            }" בעדכון ישיר`,
+          },
           { status: 409 }
         );
       }

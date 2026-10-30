@@ -7,7 +7,10 @@
 --    a) an exported invoice is final: its status only changes through reopen_invoice() below
 --       (owner-only in the API, logged) - re-approving it no longer lets it be exported twice;
 --    b) signed-in browser sessions (role authenticated/anon, i.e. PostgREST with the user's JWT)
---       may not change status / reviewed_at / exported_at / validated_data / ai_confidence directly.
+--       may not change status / reviewed_at / exported_at / validated_data / ai_confidence directly,
+--       may only insert invoices in 'processing', and may not delete invoices (the app never does
+--       any of these from the browser; otherwise the RLS policy would let a user insert an
+--       'approved' row with unchecked data and export it).
 --       Those go through the API routes (approve / reject / retry / reopen / export), which validate
 --       the data and the transition (src/shared/invoiceStatus.ts) and use the service role.
 -- 3. invoice_status_events: audit log of reopen actions (and other explicit status actions).
@@ -102,7 +105,32 @@ create or replace function public.invoices_status_guard()
 returns trigger
 language plpgsql
 as $$
+declare
+  v_browser boolean := current_user in ('authenticated', 'anon');
 begin
+  if tg_op = 'INSERT' then
+    -- Uploads go through the API (service role). A browser session may only create a document
+    -- waiting to be processed, never an already approved / exported / reviewed one.
+    if v_browser
+       and (new.status::text <> 'processing'
+            or new.reviewed_at is not null
+            or new.exported_at is not null) then
+      raise exception 'invoice_status_api_only: new invoices start in processing'
+        using errcode = 'P0001';
+    end if;
+    return new;
+  end if;
+
+  if tg_op = 'DELETE' then
+    -- Only failed documents are deleted, through DELETE /api/invoices/[id].
+    if v_browser then
+      raise exception 'invoice_status_api_only: invoice % is deleted through the API only', old.id
+        using errcode = 'P0001';
+    end if;
+    return old;
+  end if;
+
+  -- UPDATE
   if new.status is distinct from old.status
      and old.status::text = 'exported'
      and coalesce(current_setting('app.invoice_reopen', true), '') <> 'on' then
@@ -110,7 +138,7 @@ begin
       using errcode = 'P0001';
   end if;
 
-  if current_user in ('authenticated', 'anon')
+  if v_browser
      and (new.status is distinct from old.status
           or new.reviewed_at is distinct from old.reviewed_at
           or new.exported_at is distinct from old.exported_at
@@ -126,7 +154,7 @@ $$;
 
 drop trigger if exists invoices_status_guard on public.invoices;
 create trigger invoices_status_guard
-  before update on public.invoices
+  before insert or update or delete on public.invoices
   for each row execute function public.invoices_status_guard();
 
 -- ─────────────────────────────────────────────────────────────────────────────

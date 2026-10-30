@@ -9,6 +9,7 @@ import { requireInvoiceAccess } from '@/lib/auth';
 import { dbErrorResponse, readJsonObject } from '@/lib/invoiceTransitions';
 import { APPROVABLE_STATUSES, transitionRefusedMessage } from '@/shared/invoiceStatus';
 import { validateApproval } from '@/shared/approvalValidation';
+import { pruneFieldConfidence } from '@/shared/confidence';
 
 interface ApproveInvoiceRow extends Record<string, unknown> {
   id: string;
@@ -51,6 +52,11 @@ export async function POST(
     return NextResponse.json({ error: validation.errors.join(' · '), errors: validation.errors }, { status: 400 });
   }
   const finalData = validation.data;
+  // The payload is merged over the stored data, so a field_confidence the form dropped would come
+  // back from the stored row: keep model confidences only for fields still as the AI extracted them.
+  const confidence = pruneFieldConfidence(finalData.field_confidence, invoice.extracted_data, finalData);
+  if (confidence) finalData.field_confidence = confidence;
+  else delete finalData.field_confidence;
 
   try {
     const outcome = await finalizeApproval(id, finalData);

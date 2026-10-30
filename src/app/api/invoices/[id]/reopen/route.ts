@@ -56,7 +56,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         return NextResponse.json({ error: 'החשבונית שונתה בינתיים ואינה ניתנת לפתיחה מחדש' }, { status: 409 });
       }
       if (error.code === 'PGRST202' || error.code === '42883') {
-        return NextResponse.json({ error: 'פתיחה מחדש אינה זמינה עדיין (נדרשת עדכון מסד הנתונים)' }, { status: 503 });
+        return NextResponse.json({ error: 'פתיחה מחדש אינה זמינה עדיין (נדרש עדכון של מסד הנתונים)' }, { status: 503 });
       }
       return dbErrorResponse(error, 'שגיאה בפתיחת החשבונית מחדש');
     }

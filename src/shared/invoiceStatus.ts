@@ -9,7 +9,7 @@ import type { InvoiceStatus } from '@/shared/types';
 //                processing (split) | error (pipeline)
 //   approved   → exported (export) | returned (return) | review (reopen)
 //   rejected   → returned (return) | review (reopen)
-//   error      → processing (retry) | rejected (reject) | returned (return)
+//   error      → processing (retry | split) | rejected (reject) | returned (return)
 //   returned   → review (reopen)
 //   exported   → review (reopen, office owner only, logged) - otherwise final
 
@@ -31,7 +31,7 @@ export const INVOICE_TRANSITIONS: Readonly<Record<InvoiceStatus, Partial<Record<
   review: { approved: ['approve'], rejected: ['reject'], returned: ['return'], processing: ['split'], error: ['pipeline'] },
   approved: { exported: ['export'], returned: ['return'], review: ['reopen'] },
   rejected: { returned: ['return'], review: ['reopen'] },
-  error: { processing: ['retry'], rejected: ['reject'], returned: ['return'] },
+  error: { processing: ['retry', 'split'], rejected: ['reject'], returned: ['return'] },
   returned: { review: ['reopen'] },
   exported: { review: ['reopen'] },
 };
@@ -58,6 +58,8 @@ export const APPROVABLE_STATUSES: readonly InvoiceStatus[] = sourceStatuses('app
 export const REJECTABLE_STATUSES: readonly InvoiceStatus[] = sourceStatuses('rejected', 'reject');
 export const RETRYABLE_STATUSES: readonly InvoiceStatus[] = sourceStatuses('processing', 'retry');
 export const REOPENABLE_STATUSES: readonly InvoiceStatus[] = sourceStatuses('review', 'reopen');
+/** A multi-document PDF can be split while in review, or after its processing failed. */
+export const SPLITTABLE_STATUSES: readonly InvoiceStatus[] = sourceStatuses('processing', 'split');
 /** Failed documents may be deleted outright (nothing was posted or reviewed). */
 export const DELETABLE_STATUSES: readonly InvoiceStatus[] = ['error'];
 
@@ -77,7 +79,7 @@ export const STATUS_LABELS: Readonly<Record<InvoiceStatus, string>> = {
 };
 
 /** Hebrew explanation for a refused transition (409). */
-export function transitionRefusedMessage(action: 'approve' | 'reject' | 'retry' | 'reopen' | 'delete', status: unknown): string {
+export function transitionRefusedMessage(action: 'approve' | 'reject' | 'retry' | 'reopen' | 'delete' | 'split', status: unknown): string {
   const label = isInvoiceStatus(status) ? STATUS_LABELS[status] : 'לא ידוע';
   if (action === 'approve') {
     if (status === 'exported') return 'החשבונית כבר יוצאה להנהלת החשבונות ולא ניתן לאשר אותה שוב';
@@ -85,6 +87,6 @@ export function transitionRefusedMessage(action: 'approve' | 'reject' | 'retry' 
     if (status === 'processing') return 'החשבונית עדיין בעיבוד - יש להמתין לסיום העיבוד';
     if (status === 'error') return 'עיבוד החשבונית נכשל - יש לעבד אותה מחדש לפני אישור';
   }
-  const verb = { approve: 'לאשר', reject: 'לסמן כלא מאושרת', retry: 'לעבד מחדש', reopen: 'לפתוח מחדש', delete: 'למחוק' }[action];
+  const verb = { approve: 'לאשר', reject: 'לסמן כלא מאושרת', retry: 'לעבד מחדש', reopen: 'לפתוח מחדש', delete: 'למחוק', split: 'לפצל' }[action];
   return `לא ניתן ${verb} חשבונית בסטטוס "${label}"`;
 }

@@ -4,6 +4,7 @@ import { runOrchestrationPipeline } from '@/agents/supervisor';
 import { requireInvoiceAccess } from '@/lib/auth';
 import { isClientStorageFileUrl } from '@/lib/ingestHelpers';
 import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
+import type { InvoiceStatus } from '@/shared/types';
 
 const SUPPORTED_MIME = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/gif', 'image/tiff']);
 
@@ -19,12 +20,25 @@ export async function POST(
 ) {
   const { id } = await params;
 
-  const access = await requireInvoiceAccess<{ id: string; client_id: string; file_url: string | null; file_name: string | null }>(
-    id,
-    'id, client_id, file_url, file_name'
-  );
+  const access = await requireInvoiceAccess<{
+    id: string;
+    client_id: string;
+    status: InvoiceStatus;
+    file_url: string | null;
+    file_name: string | null;
+  }>(id, 'id, client_id, status, file_url, file_name');
   if (!access.ok) return access.response;
   const invoice = access.value.invoice;
+
+  // The pipeline writes status + AI data unconditionally, so it may only run on an invoice that is
+  // waiting to be processed (after upload / split / retry). Re-running it on a reviewed, approved,
+  // rejected or returned invoice would bypass the status rules (src/shared/invoiceStatus.ts).
+  if (invoice.status !== 'processing') {
+    return NextResponse.json(
+      { error: 'ניתן לעבד רק חשבונית שממתינה לעיבוד (לעיבוד מחדש של מסמך שנכשל יש להשתמש ב"עבד מחדש")', status: invoice.status },
+      { status: 409 }
+    );
+  }
 
   try {
     const body = ((await request.json().catch(() => ({}))) ?? {}) as { mimeType?: unknown; tenantId?: unknown };

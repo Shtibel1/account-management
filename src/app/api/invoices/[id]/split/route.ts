@@ -6,6 +6,7 @@ import { validateSplitRanges } from '@/shared/documentSplit';
 import { requireInvoiceAccess } from '@/lib/auth';
 import { isClientStorageFileUrl } from '@/lib/ingestHelpers';
 import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
+import { SPLITTABLE_STATUSES, transitionRefusedMessage } from '@/shared/invoiceStatus';
 
 function sanitizeStorageFilename(fileName: string): string {
   const lastDot = fileName.lastIndexOf('.');
@@ -52,6 +53,12 @@ export async function POST(
     if (fetchErr || !invoice) {
       console.error(`[Split API] Failed to fetch invoice ${id}:`, fetchErr);
       return NextResponse.json({ error: 'Invoice not found' }, { status: 404 });
+    }
+
+    // Splitting re-runs the pipeline on every part: only for a document still in review (or a
+    // failed one), never for an approved / exported / rejected / returned invoice.
+    if (!SPLITTABLE_STATUSES.includes(invoice.status)) {
+      return NextResponse.json({ error: transitionRefusedMessage('split', invoice.status), status: invoice.status }, { status: 409 });
     }
 
     // 2. Download the original invoice file (file_url is user-editable: only our own storage URLs for this client)
