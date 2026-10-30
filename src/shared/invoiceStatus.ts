@@ -6,12 +6,16 @@ import type { InvoiceStatus } from '@/shared/types';
 //
 //   processing → review | approved (supplier auto-approve) | error          (pipeline)
 //   review     → approved (approve) | rejected (reject) | returned (return)
-//                processing (split) | error (pipeline)
+//                processing (split | reprocess) | error (pipeline)
 //   approved   → exported (export) | returned (return) | review (reopen)
 //   rejected   → returned (return) | review (reopen)
-//   error      → processing (retry | split) | rejected (reject) | returned (return)
+//   error      → processing (retry | split | reprocess) | rejected (reject) | returned (return)
 //   returned   → review (reopen)
 //   exported   → review (reopen, office owner only, logged) - otherwise final
+//
+// 'reprocess' = POST /api/invoices/[id]/process (durable queue, src/lib/processingQueue.ts +
+// canProcess in src/shared/processing.ts). An approved invoice is reprocessed only after an explicit
+// reopen (approved → review → processing); a stuck 'processing' run may be re-queued in place.
 
 export const INVOICE_STATUSES = [
   'processing',
@@ -24,14 +28,14 @@ export const INVOICE_STATUSES = [
 ] as const satisfies readonly InvoiceStatus[];
 
 /** The code path that performs a transition. */
-export type TransitionVia = 'pipeline' | 'approve' | 'reject' | 'return' | 'export' | 'retry' | 'reopen' | 'split';
+export type TransitionVia = 'pipeline' | 'approve' | 'reject' | 'return' | 'export' | 'retry' | 'reopen' | 'split' | 'reprocess';
 
 export const INVOICE_TRANSITIONS: Readonly<Record<InvoiceStatus, Partial<Record<InvoiceStatus, readonly TransitionVia[]>>>> = {
   processing: { review: ['pipeline'], approved: ['pipeline'], error: ['pipeline'] },
-  review: { approved: ['approve'], rejected: ['reject'], returned: ['return'], processing: ['split'], error: ['pipeline'] },
+  review: { approved: ['approve'], rejected: ['reject'], returned: ['return'], processing: ['split', 'reprocess'], error: ['pipeline'] },
   approved: { exported: ['export'], returned: ['return'], review: ['reopen'] },
   rejected: { returned: ['return'], review: ['reopen'] },
-  error: { processing: ['retry', 'split'], rejected: ['reject'], returned: ['return'] },
+  error: { processing: ['retry', 'split', 'reprocess'], rejected: ['reject'], returned: ['return'] },
   returned: { review: ['reopen'] },
   exported: { review: ['reopen'] },
 };
@@ -60,6 +64,8 @@ export const RETRYABLE_STATUSES: readonly InvoiceStatus[] = sourceStatuses('proc
 export const REOPENABLE_STATUSES: readonly InvoiceStatus[] = sourceStatuses('review', 'reopen');
 /** A multi-document PDF can be split while in review, or after its processing failed. */
 export const SPLITTABLE_STATUSES: readonly InvoiceStatus[] = sourceStatuses('processing', 'split');
+/** Statuses POST /process may move to 'processing' (besides re-queueing a stuck 'processing' run). */
+export const REPROCESSABLE_STATUSES: readonly InvoiceStatus[] = sourceStatuses('processing', 'reprocess');
 /** Failed documents may be deleted outright (nothing was posted or reviewed). */
 export const DELETABLE_STATUSES: readonly InvoiceStatus[] = ['error'];
 

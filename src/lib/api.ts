@@ -2,12 +2,25 @@ import type { BankTransaction, ClientContact, ClientNotification, ExtractedData,
 import type { FeatureFlag, FeatureFlagsResponse, OrgFeatureFlagsResponse } from '@/shared/featureFlags';
 import type { NotificationOutcome, ReturnReasonCode } from '@/shared/returns';
 import type { BankAction, BankOverview, ImportResult, MatchRunResult } from '@/lib/bankTransactions';
+import { mimeFromFileName } from '@/shared/uploadValidation';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
-export async function uploadInvoices(clientId: string, files: File[]) {
+export type UploadFileResult = { fileName: string; status: 'success' | 'error'; id?: string; error?: string };
+
+async function errorText(res: Response, fallback: string): Promise<string> {
+  const body = await res.json().catch(() => null);
+  return typeof body?.error === 'string' && body.error ? body.error : fallback;
+}
+
+/**
+ * Uploads files for a client: signed upload URL (the server checks name / type / size first),
+ * PUT to Storage, register (the server checks the stored bytes), then queue processing.
+ * Every file gets its own honest result - a file the server rejected is reported as an error.
+ */
+export async function uploadInvoices(clientId: string, files: File[]): Promise<{ results: UploadFileResult[]; count: number }> {
   const uploadedFiles: { filePath: string; fileName: string; mimeType: string }[] = [];
-  const results: { fileName: string; status: 'success' | 'error'; id?: string; error?: string }[] = [];
+  const results: UploadFileResult[] = [];
 
   for (const file of files) {
     try {
@@ -15,10 +28,10 @@ export async function uploadInvoices(clientId: string, files: File[]) {
       const urlRes = await fetch(`${API_URL}/api/invoices/upload-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientId, fileName: file.name, mimeType: file.type }),
+        body: JSON.stringify({ clientId, fileName: file.name, mimeType: file.type, size: file.size }),
       });
       if (!urlRes.ok) {
-        throw new Error(`Failed to get upload URL: ${await urlRes.text()}`);
+        throw new Error(await errorText(urlRes, 'לא ניתן היה להכין את העלאת הקובץ'));
       }
       const { signedUrl, filePath } = await urlRes.json();
 
@@ -27,24 +40,26 @@ export async function uploadInvoices(clientId: string, files: File[]) {
         method: 'PUT',
         body: file,
         headers: {
-          'Content-Type': file.type,
+          // The type implied by the (already checked) extension: some browsers send an empty or
+          // generic type, which the raw-invoices bucket (allowed_mime_types) would refuse
+          'Content-Type': mimeFromFileName(file.name) ?? file.type ?? 'application/octet-stream',
         },
       });
       if (!uploadRes.ok) {
-        throw new Error(`Failed to upload to storage: ${uploadRes.statusText}`);
+        throw new Error(uploadRes.status === 413 ? 'הקובץ גדול מ-20MB' : 'העלאת הקובץ לאחסון נכשלה');
       }
 
       uploadedFiles.push({
         filePath,
         fileName: file.name,
-        mimeType: file.type,
+        mimeType: mimeFromFileName(file.name) ?? file.type,
       });
     } catch (err: any) {
       console.error(`Error uploading ${file.name}:`, err);
       results.push({
         fileName: file.name,
         status: 'error',
-        error: err.message || String(err),
+        error: err instanceof TypeError ? 'אין חיבור לשרת - יש לנסות שוב' : err?.message || 'העלאת הקובץ נכשלה',
       });
     }
   }
@@ -54,7 +69,8 @@ export async function uploadInvoices(clientId: string, files: File[]) {
     return { results, count: results.length };
   }
 
-  // 3. Call server to process the uploaded files
+  // 3. Register the stored files (the server re-checks size and content)
+  let registered: UploadFileResult[];
   try {
     const res = await fetch(`${API_URL}/api/invoices/upload`, {
       method: 'POST',
@@ -64,50 +80,79 @@ export async function uploadInvoices(clientId: string, files: File[]) {
         files: uploadedFiles,
       }),
     });
-    if (!res.ok) {
-      throw new Error(await res.text());
+    const serverResponse = await res.json().catch(() => null);
+    // 422 = every file was rejected: the per-file reasons are still in results
+    if (!Array.isArray(serverResponse?.results)) {
+      throw new Error(typeof serverResponse?.error === 'string' ? serverResponse.error : 'רישום הקבצים נכשל');
     }
-    const serverResponse = await res.json();
-    
-    // 4. Initiate client-side asynchronous dispatch to trigger pipeline processing
-    if (serverResponse.results && Array.isArray(serverResponse.results)) {
-      for (const result of serverResponse.results) {
-        if (result.status === 'success' && result.id && result.fileUrl) {
-          const uf = uploadedFiles.find((f) => f.fileName === result.fileName);
-          const mimeType = uf ? uf.mimeType : 'application/pdf';
-
-          // Trigger processing asynchronously (fire-and-forget)
-          fetch(`${API_URL}/api/invoices/${result.id}/process`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              fileUrl: result.fileUrl,
-              mimeType,
-              tenantId: clientId,
-            }),
-          }).catch((err) => {
-            console.error(`[Frontend API] Failed to trigger processing for invoice ${result.id}:`, err);
-          });
-        }
-      }
-    }
-
-    // Combine results
-    const combinedResults = [...results, ...(serverResponse.results || [])];
-    return {
-      results: combinedResults,
-      count: combinedResults.length,
-    };
+    registered = serverResponse.results;
   } catch (err: any) {
     const failedResults = [
       ...results,
       ...uploadedFiles.map((uf) => ({
         fileName: uf.fileName,
         status: 'error' as const,
-        error: `Server failed to start processing: ${err.message || String(err)}`,
+        error: err?.message || 'רישום הקבצים נכשל',
       })),
     ];
     return { results: failedResults, count: failedResults.length };
+  }
+
+  // 4. Queue processing (the server answers at once; the work runs in the background)
+  const queued = await Promise.all(
+    registered.map(async (result): Promise<UploadFileResult> => {
+      if (result.status !== 'success' || !result.id) return result;
+      const uf = uploadedFiles.find((f) => f.fileName === result.fileName);
+      try {
+        const res = await fetch(`${API_URL}/api/invoices/${result.id}/process`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mimeType: uf?.mimeType || undefined }),
+        });
+        if (!res.ok) {
+          return { ...result, status: 'error', error: await errorText(res, 'הקובץ נשמר אך העיבוד לא הופעל') };
+        }
+        return result;
+      } catch (err) {
+        console.error(`[Frontend API] Failed to queue processing for invoice ${result.id}:`, err);
+        // The row exists; the review screen / scheduled worker will still pick it up
+        return result;
+      }
+    })
+  );
+
+  const combinedResults = [...results, ...queued];
+  return {
+    results: combinedResults,
+    count: combinedResults.length,
+  };
+}
+
+/** Queues re-processing (review / error). An approved invoice is reopened first (reopenInvoice). */
+export async function reprocessInvoice(id: string) {
+  const res = await fetch(`${API_URL}/api/invoices/${encodeURIComponent(id)}/process`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) throw new Error(await errorText(res, 'לא ניתן היה להפעיל עיבוד מחדש'));
+  return res.json();
+}
+
+export interface ProcessingTickResponse {
+  state: 'done' | 'pending' | 'busy' | 'waiting' | 'failed';
+  stage?: string | null;
+  progress?: { pages_done: number; pages_total: number | null } | null;
+}
+
+/** Advances an invoice's queued processing by one bounded step (called while it shows as processing). */
+export async function tickProcessing(id: string): Promise<ProcessingTickResponse | null> {
+  try {
+    const res = await fetch(`${API_URL}/api/invoices/${encodeURIComponent(id)}/process/tick`, { method: 'POST' });
+    if (!res.ok) return null;
+    return (await res.json()) as ProcessingTickResponse;
+  } catch {
+    return null;
   }
 }
 
@@ -242,25 +287,8 @@ export async function splitInvoice(
     throw new Error(body?.error ?? 'שגיאה בפיצול הקובץ');
   }
 
+  // The server queues every part for processing itself
   const data = await res.json();
-
-  // Trigger background process for each split part
-  if (data.invoices && Array.isArray(data.invoices)) {
-    for (const inv of data.invoices) {
-      fetch(`${API_URL}/api/invoices/${inv.id}/process`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileUrl: inv.fileUrl,
-          mimeType: inv.mimeType || 'application/pdf',
-          tenantId,
-        }),
-      }).catch((err) => {
-        console.error(`[Frontend API] Failed to trigger processing for split invoice ${inv.id}:`, err);
-      });
-    }
-  }
-
   return data;
 }
 

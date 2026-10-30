@@ -14,6 +14,7 @@ import { useFeatureFlags } from '@/components/FeatureFlags/useFeatureFlags';
 import { ReturnToClientDialog } from '@/components/ReviewLoop/ReturnToClientDialog';
 import { ReturnedNotice } from '@/components/ReviewLoop/ReturnedNotice';
 import { canReturnInvoice } from '@/shared/returns';
+import { ProcessingBanner } from '@/components/Processing/ProcessingStatus';
 
 const ImageViewer = dynamic(() => import('@/components/SplitPane/ImageViewer').then((m) => m.ImageViewer), {
   ssr: false,
@@ -196,8 +197,8 @@ export default function ReviewDetailPage() {
 
     setSplitLoading(true);
     try {
-      await splitInvoice(invoice.id, finalSplits, invoice.client_id);
-      toast('הקובץ פוצל בהצלחה. תהליך ה-AI הופעל מחדש עבור כל חלק.', 'success');
+      const result = await splitInvoice(invoice.id, finalSplits, invoice.client_id);
+      toast(result?.warning || 'הקובץ פוצל בהצלחה. תהליך ה-AI הופעל מחדש עבור כל חלק.', result?.warning ? 'info' : 'success');
       setShowSplitModal(false);
       router.push('/review');
     } catch (e: any) {
@@ -276,6 +277,8 @@ export default function ReviewDetailPage() {
       </div>
 
       {reviewLoop && <ReturnedNotice invoice={invoice} />}
+
+      <ProcessingBanner invoice={invoice} onChanged={load} />
 
       {/* Automatic split suggestion */}
       {splitSuggestion && !suggestionDismissed && (

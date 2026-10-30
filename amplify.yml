@@ -12,6 +12,8 @@ frontend:
         - echo "NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL" >> .env.production
         - echo "GOOGLE_CLOUD_API_KEY=$GOOGLE_CLOUD_API_KEY" >> .env.production
         - echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> .env.production
+        # Secret of the scheduled processing worker (/api/invoices/worker); see docs/ingestion.md
+        - echo "PROCESSING_WORKER_SECRET=$PROCESSING_WORKER_SECRET" >> .env.production
     build:
       commands:
         - npm run build

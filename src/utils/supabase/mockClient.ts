@@ -49,6 +49,20 @@ export class MockQueryBuilder {
     return this;
   }
 
+  // is(col, null) / lt(col, value) - used by the processing queue's atomic claims and stale sweep
+  is(col: string, val: any) {
+    this.filterChain.push((item: any) => (val === null ? columnValue(item, col) == null : columnValue(item, col) === val));
+    return this;
+  }
+
+  lt(col: string, val: any) {
+    this.filterChain.push((item: any) => {
+      const value = columnValue(item, col);
+      return value != null && value < val;
+    });
+    return this;
+  }
+
   limit(count: number) {
     this.limitCount = count;
     return this;
@@ -160,14 +174,10 @@ export class MockQueryBuilder {
 
       await writeDb(db);
       
+      // Return the rows this update matched (re-applying the filters would drop rows whose
+      // filtered column was just changed, e.g. an optimistic-lock version bump)
       const updatedDb = await readDb();
-      let updatedList = [...updatedDb[this.table]];
-      for (const filter of this.checkInFilters) {
-        updatedList = updatedList.filter((item) => filter.vals.includes(item[filter.col]));
-      }
-      for (const filter of this.filterChain) {
-        updatedList = updatedList.filter(filter);
-      }
+      const updatedList = updatedDb[this.table].filter((item: any) => idsToUpdate.includes(item.id));
       return {
         data: this.isSingle ? updatedList[0] : updatedList,
         error: null,

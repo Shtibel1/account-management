@@ -209,6 +209,19 @@ export interface Invoice {
   returned_by?: string | null;
   resubmitted_invoice_id?: string | null; // on the returned invoice: the corrected document
   resubmission_of?: string | null;        // on the corrected document: the returned invoice
+  // Processing queue (src/lib/processingQueue.ts; migration 20261030161000_qa_pipeline)
+  processing_run_id?: string | null;
+  processing_started_at?: string | null;
+  processing_attempts?: number | null;
+  processing_stage?: string | null;       // queued / ocr / detect / extract / splitting
+  processing_progress?: { pages_done: number; pages_total: number | null } | null;
+  // Manual split lineage: the original multi-page file stays referenced by every part
+  split_parent_id?: string | null;
+  original_file_url?: string | null;
+  original_file_name?: string | null;
+  original_file_hash?: string | null;
+  split_start_page?: number | null;
+  split_end_page?: number | null;
   created_at: string;
   updated_at: string;
 }
