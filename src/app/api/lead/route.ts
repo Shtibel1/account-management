@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { createHash } from 'node:crypto';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { escapeHtml, sendEmail } from '@/lib/email';
+import { supabase } from '@/lib/supabase';
+import { clientIpFrom, LEAD_LIMITS, MemoryRateLimiter, parseLead, rateBuckets } from '@/lib/leadGuard';
 
 const CONTACT_TO = process.env.CONTACT_TO_EMAIL || process.env.CONTACT_TO || process.env.CONTACT_EMAIL || 'nadavshtibel@gmail.com';
 const CONTACT_FROM = process.env.CONTACT_FROM_EMAIL || process.env.CONTACT_FROM || 'contact@nadav-shtibel.com';
@@ -99,27 +103,71 @@ async function sendViaSES(data: LeadData): Promise<void> {
   await sendEmail({ from: CONTACT_FROM, to: [CONTACT_TO], subject, textBody, htmlBody });
 }
 
+const memoryLimiter = new MemoryRateLimiter();
+
+/** One hit on every rate bucket of this request; false when any bucket is over its limit. */
+async function withinRateLimits(request: NextRequest): Promise<boolean> {
+  const salt = process.env.LEAD_RATE_SALT || process.env.SUPABASE_SERVICE_KEY || 'lead';
+  const ipHash = createHash('sha256').update(`${salt}:${clientIpFrom(request.headers)}`).digest('hex').slice(0, 32);
+  let allowed = true;
+  for (const { rule, bucket } of rateBuckets(ipHash)) {
+    let ok: boolean | null = null;
+    try {
+      const db = supabase as unknown as { rpc?: SupabaseClient['rpc'] };
+      if (typeof db.rpc === 'function') {
+        const { data, error } = await supabase.rpc('lead_rate_limit_hit', {
+          p_bucket: bucket,
+          p_window_seconds: rule.windowSeconds,
+          p_max: rule.max,
+        });
+        if (!error && typeof data === 'boolean') ok = data;
+        else if (error) console.warn('[Lead] DB rate limit unavailable, using the in-memory limiter:', error.message);
+      }
+    } catch (err) {
+      console.warn('[Lead] DB rate limit failed, using the in-memory limiter:', err instanceof Error ? err.message : String(err));
+    }
+    if (ok === null) ok = memoryLimiter.hit(bucket, rule.windowSeconds, rule.max);
+    if (!ok) allowed = false;
+  }
+  return allowed;
+}
+
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-
-    const { name, contact, scanTypes, volume, notes } = body;
-
-    if (!name || typeof name !== 'string' || name.trim().length === 0) {
-      return NextResponse.json({ error: 'שם הוא שדה חובה' }, { status: 400 });
+    const declaredLength = Number(request.headers.get('content-length') ?? '0');
+    if (declaredLength > LEAD_LIMITS.maxBodyBytes) {
+      return NextResponse.json({ error: 'הפנייה ארוכה מדי' }, { status: 413 });
+    }
+    const raw = await request.text();
+    if (raw.length > LEAD_LIMITS.maxBodyBytes) {
+      return NextResponse.json({ error: 'הפנייה ארוכה מדי' }, { status: 413 });
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      return NextResponse.json({ error: 'בקשה לא תקינה' }, { status: 400 });
     }
 
-    if (!contact || typeof contact !== 'string' || contact.trim().length === 0) {
-      return NextResponse.json({ error: 'פרטי קשר הם שדה חובה' }, { status: 400 });
+    const parsed = parseLead(body);
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.error }, { status: 400 });
     }
 
-    const leadData: LeadData = {
-      name: name.trim(),
-      contact: contact.trim(),
-      scanTypes: Array.isArray(scanTypes) ? scanTypes : [],
-      volume: typeof volume === 'string' ? volume.trim() : '',
-      notes: typeof notes === 'string' ? notes.trim() : '',
-    };
+    if (!(await withinRateLimits(request))) {
+      return NextResponse.json(
+        { error: 'נשלחו יותר מדי פניות. נסו שוב מאוחר יותר או פנו אלינו ישירות.' },
+        { status: 429, headers: { 'Retry-After': '600' } }
+      );
+    }
+
+    // Honeypot filled (a bot): answer like a success, send nothing.
+    if (parsed.honeypot) {
+      console.warn('[Lead] Honeypot field filled - ignoring the submission.');
+      return NextResponse.json({ success: true });
+    }
+
+    const leadData: LeadData = parsed.lead;
 
     await sendViaSES(leadData);
     console.log(`[Lead] Sent via SES to ${CONTACT_TO}: ${leadData.name}`);

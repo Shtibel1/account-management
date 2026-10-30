@@ -2,6 +2,7 @@ import { after } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { runOrchestrationPipeline } from '@/agents/supervisor';
 import { buildStoragePath, MAX_DOCUMENT_BYTES } from '@/lib/ingestHelpers';
+import { storedFileUrlFor } from '@/lib/invoiceFiles';
 import { hashStoredFile, saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
 import type { InvoiceSource } from '@/shared/types';
 
@@ -11,8 +12,8 @@ import type { InvoiceSource } from '@/shared/types';
  */
 
 const RAW_BUCKET = 'raw-invoices';
-/** Signed read URLs live for a year, same as the original upload flow. */
-const SIGNED_URL_TTL_SECONDS = 60 * 60 * 24 * 365;
+/** Only used to check that the uploaded object exists; the signed URL is discarded. */
+const EXISTENCE_PROBE_TTL_SECONDS = 60;
 
 export interface StoredDocument {
   clientId: string;
@@ -69,16 +70,18 @@ async function insertInvoiceRow(
 }
 
 /**
- * Creates the invoice row for a file already in the raw-invoices bucket (signs a read URL first).
+ * Creates the invoice row for a file already in the raw-invoices bucket (file_url = storage reference).
  * Does NOT start the pipeline - the browser upload flow triggers /api/invoices/[id]/process itself.
  */
 export async function registerStoredDocument(doc: StoredDocument): Promise<RegisterResult> {
   const { clientId, filePath, fileName } = doc;
 
-  // 1. Generate signed URL valid for 1 year
+  // 1. Make sure the object exists (signing fails for a missing object). The URL itself is not
+  // kept: file_url stores a storage reference, not a bearer link, and readers get short-lived
+  // signed URLs on demand (src/lib/invoiceFiles.ts, QA #31).
   const { data: signedData, error: signErr } = await supabase.storage
     .from(RAW_BUCKET)
-    .createSignedUrl(filePath, SIGNED_URL_TTL_SECONDS);
+    .createSignedUrl(filePath, EXISTENCE_PROBE_TTL_SECONDS);
 
   if (signErr || !signedData?.signedUrl) {
     console.error('Signed URL generation failed:', signErr);
@@ -99,7 +102,7 @@ export async function registerStoredDocument(doc: StoredDocument): Promise<Regis
     };
   }
 
-  const fileUrl = signedData.signedUrl;
+  const fileUrl = storedFileUrlFor(filePath);
 
   // 2. Insert Invoice record in database
   const { data: invoice, error: dbErr } = await insertInvoiceRow(

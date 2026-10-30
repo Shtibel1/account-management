@@ -59,6 +59,30 @@ export function isOwnStoragePath(clientId: string, filePath: string): boolean {
 }
 
 /**
+ * invoices.file_url forms of a raw-invoices object:
+ *   /storage/v1/object/authenticated/raw-invoices/<path>  - the stored reference (since QA #31): NOT a
+ *     bearer link (needs a service / user JWT); readers get short-lived signed URLs on demand
+ *     (src/lib/invoiceFiles.ts);
+ *   /storage/v1/object/sign/raw-invoices/<path>?token=... - legacy 1-year signed URLs (rewritten by
+ *     migration 20261030162000_qa_export_security.sql);
+ *   /storage/v1/object/public/raw-invoices/<path>         - older public-bucket URLs.
+ */
+export const STORAGE_OBJECT_PATH_RE = /^\/storage\/v1\/object\/(?:authenticated|sign|public)\/raw-invoices\/(.+)$/;
+
+/** Storage reference URL (not a bearer link) of a raw-invoices object, stored in invoices.file_url. */
+export function storageReferenceUrl(supabaseBaseUrl: string, objectPath: string): string {
+  const origin = new URL(supabaseBaseUrl).origin;
+  return `${origin}/storage/v1/object/authenticated/raw-invoices/${objectPath.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+/** Object path of a trusted file_url of this client (any of the forms above), else null. */
+export function clientStorageObjectPath(fileUrl: unknown, clientId: string, supabaseBaseUrl: string | null): string | null {
+  if (!isClientStorageFileUrl(fileUrl, clientId, supabaseBaseUrl)) return null;
+  const match = STORAGE_OBJECT_PATH_RE.exec(new URL(fileUrl as string).pathname);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+/**
  * True when `fileUrl` (an invoices.file_url value, which signed-in users can edit) points at a file
  * of this client in the raw-invoices bucket of our own Supabase project. Server routes that fetch
  * file_url (process / split) must check this first: otherwise a user could make the server fetch an
@@ -75,7 +99,7 @@ export function isClientStorageFileUrl(fileUrl: unknown, clientId: string, supab
     return false;
   }
   if (url.origin !== base.origin || url.username || url.password) return false;
-  const match = /^\/storage\/v1\/object\/(?:sign|public)\/raw-invoices\/(.+)$/.exec(url.pathname);
+  const match = STORAGE_OBJECT_PATH_RE.exec(url.pathname);
   if (!match) return false;
   let objectPath: string;
   try {

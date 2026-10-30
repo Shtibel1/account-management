@@ -12,7 +12,7 @@ UI `src/app/(dashboard)/integrations` ("חיבור להנהלת חשבונות")
 
 | id        | kind | What it does |
 |-----------|------|--------------|
-| `movein`  | file | `movein.dat` (Windows-1255, fixed width) via the existing `MoveinExporter`. Byte-for-byte the same output as `POST /api/export`. |
+| `movein`  | file | `movein.dat` (Windows-1255, fixed width) via the existing `MoveinExporter`. Byte-for-byte the same output as `POST /api/export`; invoices whose values don't fit the fixed-width fields fail validation (see *Move-in file format* below). |
 | `excel`   | file | `.xlsx` (RTL) with invoice fields + resolved account codes (supplier / expense / VAT) and a totals row. |
 | `webhook` | api  | POSTs each invoice as JSON to an https URL of the office (own middleware, Make / Zapier, an import hook). Optional Bearer token and HMAC signature. Reference implementation of an API plugin. |
 | `morning` | api  | Morning / Green Invoice (חשבונית ירוקה): one expense per invoice (`POST /expenses`) + the stored PDF attached. See below. |
@@ -48,7 +48,29 @@ UI `src/app/(dashboard)/integrations` ("חיבור להנהלת חשבונות")
 - Errors: Morning `errorCode` / `errorMessage` (and OAuth `error`) become `MorningApiError` with a Hebrew message
   such as "מורנינג: שגיאה ביצירת ההוצאה - פרטי הספק חסרים [קוד 3311]", stored as the export's `last_error`.
 
-The legacy `POST /api/export` (Move-in download from the review table) is unchanged. Note: the only other Excel
+### Move-in file format
+
+`src/lib/exporters/movein.ts` writes one 332-character line per invoice, CRLF-terminated, Windows-1255, Hebrew in
+visual order. Field widths (`MOVEIN_FIELD_WIDTHS`): reference (invoice number) 9, account codes 15, VAT ids 15,
+amounts 12, supplier name 50, bank details 50.
+
+- **Identifying values are never cut.** An invoice number longer than 9 characters, an account code / VAT id longer
+  than 15 or an amount wider than 12 fails validation (`validateMoveinInvoice`): `POST /api/export` answers 422
+  `{ error, invalid: ["<invoice>: <Hebrew reason>"], invoiceIds }` and exports / marks nothing; the `movein` plugin
+  fails those invoices with the same reasons (`validateInvoice`). Fix the value in review (e.g. shorten the
+  invoice number to what the accountant books as the reference) and export again.
+- **Free text is cut to its width on purpose:** supplier name and bank details keep their first 50 characters
+  (cut before the visual-order reversal, so the start of the name is kept).
+- Characters outside Windows-1255 become `?`; Latin-1 letters are not passed through (0xE0-0xFA are Hebrew there).
+- **Download:** `POST /api/export` returns the bytes as `application/octet-stream` (`Content-Disposition:
+  attachment; filename="movein.dat"`, `X-Content-Charset: windows-1255`). It must not be served as `text/*`: on
+  Amplify Hosting a text body is handled as UTF-8 and every Hebrew byte became U+FFFD (QA #2). The plugin path
+  returns the file base64-encoded inside JSON, which is safe for any content type.
+- Ids of invoices outside the user's offices are treated exactly like unknown ids (400 "לא נמצאו חשבוניות
+  מאושרות" on `/api/export`, 404 "חלק מהחשבוניות לא נמצאו" on `/api/integrations/export`), so the response never
+  reveals that an id exists in another office (QA #38).
+
+The legacy `POST /api/export` (Move-in download from the review table) keeps its behaviour otherwise. Note: the only other Excel
 exporter in the codebase (`src/lib/exporters/missingInvoices.ts`) is the bank "missing invoices" sheet, which is not
 an invoice export, so it stays where it is; the `excel` plugin is a new invoice workbook.
 

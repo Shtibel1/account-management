@@ -3,6 +3,7 @@ import type { EmailOtpType } from '@supabase/supabase-js';
 import { createClient } from '@/utils/supabase/server';
 import { safeNextPath } from '@/lib/routeAccess';
 import { isSupabaseConfigured } from '@/lib/supabaseConfig';
+import { redirectLocation, siteOriginFor } from '@/lib/siteUrl';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,10 +19,14 @@ const OTP_TYPES: EmailOtpType[] = ['signup', 'invite', 'magiclink', 'recovery', 
 export async function GET(request: NextRequest) {
   const url = request.nextUrl;
   const next = safeNextPath(url.searchParams.get('next'));
+  // Never build the Location from request.url: behind Amplify it is the internal localhost:3000.
+  const origin = siteOriginFor(request);
+  const redirect = (path: string) =>
+    new NextResponse(null, { status: 307, headers: { Location: redirectLocation(path, origin) } });
   const fail = (reason: string) =>
-    NextResponse.redirect(new URL(`/login?error=${encodeURIComponent(reason)}&next=${encodeURIComponent(next)}`, request.url));
+    redirect(`/login?error=${encodeURIComponent(reason)}&next=${encodeURIComponent(next)}`);
 
-  if (!isSupabaseConfigured()) return NextResponse.redirect(new URL(next, request.url));
+  if (!isSupabaseConfigured()) return redirect(next);
 
   const code = url.searchParams.get('code');
   const tokenHash = url.searchParams.get('token_hash');
@@ -34,12 +39,12 @@ export async function GET(request: NextRequest) {
     if (code) {
       const { error } = await supabase.auth.exchangeCodeForSession(code);
       if (error) return fail(error.message);
-      return NextResponse.redirect(new URL(next, request.url));
+      return redirect(next);
     }
     if (tokenHash && type && OTP_TYPES.includes(type)) {
       const { error } = await supabase.auth.verifyOtp({ type, token_hash: tokenHash });
       if (error) return fail(error.message);
-      return NextResponse.redirect(new URL(next, request.url));
+      return redirect(next);
     }
   } catch (err) {
     console.error('[auth/callback] Failed to complete sign-in:', err);
@@ -47,5 +52,5 @@ export async function GET(request: NextRequest) {
   }
 
   // Implicit-flow links carry the session in the fragment; the browser keeps it across this redirect.
-  return NextResponse.redirect(new URL(`/auth/complete?next=${encodeURIComponent(next)}`, request.url));
+  return redirect(`/auth/complete?next=${encodeURIComponent(next)}`);
 }

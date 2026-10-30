@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
 import { supabaseUrl } from '@/lib/supabaseConfig';
-import { detectDocumentMime, isClientStorageFileUrl, MAX_DOCUMENT_BYTES } from '@/lib/ingestHelpers';
+import { clientStorageObjectPath, detectDocumentMime, MAX_DOCUMENT_BYTES } from '@/lib/ingestHelpers';
 import type { ExportInvoice, InvoiceFile, InvoiceFileLoader, InvoiceFileReader, InvoiceFiles } from '@/integrations/types';
 
 /**
@@ -26,9 +26,7 @@ export class InvoiceFileError extends Error {
 
 /** Object path inside raw-invoices for a trusted file_url of this client, else null (pure). */
 export function storageObjectPathOf(fileUrl: string, clientId: string, baseUrl: string | null): string | null {
-  if (!isClientStorageFileUrl(fileUrl, clientId, baseUrl)) return null;
-  const match = /^\/storage\/v1\/object\/(?:sign|public)\/raw-invoices\/(.+)$/.exec(new URL(fileUrl).pathname);
-  return match ? decodeURIComponent(match[1]) : null;
+  return clientStorageObjectPath(fileUrl, clientId, baseUrl);
 }
 
 /** Alias of storageObjectPathOf. */

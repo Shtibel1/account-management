@@ -110,7 +110,7 @@ export async function preprocessInvoice(
   pageTexts?: string[];
   ocrWords?: OcrWord[];
 }> {
-  console.log(`[Preprocessor] 📄 Starting OCR preprocessing for file URL: ${fileUrl} (${mimeType})`);
+  console.log(`[Preprocessor] 📄 Starting OCR preprocessing for file URL: ${fileUrl.split('?')[0]} (${mimeType})`);
 
   const apiKey = process.env.GOOGLE_CLOUD_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) {
@@ -127,7 +127,7 @@ export async function preprocessInvoice(
     const arrayBuffer = await response.arrayBuffer();
     fileBuffer = Buffer.from(arrayBuffer);
   } catch (e) {
-    console.error(`[Preprocessor] Error downloading invoice file from URL: ${fileUrl}`, e);
+    console.error(`[Preprocessor] Error downloading invoice file from URL: ${fileUrl.split('?')[0]}`, e);
     throw new Error(`Preprocessor failed to retrieve invoice file: ${e instanceof Error ? e.message : String(e)}`);
   }
 

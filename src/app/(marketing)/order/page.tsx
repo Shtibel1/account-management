@@ -33,6 +33,8 @@ export default function OrderPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // Honeypot (hidden from people, filled by form bots) - see src/lib/leadGuard.ts
+    const honeypot = (e.currentTarget as HTMLFormElement).elements.namedItem('website') as HTMLInputElement | null;
     setStatus('loading');
     setErrorMessage('');
 
@@ -46,6 +48,7 @@ export default function OrderPage() {
           scanTypes: formData.scanTypes,
           volume: formData.volume,
           notes: formData.notes,
+          website: honeypot?.value ?? '',
         }),
       });
 
@@ -104,6 +107,11 @@ export default function OrderPage() {
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6 sm:p-8 space-y-6">
+          {/* Honeypot: invisible to people and screen readers, not focusable */}
+          <div aria-hidden="true" style={{ position: 'absolute', left: '-10000px', width: 1, height: 1, overflow: 'hidden' }}>
+            <label htmlFor="website">אתר</label>
+            <input type="text" id="website" name="website" tabIndex={-1} autoComplete="off" defaultValue="" />
+          </div>
           {/* Name */}
           <div>
             <label htmlFor="name" className="flex items-center gap-2 text-sm font-medium text-stone-700 mb-2">
@@ -114,6 +122,7 @@ export default function OrderPage() {
               type="text"
               id="name"
               required
+              maxLength={100}
               value={formData.name}
               onChange={(e) => setFormData({ ...formData, name: e.target.value })}
               className="w-full border border-stone-300 rounded-xl px-4 py-3 text-base bg-white placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
@@ -131,6 +140,7 @@ export default function OrderPage() {
               type="text"
               id="contact"
               required
+              maxLength={200}
               value={formData.contact}
               onChange={(e) => setFormData({ ...formData, contact: e.target.value })}
               className="w-full border border-stone-300 rounded-xl px-4 py-3 text-base bg-white placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
@@ -175,6 +185,7 @@ export default function OrderPage() {
             <input
               type="text"
               id="volume"
+              maxLength={100}
               value={formData.volume}
               onChange={(e) => setFormData({ ...formData, volume: e.target.value })}
               className="w-full border border-stone-300 rounded-xl px-4 py-3 text-base bg-white placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
@@ -191,6 +202,7 @@ export default function OrderPage() {
             <textarea
               id="notes"
               rows={4}
+              maxLength={2000}
               value={formData.notes}
               onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
               className="w-full border border-stone-300 rounded-xl px-4 py-3 text-base bg-white placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors resize-none"

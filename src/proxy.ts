@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
 import { AUTH_PAGES, classifyPath, isPublicApi, loginRedirectPath, safeNextPath } from '@/lib/routeAccess';
+import { redirectLocation, siteOriginFor } from '@/lib/siteUrl';
 import { isMisconfiguredProduction, isSupabaseConfigured, MISCONFIGURED_MESSAGE, supabaseAnonKey, supabaseUrl } from '@/lib/supabaseConfig';
 
 /**
@@ -50,6 +51,10 @@ export async function proxy(request: NextRequest) {
     console.error('[proxy] Session check failed:', err);
   }
 
+  // Same-site redirects on the trusted public origin (request.url is localhost:3000 behind Amplify).
+  const redirectTo = (path: string): NextResponse =>
+    new NextResponse(null, { status: 307, headers: { Location: redirectLocation(path, siteOriginFor(request)) } });
+
   const withSessionCookies = (res: NextResponse): NextResponse => {
     response.cookies.getAll().forEach((cookie) => res.cookies.set(cookie));
     return res;
@@ -58,7 +63,7 @@ export async function proxy(request: NextRequest) {
   if (kind === 'public') {
     if (userId && AUTH_PAGES.has(pathname)) {
       const next = safeNextPath(request.nextUrl.searchParams.get('next'));
-      return withSessionCookies(NextResponse.redirect(new URL(next, request.url)));
+      return withSessionCookies(redirectTo(next));
     }
     return response;
   }
@@ -67,7 +72,7 @@ export async function proxy(request: NextRequest) {
     if (kind === 'api') {
       return withSessionCookies(NextResponse.json({ error: 'נדרשת התחברות' }, { status: 401 }));
     }
-    return withSessionCookies(NextResponse.redirect(new URL(loginRedirectPath(pathname, search), request.url)));
+    return withSessionCookies(redirectTo(loginRedirectPath(pathname, search)));
   }
 
   return response;

@@ -1,46 +1,55 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { MoveinExporter } from '@/lib/exporters/movein';
+import { MoveinExporter, MoveinValidationError, validateMoveinInvoices } from '@/lib/exporters/movein';
 import type { Invoice, AccountMapping } from '@/shared/types';
-import { requireClientsAccess, requireUser } from '@/lib/auth';
+import { accessibleClientIds, isUuid, requireUser } from '@/lib/auth';
+import { moveinDownloadHeaders } from '@/lib/exporters/moveinResponse';
+
+const NOT_FOUND = 'לא נמצאו חשבוניות מאושרות';
 
 export async function POST(request: Request) {
   const auth = await requireUser();
   if (!auth.ok) return auth.response;
 
   try {
-    const body = await request.json();
-    const { ids } = body as { ids: string[] };
+    const body = await request.json().catch(() => null);
+    const ids = (body as { ids?: unknown } | null)?.ids;
 
     if (!Array.isArray(ids) || ids.length === 0 || ids.some((id) => typeof id !== 'string')) {
       return NextResponse.json({ error: 'לא נבחרו חשבוניות' }, { status: 400 });
     }
+    const uniqueIds = [...new Set(ids as string[])];
+    // Not a UUID can't be an invoice: same answer as an unknown id.
+    if (!auth.value.mock && uniqueIds.some((id) => !isUuid(id))) {
+      return NextResponse.json({ error: NOT_FOUND }, { status: 400 });
+    }
 
-    // 1. Fetch invoices
-    const { data: invoices, error: fetchErr } = await supabase
-      .from('invoices')
-      .select('*')
-      .in('id', ids)
-      .eq('status', 'approved');
+    // 1. Fetch the approved invoices - only of clients the user may access. Filtering BEFORE the
+    // empty check means an id of another office answers exactly like an unknown id (no 403 that
+    // would reveal that the id is an approved invoice somewhere).
+    const allowedClients = await accessibleClientIds(auth.value);
+    if (allowedClients !== null && allowedClients.length === 0) {
+      return NextResponse.json({ error: NOT_FOUND }, { status: 400 });
+    }
+    let query = supabase.from('invoices').select('*').in('id', uniqueIds).eq('status', 'approved');
+    if (allowedClients !== null) query = query.in('client_id', allowedClients);
+    const { data: invoices, error: fetchErr } = await query;
 
     if (fetchErr) {
-      return NextResponse.json({ error: fetchErr.message }, { status: 500 });
+      console.error('[Export] Failed to load invoices:', fetchErr.message);
+      return NextResponse.json({ error: 'שגיאה בטעינת החשבוניות' }, { status: 500 });
     }
 
     if (!invoices || invoices.length === 0) {
-      return NextResponse.json({ error: 'לא נמצאו חשבוניות מאושרות' }, { status: 400 });
+      return NextResponse.json({ error: NOT_FOUND }, { status: 400 });
     }
 
-    // Every selected invoice must belong to a client of the user's organizations.
     const clientIds = [...new Set((invoices as Invoice[]).map((inv) => inv.client_id))];
-    const access = await requireClientsAccess(clientIds, auth.value);
-    if (!access.ok) return access.response;
     if (clientIds.length > 1) {
       return NextResponse.json({ error: 'יש לייצא חשבוניות של לקוח אחד בכל פעם' }, { status: 400 });
     }
 
     const clientId = clientIds[0];
-    const exportedIds = (invoices as Invoice[]).map((inv) => inv.id);
 
     // 2. Fetch client + mappings
     const [clientRes, mappingsRes] = await Promise.all([
@@ -48,8 +57,12 @@ export async function POST(request: Request) {
       supabase.from('account_mappings').select('*').eq('client_id', clientId),
     ]);
 
-    if (clientRes.error) {
-      return NextResponse.json({ error: 'Client not found' }, { status: 500 });
+    if (clientRes.error || !clientRes.data) {
+      return NextResponse.json({ error: 'הלקוח לא נמצא' }, { status: 404 });
+    }
+    if (mappingsRes.error) {
+      console.error('[Export] Failed to load account mappings:', mappingsRes.error.message);
+      return NextResponse.json({ error: 'שגיאה בטעינת מיפויי החשבונות' }, { status: 500 });
     }
 
     const client = clientRes.data;
@@ -81,9 +94,24 @@ export async function POST(request: Request) {
       );
     }
 
+    // 3b. Values that don't fit the fixed-width Move-in fields (e.g. a 10-digit invoice number in
+    // the 9-character reference field) are rejected, never silently cut.
+    const tooLong = validateMoveinInvoices(invoices as Invoice[], mappings, client.vat_account ?? '');
+    if (tooLong.length > 0) {
+      return NextResponse.json(
+        {
+          error: 'חלק מהחשבוניות לא מתאימות לפורמט Move-in. תקנו אותן ונסו שוב.',
+          invalid: tooLong.map((p) => `${p.label}: ${p.message}`),
+          invoiceIds: [...new Set(tooLong.map((p) => p.invoiceId))],
+        },
+        { status: 422 }
+      );
+    }
+
     // 4. Generate the export file
     const exporter = new MoveinExporter();
-    const buffer = exporter.export(invoices as Invoice[], mappings, client.vat_account);
+    const buffer = exporter.export(invoices as Invoice[], mappings, client.vat_account ?? '');
+    const exportedIds = (invoices as Invoice[]).map((inv) => inv.id);
 
     // 5. Update invoice statuses to 'exported'
     await supabase
@@ -95,20 +123,19 @@ export async function POST(request: Request) {
       })
       .in('id', exportedIds);
 
-    // 6. Return the file buffer as download attachment
-    const headers = new Headers();
-    headers.set('Content-Type', 'text/plain; charset=utf-8');
-    headers.set('Content-Disposition', `attachment; filename="movein.dat"`);
-
+    // 6. Return the Windows-1255 bytes as a binary download (see moveinDownloadHeaders).
     return new Response(new Uint8Array(buffer), {
       status: 200,
-      headers,
+      headers: moveinDownloadHeaders(buffer.length),
     });
   } catch (err) {
+    if (err instanceof MoveinValidationError) {
+      return NextResponse.json(
+        { error: 'חלק מהחשבוניות לא מתאימות לפורמט Move-in. תקנו אותן ונסו שוב.', invalid: err.problems.map((p) => `${p.label}: ${p.message}`) },
+        { status: 422 }
+      );
+    }
     console.error('Export endpoint crashed:', err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'הייצוא נכשל' }, { status: 500 });
   }
 }

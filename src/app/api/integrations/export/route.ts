@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { supabase } from '@/lib/supabase';
-import { isUuid, requireClientsAccess, requireUser } from '@/lib/auth';
+import { accessibleClientIds, isUuid, requireClientsAccess, requireUser } from '@/lib/auth';
 import type { AccountMapping, Invoice } from '@/shared/types';
 import { getPlugin } from '@/integrations/registry';
 import { secretsOf } from '@/integrations/config';
@@ -56,12 +56,23 @@ export async function POST(request: Request) {
     console.error('[Integrations export] Failed to load invoices:', fetchErr.message);
     return NextResponse.json({ error: 'שגיאה בטעינת החשבוניות' }, { status: 500 });
   }
-  const invoices = (invoiceRows ?? []) as Invoice[];
+  // Invoices of other offices count as "not found" (same 404 as an unknown id), so the answer
+  // never reveals that an id exists in another office.
+  let allowedClients: string[] | null;
+  try {
+    allowedClients = await accessibleClientIds(auth.value);
+  } catch (err) {
+    console.error('[Integrations export] Access check failed:', err instanceof Error ? err.message : String(err));
+    return NextResponse.json({ error: 'שגיאה בבדיקת הרשאות' }, { status: 500 });
+  }
+  const invoices = ((invoiceRows ?? []) as Invoice[]).filter(
+    (inv) => allowedClients === null || allowedClients.includes(inv.client_id)
+  );
   if (invoices.length !== ids.length) {
     return NextResponse.json({ error: 'חלק מהחשבוניות לא נמצאו' }, { status: 404 });
   }
 
-  // Every invoice must belong to a client of the user's offices, and all to the same client.
+  // Every invoice must belong to a client of the user's offices (re-checked), and all to the same client.
   const clientIds = [...new Set(invoices.map((inv) => inv.client_id))];
   const access = await requireClientsAccess(clientIds, auth.value);
   if (!access.ok) return access.response;

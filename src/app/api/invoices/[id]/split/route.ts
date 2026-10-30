@@ -6,6 +6,7 @@ import { validateSplitRanges } from '@/shared/documentSplit';
 import { requireInvoiceAccess } from '@/lib/auth';
 import { isClientStorageFileUrl } from '@/lib/ingestHelpers';
 import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
+import { downloadInvoiceFile, redactUrlForLog, storedFileUrlFor } from '@/lib/invoiceFiles';
 
 function sanitizeStorageFilename(fileName: string): string {
   const lastDot = fileName.lastIndexOf('.');
@@ -51,7 +52,7 @@ export async function POST(
 
     if (fetchErr || !invoice) {
       console.error(`[Split API] Failed to fetch invoice ${id}:`, fetchErr);
-      return NextResponse.json({ error: 'Invoice not found' }, { status: 404 });
+      return NextResponse.json({ error: 'החשבונית לא נמצאה' }, { status: 404 });
     }
 
     // 2. Download the original invoice file (file_url is user-editable: only our own storage URLs for this client)
@@ -59,12 +60,12 @@ export async function POST(
       console.error(`[Split API] Refusing to fetch untrusted file URL for invoice ${id}`);
       return NextResponse.json({ error: 'קובץ החשבונית אינו קובץ אחסון של הלקוח, ולכן לא ניתן לפצל אותו' }, { status: 400 });
     }
-    console.log(`[Split API] Downloading original PDF from: ${invoice.file_url}`);
-    const downloadRes = await fetch(invoice.file_url);
-    if (!downloadRes.ok) {
-      throw new Error(`Failed to download original invoice file from storage: ${downloadRes.statusText}`);
+    console.log(`[Split API] Downloading original PDF from: ${redactUrlForLog(invoice.file_url)}`);
+    // Service-role Storage read of the object (file_url is a storage reference, not a link - QA #31)
+    const fileBuffer = await downloadInvoiceFile(invoice.file_url, invoice.client_id);
+    if (!fileBuffer) {
+      throw new Error('Failed to download original invoice file from storage');
     }
-    const fileBuffer = Buffer.from(await downloadRes.arrayBuffer());
 
     const originalFileName = invoice.file_name || 'invoice.pdf';
     const lastDot = originalFileName.lastIndexOf('.');
@@ -122,16 +123,8 @@ export async function POST(
         throw new Error(`Failed to upload split PDF part ${idx + 1} to storage: ${uploadErr?.message}`);
       }
 
-      // Generate signed URL
-      const { data: signedData, error: signErr } = await supabase.storage
-        .from('raw-invoices')
-        .createSignedUrl(uploadPath, 60 * 60 * 24 * 365);
-
-      if (signErr || !signedData?.signedUrl) {
-        throw new Error(`Failed to create signed URL for split PDF part ${idx + 1}: ${signErr?.message}`);
-      }
-
-      const splitFileUrl = signedData.signedUrl;
+      // Stored as a storage reference, not a bearer link (QA #31)
+      const splitFileUrl = storedFileUrlFor(uploadPath);
 
       if (idx === 0) {
         // Update primary (current) invoice to represent the first split part
@@ -191,9 +184,6 @@ export async function POST(
 
   } catch (err) {
     console.error(`[Split API] Error during splitting of invoice ${id}:`, err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'פיצול המסמך נכשל. נסו שוב.' }, { status: 500 });
   }
 }
