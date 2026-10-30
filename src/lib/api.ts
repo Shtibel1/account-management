@@ -117,8 +117,52 @@ export async function approveInvoice(id: string, validatedData: Partial<Extracte
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ validated_data: validatedData }),
   });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error ?? 'שגיאה באישור החשבונית');
+  return body;
+}
+
+async function invoiceAction(id: string, action: 'reject' | 'retry' | 'reopen', fallbackError: string, payload: Record<string, unknown> = {}) {
+  const res = await fetch(`${API_URL}/api/invoices/${encodeURIComponent(id)}/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error ?? fallbackError);
+  return body as { success: true; status: string };
+}
+
+/** "לא מאושרת": invoice in review, or a failed document. */
+export function rejectInvoice(id: string) {
+  return invoiceAction(id, 'reject', 'שגיאה בסימון החשבונית כלא מאושרת');
+}
+
+/** Failed document: back to processing, then (fire-and-forget) re-runs the pipeline. */
+export async function retryInvoice(id: string) {
+  const result = await invoiceAction(id, 'retry', 'שגיאה בהפעלת העיבוד מחדש');
+  fetch(`${API_URL}/api/invoices/${encodeURIComponent(id)}/process`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  }).catch((err) => {
+    console.error(`[Frontend API] Failed to trigger reprocessing for invoice ${id}:`, err);
+  });
+  return result;
+}
+
+/** Back to review (approved / rejected / returned; exported = office owner only, logged). */
+export function reopenInvoice(id: string, reason?: string) {
+  return invoiceAction(id, 'reopen', 'שגיאה בפתיחת החשבונית מחדש', reason ? { reason } : {});
+}
+
+/** Deletes a failed document (status 'error' only). */
+export async function deleteInvoice(id: string): Promise<void> {
+  const res = await fetch(`${API_URL}/api/invoices/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? 'שגיאה במחיקת החשבונית');
+  }
 }
 
 /** Re-applies supplier rules to the client's invoices still in review. Omit suppliers to re-apply to all. */

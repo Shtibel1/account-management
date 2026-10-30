@@ -1,9 +1,12 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { ExtractedData, Invoice, AccountMapping, ConfidenceField, LineItem } from '@/shared/types';
-import { approveInvoice, reapplySupplierRules } from '@/lib/api';
-import { allocationThreshold, isAllocationNumberWellFormed, isAllocationRequired } from '@/shared/allocation';
+import { approveInvoice, deleteInvoice, reapplySupplierRules, rejectInvoice, reopenInvoice, retryInvoice } from '@/lib/api';
+import { allocationThreshold, isAllocationRequired } from '@/shared/allocation';
+import { isAllocationNumberAcceptable } from '@/shared/approvalValidation';
+import { APPROVABLE_STATUSES, REOPENABLE_STATUSES } from '@/shared/invoiceStatus';
 import { findSupplierRule, normalizeVatId, VARIOUS_SUPPLIERS_ACCOUNT } from '@/shared/supplierRules';
 import { dismissDuplicateInFlags } from '@/shared/duplicates';
 import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
@@ -11,7 +14,7 @@ import { checkLineItemsSum, hasMixedVat, isLineItemWarning, lineItemWarnings, no
 import { createClient } from '@/utils/supabase/client';
 import { LineItemsTable } from '@/components/SplitPane/LineItemsTable';
 import clsx from 'clsx';
-import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark, Zap, Undo2 } from 'lucide-react';
+import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark, Zap, Undo2, RotateCcw, Trash2 } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
 import { DuplicateAlert } from './DuplicateAlert';
 
@@ -27,6 +30,7 @@ type SupplierStatus = 'known' | 'unknown' | 'loading';
 
 export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToClient }: Props) {
   const supabase = createClient();
+  const router = useRouter();
   const { toast } = useToast();
   
   const initial = invoice.validated_data ?? invoice.extracted_data;
@@ -34,6 +38,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
   const [saving, setSaving] = useState(false);
   const [activeFormTab, setActiveFormTab] = useState<'invoice' | 'bank'>('invoice');
   const [rejecting, setRejecting] = useState(false);
+  const [errorAction, setErrorAction] = useState<'retry' | 'delete' | 'reopen' | null>(null);
   const [error, setError] = useState('');
   const [categories, setCategories] = useState<string[]>([]);
   const [dbMappings, setDbMappings] = useState<AccountMapping[]>([]);
@@ -263,7 +268,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
 
   const allocationRequired = isAllocationRequired(data);
   const isAllocationMissing = allocationRequired && !data.allocation_number?.trim();
-  const isAllocationMalformed = !!data.allocation_number?.trim() && !isAllocationNumberWellFormed(data.allocation_number);
+  const isAllocationMalformed = !!data.allocation_number?.trim() && !isAllocationNumberAcceptable(data.allocation_number);
 
   const isDateEmpty = !data.invoice_date;
   const isAmountBeforeVatEmpty = data.amount_before_vat == null || isNaN(data.amount_before_vat);
@@ -293,6 +298,19 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
   const handleApprove = async () => {
     if (isDateEmpty || isAmountBeforeVatEmpty || isVatAmountEmpty || isTotalAmountEmpty) {
       setError('יש למלא את כל שדות החובה: תאריך חשבונית, לפני מע״מ, מע"מ, וסה״כ לתשלום.');
+      return;
+    }
+    // Same blocking rules as the server (src/shared/approvalValidation.ts)
+    if (!isVatIdOk) {
+      setError(`מספר עוסק / ח.פ. אינו תקין: ${vatIdErrorText}`);
+      return;
+    }
+    if (isAllocationMissing) {
+      setError('חסר מספר הקצאה - חובה בחשבונית זו (מעל סכום הסף לפני מע"מ)');
+      return;
+    }
+    if (isAllocationMalformed) {
+      setError('מספר ההקצאה אינו תקין - נדרשות 9 ספרות');
       return;
     }
     setSaving(true); setError('');
@@ -412,16 +430,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
   const handleReject = async () => {
     setRejecting(true); setError('');
     try {
-      const { error: dbErr } = await supabase
-        .from('invoices')
-        .update({
-          status: 'rejected',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', invoice.id);
-
-      if (dbErr) throw dbErr;
-
+      await rejectInvoice(invoice.id);
       toast('החשבונית סומנה כלא מאושרת', 'info');
       onApproved();
     } catch (e: any) {
@@ -436,6 +445,53 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
   const isError = invoice.status === 'error';
   const isReturned = invoice.status === 'returned';
   const isReadOnly = isApproved || isRejected || isError || isReturned || invoice.status === 'exported';
+  const canApprove = APPROVABLE_STATUSES.includes(invoice.status);
+
+  // Failed document ('error'): process again, mark as not approved, or delete.
+  const handleRetry = async () => {
+    setErrorAction('retry'); setError('');
+    try {
+      await retryInvoice(invoice.id);
+      toast('החשבונית נשלחה לעיבוד מחדש', 'info');
+      onApproved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'שגיאה בהפעלת העיבוד מחדש');
+    } finally {
+      setErrorAction(null);
+    }
+  };
+
+  // Explicit reopen back to review (exported: office owner only, logged on the server).
+  const canReopen = REOPENABLE_STATUSES.includes(invoice.status);
+  const handleReopen = async () => {
+    const question = invoice.status === 'exported'
+      ? 'החשבונית כבר יוצאה להנהלת החשבונות. פתיחה מחדש תאפשר לייצא אותה שוב (רישום כפול). להמשיך?'
+      : 'לפתוח את החשבונית מחדש לבדיקה?';
+    if (!window.confirm(question)) return;
+    setErrorAction('reopen'); setError('');
+    try {
+      await reopenInvoice(invoice.id);
+      toast('החשבונית נפתחה מחדש לבדיקה', 'info');
+      onApproved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'שגיאה בפתיחת החשבונית מחדש');
+    } finally {
+      setErrorAction(null);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!window.confirm(`למחוק את המסמך "${invoice.file_name}"? לא ניתן לבטל פעולה זו.`)) return;
+    setErrorAction('delete'); setError('');
+    try {
+      await deleteInvoice(invoice.id);
+      toast('המסמך נמחק', 'info');
+      router.push('/review');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'שגיאה במחיקת החשבונית');
+      setErrorAction(null);
+    }
+  };
 
   // The server already cleared the flag in validated_data; mirror it locally so approving
   // right after a dismissal doesn't write the stale duplicate flag back.
@@ -451,7 +507,11 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
   const isApproveDisabled =
     saving ||
     rejecting ||
+    !canApprove ||
     mathError ||
+    !isVatIdOk ||
+    isAllocationMissing ||
+    isAllocationMalformed ||
     supplierStatus === 'loading' ||
     (supplierStatus === 'unknown' && !supplierCode.trim()) ||
     isDateEmpty ||
@@ -844,7 +904,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
                 חשבונית מעל ₪{allocationThreshold(data.invoice_date)?.toLocaleString()} לפני מע"מ — בלי מספר הקצאה לא ניתן לקזז את המע"מ
               </p>
             )}
-            {isAllocationMalformed && <p className="text-xs text-amber-700">מספר הקצאה אמור להיות 9 ספרות — אנא ודא</p>}
+            {isAllocationMalformed && <p className="text-xs text-red-600">מספר הקצאה חייב להיות 9 ספרות</p>}
 
             <Field label="קטגוריית הוצאה" error={fieldError('expense_category')} fieldKey="expense_category" onFieldFocus={onFieldFocus} confidence={confidenceFor('expense_category')}
               badge={isCategoryFromRule
@@ -976,9 +1036,37 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
               </span>
             )}
             {isError && (
-              <span className="text-red-700 bg-red-50 border-red-200 flex items-center gap-2 px-3 py-1 rounded-full border">
-                <XCircle className="h-4 w-4 shrink-0" /> {invoice.error_message || 'המסמך לא זוהה כחשבונית'}
-              </span>
+              <div className="w-full flex flex-col items-center gap-3">
+                <span className="text-red-700 bg-red-50 border-red-200 flex items-center gap-2 px-3 py-1 rounded-full border">
+                  <XCircle className="h-4 w-4 shrink-0" /> {invoice.error_message || 'המסמך לא זוהה כחשבונית'}
+                </span>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleRetry}
+                    disabled={errorAction !== null || rejecting}
+                    className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border border-blue-200 text-blue-700 bg-white hover:bg-blue-50 transition-colors disabled:opacity-60"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" /> {errorAction === 'retry' ? 'שולח לעיבוד...' : 'עבד מחדש'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleReject}
+                    disabled={errorAction !== null || rejecting}
+                    className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border border-rose-200 text-rose-700 bg-white hover:bg-rose-50 transition-colors disabled:opacity-60"
+                  >
+                    <XCircle className="h-3.5 w-3.5" /> {rejecting ? 'פוסל...' : 'לא מאושר'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDelete}
+                    disabled={errorAction !== null || rejecting}
+                    className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border border-slate-200 text-slate-600 bg-white hover:bg-slate-50 transition-colors disabled:opacity-60"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" /> {errorAction === 'delete' ? 'מוחק...' : 'מחק מסמך'}
+                  </button>
+                </div>
+              </div>
             )}
             {isReturned && (
               <span className="text-orange-700 bg-orange-50 border-orange-200 flex items-center gap-2 px-3 py-1 rounded-full border">
@@ -997,6 +1085,16 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
                 className="mr-3 flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border border-orange-200 text-orange-700 bg-white hover:bg-orange-50 transition-colors"
               >
                 <Undo2 className="h-3.5 w-3.5" /> החזר ללקוח
+              </button>
+            )}
+            {canReopen && (
+              <button
+                type="button"
+                onClick={handleReopen}
+                disabled={errorAction !== null}
+                className="mr-3 flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border border-slate-200 text-slate-700 bg-white hover:bg-slate-50 transition-colors disabled:opacity-60"
+              >
+                <RotateCcw className="h-3.5 w-3.5" /> {errorAction === 'reopen' ? 'פותח...' : 'פתח מחדש לבדיקה'}
               </button>
             )}
           </div>
