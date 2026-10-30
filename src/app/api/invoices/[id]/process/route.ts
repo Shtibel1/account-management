@@ -51,6 +51,13 @@ export async function POST(
     // file_url is user-editable (PATCH / RLS): only fetch our own storage URLs for this client.
     if (!isMockMode() && !isClientStorageFileUrl(invoice.file_url, invoice.client_id, process.env.SUPABASE_URL || supabaseUrl())) {
       console.error(`[Process Route] Refusing to fetch untrusted file URL for invoice ${id}`);
+      // Mark it, or the review queue would show the invoice as processing forever (the browser
+      // fires this request without waiting for the answer).
+      await supabase.from('invoices').update({
+        status: 'error',
+        error_message: 'קובץ החשבונית אינו קובץ אחסון של הלקוח - יש להעלות אותו מחדש',
+        updated_at: new Date().toISOString(),
+      }).eq('id', id);
       return NextResponse.json({ error: 'Invoice file URL is not a storage file of this client' }, { status: 400 });
     }
 

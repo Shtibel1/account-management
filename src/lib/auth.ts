@@ -202,10 +202,10 @@ export async function requireInvoiceAccess<T extends Record<string, unknown> = {
 
   return guarded('Invoice access check', async () => {
     if (typeof invoiceId !== 'string' || !invoiceId || (!ctx.mock && !isUuid(invoiceId))) {
-      return deny(404, 'Invoice not found');
+      return deny(404, 'החשבונית לא נמצאה');
     }
     const { data, error } = await deps.db.from('invoices').select(columns).eq('id', invoiceId).single();
-    if (error || !data) return deny(404, 'Invoice not found');
+    if (error || !data) return deny(404, 'החשבונית לא נמצאה');
     const invoice = data as unknown as T;
     const client = await checkClient(ctx, invoice.client_id);
     if (!client.ok) {

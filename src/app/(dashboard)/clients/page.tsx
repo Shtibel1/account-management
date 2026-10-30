@@ -6,11 +6,13 @@ import { Client } from '@/shared/types';
 import Link from 'next/link';
 import { Plus, Building2, ChevronLeft, Users, Loader2 } from 'lucide-react';
 import { useSession } from '@/components/Auth/SessionContext';
+import { useToast } from '@/components/ui/Toast';
 import { ClientChannelsDialog, ClientChannelsSummary, useClientChannels } from '@/components/ClientChannels/ClientChannels';
 
 export default function ClientsPage() {
   const supabase = createClient();
   const { currentOrgId } = useSession();
+  const { toast } = useToast();
   const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -44,22 +46,27 @@ export default function ClientsPage() {
   const handleAdd = async () => {
     if (!name.trim()) return;
     setSaving(true);
-    const { data: newClient } = await supabase
+    const { data: newClient, error: insertErr } = await supabase
       .from('clients')
       // org_id: the user's office (RLS requires membership; the DB defaults it when omitted).
       .insert({ name: name.trim(), vat_account: vatAccount.trim(), ...(currentOrgId ? { org_id: currentOrgId } : {}) })
       .select('id')
       .single();
-    if (newClient) {
-      await supabase.from('account_mappings').insert(
-        DEFAULT_CATEGORY_MAPPINGS.map((cat) => ({
-          client_id: newClient.id,
-          mapping_type: 'category',
-          key: cat.key,
-          account_code: cat.account_code,
-        }))
-      );
+    if (insertErr || !newClient) {
+      // e.g. RLS: the user has no office yet.
+      console.error('[Clients] Failed to create client:', insertErr?.message);
+      toast('יצירת הלקוח נכשלה. ודאו שאתם משויכים למשרד ונסו שוב.', 'error');
+      setSaving(false);
+      return;
     }
+    await supabase.from('account_mappings').insert(
+      DEFAULT_CATEGORY_MAPPINGS.map((cat) => ({
+        client_id: newClient.id,
+        mapping_type: 'category',
+        key: cat.key,
+        account_code: cat.account_code,
+      }))
+    );
     setName(''); setVatAccount(''); setShowForm(false); setSaving(false);
     load();
   };
