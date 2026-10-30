@@ -3,6 +3,7 @@ import type { ExportPlugin, PluginInfo } from '@/integrations/types';
 import { moveinPlugin } from '@/integrations/plugins/movein';
 import { excelPlugin } from '@/integrations/plugins/excel';
 import { webhookPlugin } from '@/integrations/plugins/webhook';
+import { icountPlugin } from '@/integrations/plugins/icount';
 
 /**
  * Plugin registry. To add a plugin: create src/integrations/plugins/<id>/ and append it to
@@ -95,7 +96,7 @@ export function createRegistry(plugins: ExportPlugin[]): PluginRegistry {
   };
 }
 
-export const BUILTIN_PLUGINS: ExportPlugin[] = [moveinPlugin, excelPlugin, webhookPlugin];
+export const BUILTIN_PLUGINS: ExportPlugin[] = [moveinPlugin, excelPlugin, webhookPlugin, icountPlugin];
 
 export const registry: PluginRegistry = createRegistry(BUILTIN_PLUGINS);
 

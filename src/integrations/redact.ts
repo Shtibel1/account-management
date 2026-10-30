@@ -54,6 +54,7 @@ const SECRET_KEY_NAMES = new Set([
   'signingsecret',
   'webhooksecret',
   'sessionid',
+  'sid',
   'cookie',
   'credentials',
 ]);
