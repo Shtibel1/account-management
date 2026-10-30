@@ -20,6 +20,8 @@ import {
 
 interface Props {
   clientId: string;
+  /** Account labels already used by this client - the dedupe key is per account, so reuse them. */
+  existingAccountLabels?: string[];
   onImported: () => void;
   onCancel: () => void;
 }
@@ -40,7 +42,7 @@ function defaultAccountLabel(fileName: string): string {
   return fileName.replace(/\.[^.]+$/, '').slice(0, 60);
 }
 
-export function StatementImport({ clientId, onImported, onCancel }: Props) {
+export function StatementImport({ clientId, existingAccountLabels = [], onImported, onCancel }: Props) {
   const { toast } = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<ParsedFile | null>(null);
@@ -63,7 +65,8 @@ export function StatementImport({ clientId, onImported, onCancel }: Props) {
       setFile({ name: selected.name, rows });
       setHeaderRow(headerIndex);
       setMapping(guessColumnMapping(rows[headerIndex] ?? []));
-      setAccountLabel(defaultAccountLabel(selected.name));
+      // A new statement of the client's only account keeps its label, so overlapping periods dedupe.
+      setAccountLabel(existingAccountLabels.length === 1 ? existingAccountLabels[0] : defaultAccountLabel(selected.name));
     } catch (err) {
       console.error('[bank] Failed to read statement file:', err);
       setReadError(err instanceof Error ? err.message : 'שגיאה בקריאת הקובץ');
@@ -198,8 +201,17 @@ export function StatementImport({ clientId, onImported, onCancel }: Props) {
                 value={accountLabel}
                 maxLength={100}
                 placeholder='למשל: לאומי 12-345 / ויזה 1234'
+                list="bank-account-labels"
                 onChange={(e) => setAccountLabel(e.target.value)}
               />
+              <datalist id="bank-account-labels">
+                {existingAccountLabels.map((l) => <option key={l} value={l} />)}
+              </datalist>
+              {existingAccountLabels.length > 0 && (
+                <span className="text-xs text-slate-400 mt-1 block">
+                  לדף נוסף של חשבון קיים בחר את אותו השם, כדי שתנועות חופפות לא ייובאו פעמיים
+                </span>
+              )}
             </label>
             <label className="block">
               <span className="text-xs font-semibold text-slate-500 mb-1 block">שורת הכותרות</span>

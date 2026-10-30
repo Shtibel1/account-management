@@ -9,7 +9,7 @@ import { autoMatch, findCandidates, isMatchableDebit, MAX_CANDIDATES, toMatchabl
 
 const TABLE = 'bank_transactions';
 const PAGE_SIZE = 1000;          // PostgREST's default max rows per request
-const KEY_LOOKUP_CHUNK = 200;    // keeps the `in (...)` URL short
+const KEY_LOOKUP_CHUNK = 100;    // keeps the `in (...)` URL short (~45 chars per key)
 const INSERT_CHUNK = 500;
 
 export class BankTableMissingError extends Error {
@@ -261,6 +261,10 @@ export async function applyBankAction(db: SupabaseClient, transactionId: string,
         .single();
       if (!invoice || invoice.client_id !== txn.client_id) {
         throw new BankActionError('החשבונית לא נמצאה אצל הלקוח הזה', 404);
+      }
+      // Same rule as auto-match (and the picker): only reviewer-approved invoices settle a payment.
+      if (invoice.status !== 'approved' && invoice.status !== 'exported') {
+        throw new BankActionError('ניתן להתאים רק חשבונית מאושרת', 409);
       }
       const { data: taken, error: takenError } = await db
         .from(TABLE)

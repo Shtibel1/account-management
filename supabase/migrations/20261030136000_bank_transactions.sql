@@ -14,7 +14,7 @@ create table if not exists public.bank_transactions (
     check (match_status in ('unmatched', 'auto', 'manual', 'ignored')),
   -- Invoices the reviewer un-matched from this line; auto-match won't propose them again.
   rejected_invoice_ids uuid[] not null default '{}',
-  -- Built by bankDedupeKeys() in src/shared/bankStatement.ts (date|amount|description|reference#occurrence).
+  -- Built by bankDedupeKeys() in src/shared/bankStatement.ts (date|amount|hash(description, reference)#occurrence).
   dedupe_key text not null,
   import_batch_id uuid not null,
   source_file text,

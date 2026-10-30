@@ -79,6 +79,7 @@ export default function BankPage() {
       missing: missing.length,
       missingSum: missing.reduce((s, x) => s + Math.abs(x.amount), 0),
       ignored: t.filter((x) => x.match_status === 'ignored').length,
+      accountLabels: [...new Set(t.map((x) => x.account_label).filter(Boolean))].sort(),
       coverage: debits.length ? Math.round((matched.length / debits.length) * 100) : null,
     };
   }, [overview.transactions]);
@@ -177,6 +178,7 @@ export default function BankPage() {
       {showImport && clientId ? (
         <StatementImport
           clientId={clientId}
+          existingAccountLabels={stats.accountLabels}
           onCancel={() => setShowImport(false)}
           onImported={() => {
             setShowImport(false);

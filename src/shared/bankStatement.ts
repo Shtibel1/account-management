@@ -290,15 +290,33 @@ function keyText(value: string | null): string {
   return (value ?? '').replace(/[‎‏‪-‮﻿]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+/** 64-bit string hash (cyrb53-style, two 32-bit lanes) as 16 hex chars. Not cryptographic. */
+function hash64(text: string): string {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
+  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
+  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (h2 >>> 0).toString(16).padStart(8, '0') + (h1 >>> 0).toString(16).padStart(8, '0');
+}
+
 /**
  * Stable identity per statement line, used by the (client_id, account_label, dedupe_key) unique index.
  * Identical lines in the same file (two equal coffees on one day) get #1, #2... so they stay distinct,
  * while re-importing the same file - or an overlapping period - produces the same keys again.
+ * Description/reference are hashed: the keys go into a PostgREST `in (...)` filter, where raw text
+ * (quotes as in בע"מ, commas, 500-char descriptions) would break the filter or the URL length.
  */
 export function bankDedupeKeys(rows: NormalizedBankRow[]): string[] {
   const seen = new Map<string, number>();
   return rows.map((r) => {
-    const base = [r.txn_date, r.amount.toFixed(2), keyText(r.description), keyText(r.reference)].join('|');
+    const base = [r.txn_date, r.amount.toFixed(2), hash64(`${keyText(r.description)}|${keyText(r.reference)}`)].join('|');
     const n = (seen.get(base) ?? 0) + 1;
     seen.set(base, n);
     return `${base}#${n}`;
