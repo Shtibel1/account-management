@@ -58,6 +58,34 @@ export function isOwnStoragePath(clientId: string, filePath: string): boolean {
   return rest.length > 0 && rest.length <= 300 && !rest.includes('/') && !rest.includes('\\') && rest !== '.' && rest !== '..';
 }
 
+/**
+ * True when `fileUrl` (an invoices.file_url value, which signed-in users can edit) points at a file
+ * of this client in the raw-invoices bucket of our own Supabase project. Server routes that fetch
+ * file_url (process / split) must check this first: otherwise a user could make the server fetch an
+ * arbitrary URL (SSRF) or another office's file.
+ */
+export function isClientStorageFileUrl(fileUrl: unknown, clientId: string, supabaseBaseUrl: string | null): boolean {
+  if (typeof fileUrl !== 'string' || !clientId || !supabaseBaseUrl) return false;
+  let url: URL;
+  let base: URL;
+  try {
+    url = new URL(fileUrl);
+    base = new URL(supabaseBaseUrl);
+  } catch {
+    return false;
+  }
+  if (url.origin !== base.origin || url.username || url.password) return false;
+  const match = /^\/storage\/v1\/object\/(?:sign|public)\/raw-invoices\/(.+)$/.exec(url.pathname);
+  if (!match) return false;
+  let objectPath: string;
+  try {
+    objectPath = decodeURIComponent(match[1]);
+  } catch {
+    return false;
+  }
+  return isOwnStoragePath(clientId, objectPath);
+}
+
 // ── File type detection ───────────────────────────────────────────────────────
 
 const EXTENSION_BY_MIME: Record<SupportedMimeType, string> = {

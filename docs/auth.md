@@ -68,6 +68,9 @@ auth.users ──< memberships (role owner|member) >── organizations ──<
    - `accessibleClientIds(ctx)` for list endpoints without a client filter.
    Only after the check do routes use the service-role client. Body values are never trusted on their own:
    `/api/invoices/[id]/process` takes the file URL and client from the stored invoice (a mismatching `tenantId` → 403),
+   and both it and `/split` only fetch a stored `file_url` that is a raw-invoices URL of our own Supabase project
+   inside that invoice's `<clientId>/` folder (`isClientStorageFileUrl`; `file_url` is user-editable, so anything
+   else would be SSRF / cross-office file access),
    `/api/invoices/upload` only registers storage paths inside `<clientId>/`, `PATCH /api/invoices/[id]` re-checks a
    changed `client_id`, `/api/export` requires all invoices to be accessible (and from one client).
 3. **Browser** data access (`src/utils/supabase/client.ts`) uses the anon key + the user's cookie session, so RLS

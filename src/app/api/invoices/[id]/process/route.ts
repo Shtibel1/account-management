@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { runOrchestrationPipeline } from '@/agents/supervisor';
 import { requireInvoiceAccess } from '@/lib/auth';
+import { isClientStorageFileUrl } from '@/lib/ingestHelpers';
+import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
 
 const SUPPORTED_MIME = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/gif', 'image/tiff']);
 
@@ -44,6 +46,12 @@ export async function POST(
         updated_at: new Date().toISOString(),
       }).eq('id', id);
       return NextResponse.json({ error: 'Invoice has no stored file' }, { status: 400 });
+    }
+
+    // file_url is user-editable (PATCH / RLS): only fetch our own storage URLs for this client.
+    if (!isMockMode() && !isClientStorageFileUrl(invoice.file_url, invoice.client_id, process.env.SUPABASE_URL || supabaseUrl())) {
+      console.error(`[Process Route] Refusing to fetch untrusted file URL for invoice ${id}`);
+      return NextResponse.json({ error: 'Invoice file URL is not a storage file of this client' }, { status: 400 });
     }
 
     console.log(`[Process Route] 🚀 Starting synchronous pipeline execution for invoice ${id}`);

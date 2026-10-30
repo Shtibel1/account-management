@@ -369,7 +369,13 @@ create policy account_mappings_member_all on public.account_mappings
 create policy supplier_automation_member_all on public.supplier_automation
   for all to authenticated
   using (client_id in (select public.accessible_client_ids()))
-  with check (client_id in (select public.accessible_client_ids()));
+  with check (
+    client_id in (select public.accessible_client_ids())
+    and (
+      disabled_by_invoice_id is null
+      or exists (select 1 from public.invoices i where i.id = disabled_by_invoice_id and i.client_id = supplier_automation.client_id)
+    )
+  );
 
 create policy client_contacts_member_all on public.client_contacts
   for all to authenticated
@@ -404,8 +410,12 @@ create policy invoice_corrections_member_all on public.invoice_corrections
     where i.id = invoice_id and i.client_id in (select public.accessible_client_ids())
   ))
   with check (exists (
+    -- client_id (read by the supplier-automation eligibility check) must be the invoice's own
+    -- client, so a member can't write correction rows attributed to another office's client.
     select 1 from public.invoices i
-    where i.id = invoice_id and i.client_id in (select public.accessible_client_ids())
+    where i.id = invoice_id
+      and i.client_id in (select public.accessible_client_ids())
+      and (invoice_corrections.client_id is null or invoice_corrections.client_id = i.client_id)
   ));
 
 -- 5f. Views stay security_invoker (they inherit the policies above); no anon access.

@@ -4,6 +4,8 @@ import { PDFDocument } from 'pdf-lib';
 import { saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
 import { validateSplitRanges } from '@/shared/documentSplit';
 import { requireInvoiceAccess } from '@/lib/auth';
+import { isClientStorageFileUrl } from '@/lib/ingestHelpers';
+import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
 
 function sanitizeStorageFilename(fileName: string): string {
   const lastDot = fileName.lastIndexOf('.');
@@ -52,7 +54,11 @@ export async function POST(
       return NextResponse.json({ error: 'Invoice not found' }, { status: 404 });
     }
 
-    // 2. Download the original invoice file
+    // 2. Download the original invoice file (file_url is user-editable: only our own storage URLs for this client)
+    if (!isMockMode() && !isClientStorageFileUrl(invoice.file_url, invoice.client_id, process.env.SUPABASE_URL || supabaseUrl())) {
+      console.error(`[Split API] Refusing to fetch untrusted file URL for invoice ${id}`);
+      return NextResponse.json({ error: 'Invoice file URL is not a storage file of this client' }, { status: 400 });
+    }
     console.log(`[Split API] Downloading original PDF from: ${invoice.file_url}`);
     const downloadRes = await fetch(invoice.file_url);
     if (!downloadRes.ok) {
