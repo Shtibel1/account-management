@@ -1,6 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ExtractedData } from '@/shared/types';
 import { formatFewShotPrompt, type FewShotExample } from '@/shared/fewshot';
+import { MAX_LINE_ITEMS, normalizeLineItems } from '@/shared/lineItems';
+import { normalizeFieldConfidence } from '@/shared/confidence';
 
 const apiKey = process.env.ANTHROPIC_API_KEY;
 
@@ -55,6 +57,37 @@ const TOOL_DEFINITION: Anthropic.Tool = {
       bank_branch_code:  { type: 'string', description: 'מספר סניף הבנק (למשל 109)' },
       bank_branch_name:  { type: 'string', description: 'שם סניף הבנק (למשל אשקלון)' },
       bank_account:      { type: 'string', description: 'מספר חשבון הבנק להעברה' },
+      line_items: {
+        type: 'array',
+        maxItems: MAX_LINE_ITEMS,
+        description: `שורות הפריטים / השירותים בחשבונית, לפי הסדר (עד ${MAX_LINE_ITEMS} שורות). כלול גם שורות הנחה (סכום שלילי) ודמי משלוח. אל תכלול שורות סיכום (סה"כ, מע"מ, לתשלום).`,
+        items: {
+          type: 'object',
+          properties: {
+            description: { type: 'string', description: 'תיאור הפריט / השירות' },
+            quantity:    { type: 'number', description: 'כמות' },
+            unit_price:  { type: 'number', description: 'מחיר ליחידה' },
+            line_total:  { type: 'number', description: 'סה"כ לשורה כפי שמודפס בחשבונית' },
+            vat_exempt:  { type: 'boolean', description: 'true רק אם השורה מסומנת במפורש כפטורה ממע"מ / ללא מע"מ' },
+          },
+          required: ['line_total'],
+        },
+      },
+      field_confidence: {
+        type: 'object',
+        description: 'רמת הביטחון שלך (0 עד 1) בכל שדה שחילצת: 1 = מודפס בבירור וחד-משמעי, 0.5 = ניחוש מהקשר / טקסט OCR משובש, 0.2 = כמעט ניחוש. כלול רק שדות שחילצת.',
+        properties: {
+          supplier_name:     { type: 'number', minimum: 0, maximum: 1 },
+          supplier_vat_id:   { type: 'number', minimum: 0, maximum: 1 },
+          invoice_number:    { type: 'number', minimum: 0, maximum: 1 },
+          invoice_date:      { type: 'number', minimum: 0, maximum: 1 },
+          amount_before_vat: { type: 'number', minimum: 0, maximum: 1 },
+          vat_amount:        { type: 'number', minimum: 0, maximum: 1 },
+          total_amount:      { type: 'number', minimum: 0, maximum: 1 },
+          expense_category:  { type: 'number', minimum: 0, maximum: 1 },
+          allocation_number: { type: 'number', minimum: 0, maximum: 1 },
+        },
+      },
     },
     $defs: {
       bbox: {
@@ -83,6 +116,8 @@ You will receive raw OCR text from bilingual Israeli invoices. The text may have
 סכומים — ספרות בלבד, ללא סימן מטבע.
 מספר הקצאה — אם מופיע "מספר הקצאה" (רשות המסים), חלץ אותו כ-allocation_number. אל תבלבל עם מספר החשבונית או מספר העוסק.
 פרטי חשבון בנק — אם מופיעים פרטי העברה בנקאית (שם בנק, מספר/שם סניף, מספר חשבון), חלץ אותם במדויק.
+שורות פריטים — אם יש טבלת פריטים, חלץ כל שורה ל-line_items (תיאור, כמות, מחיר ליחידה, סה"כ שורה; vat_exempt=true לשורה פטורה ממע"מ). עד ${MAX_LINE_ITEMS} שורות.
+ביטחון — מלא field_confidence עם ציון 0-1 לכל שדה שחילצת. היה כן: ציון נמוך לשדה שקראת מטקסט משובש או הסקת מהקשר.
 
 כללים חשובים לסכומים בחשבוניות ישראליות:
 - "amount_before_vat" = סה"כ לתשלום פחות סכום המע"מ (total - vat).
@@ -101,6 +136,7 @@ You will receive raw OCR text from bilingual Israeli invoices. The text may have
 אם שדה לא קיים, אל תכלול אותו.
 חלץ גם פרטי העברה בנקאית של הספק (בנק, סניף, חשבון) אם רשומים במסמך.
 חלץ את "מספר הקצאה" של רשות המסים כ-allocation_number אם מופיע (לא מספר החשבונית ולא ח.פ.).
+חלץ את שורות הפריטים ל-line_items (עד ${MAX_LINE_ITEMS} שורות, vat_exempt=true לשורה פטורה ממע"מ) ומלא field_confidence (0-1) לכל שדה שחילצת.
 הנוסחה תמיד: amount_before_vat = total_amount - vat_amount.`;
 
 const RETRY_HINT = `שים לב במיוחד לסכומים: ודא ש-(סכום לפני מע"מ + מע"מ = סה"כ לתשלום).
@@ -164,14 +200,31 @@ export async function extractInvoiceData(
     text: promptText,
   });
 
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-5-20250929',
-    max_tokens: 1024,
-    system: shouldSendImage ? SYSTEM_PROMPT_VISION : SYSTEM_PROMPT_TEXT_ONLY,
-    tools: [TOOL_DEFINITION],
-    tool_choice: { type: 'any' },
-    messages: [{ role: 'user', content }],
-  });
+  const callModel = (maxTokens: number) =>
+    anthropic.messages.create({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: maxTokens,
+      system: shouldSendImage ? SYSTEM_PROMPT_VISION : SYSTEM_PROMPT_TEXT_ONLY,
+      tools: [TOOL_DEFINITION],
+      tool_choice: { type: 'any' },
+      messages: [{ role: 'user', content }],
+    });
+
+  // 1024 was enough for the scalar fields; up to MAX_LINE_ITEMS lines + confidences need more.
+  // A tool call cut at max_tokens may lose every field (not just line_items), so retry once
+  // with a larger budget (billing is per token actually generated).
+  let response = await callModel(4096);
+  let inputTokens = response.usage?.input_tokens ?? 0;
+  let outputTokens = response.usage?.output_tokens ?? 0;
+  if (response.stop_reason === 'max_tokens') {
+    console.warn('[Extraction] Response hit max_tokens (4096) — retrying with 16384');
+    response = await callModel(16384);
+    inputTokens += response.usage?.input_tokens ?? 0;
+    outputTokens += response.usage?.output_tokens ?? 0;
+    if (response.stop_reason === 'max_tokens') {
+      console.warn('[Extraction] Response hit max_tokens again — tool input may be truncated');
+    }
+  }
 
   const toolUse = response.content.find((b) => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
   if (!toolUse) throw new Error('המודל לא החזיר נתוני חשבונית');
@@ -182,6 +235,8 @@ export async function extractInvoiceData(
     const b = raw[`${key}_bbox`] as { x1: number; y1: number; x2: number; y2: number } | undefined;
     return b && typeof b.x1 === 'number' ? b : undefined;
   };
+
+  const lineItems = normalizeLineItems(raw.line_items);
 
   const extractedData: ExtractedData = {
     supplier_name:     (raw.supplier_name as string) ?? null,
@@ -197,6 +252,8 @@ export async function extractInvoiceData(
     bank_branch_code:  (raw.bank_branch_code as string) ?? null,
     bank_branch_name:  (raw.bank_branch_name as string) ?? null,
     bank_account:      (raw.bank_account as string) ?? null,
+    line_items:        lineItems.length > 0 ? lineItems : null,
+    field_confidence:  normalizeFieldConfidence(raw.field_confidence),
     bboxes: {
       supplier_name:     bbox('supplier_name'),
       supplier_vat_id:   bbox('supplier_vat_id'),
@@ -212,8 +269,8 @@ export async function extractInvoiceData(
 
   return {
     extractedData,
-    inputTokens: response.usage?.input_tokens ?? 0,
-    outputTokens: response.usage?.output_tokens ?? 0,
+    inputTokens,
+    outputTokens,
     fewShotInvoiceIds: usedInvoiceIds,
   };
 }

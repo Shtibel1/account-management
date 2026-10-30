@@ -1,12 +1,15 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { ExtractedData, Invoice, AccountMapping } from '@/shared/types';
+import { ExtractedData, Invoice, AccountMapping, ConfidenceField, LineItem } from '@/shared/types';
 import { approveInvoice, reapplySupplierRules } from '@/lib/api';
 import { allocationThreshold, isAllocationNumberWellFormed, isAllocationRequired } from '@/shared/allocation';
 import { findSupplierRule, normalizeVatId, VARIOUS_SUPPLIERS_ACCOUNT } from '@/shared/supplierRules';
 import { dismissDuplicateInFlags } from '@/shared/duplicates';
+import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
+import { checkLineItemsSum, hasMixedVat, isLineItemWarning, lineItemWarnings, normalizeLineItems } from '@/shared/lineItems';
 import { createClient } from '@/utils/supabase/client';
+import { LineItemsTable } from '@/components/SplitPane/LineItemsTable';
 import clsx from 'clsx';
 import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark, Zap } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
@@ -211,6 +214,14 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
 
   const fieldError = (key: string) => flags?.fields_missing?.includes(key) ?? false;
 
+  // Model confidence per field; hidden once the value no longer matches what the AI extracted
+  const aiData = invoice.extracted_data;
+  const liveConfidence = { field_confidence: pruneFieldConfidence(aiData?.field_confidence, aiData, data) };
+  const confidenceFor = (field: ConfidenceField): number | null => fieldConfidence(liveConfidence, field);
+  const lowConfidenceCount = CONFIDENCE_FIELDS.filter((f) => isLowConfidence(confidenceFor(f))).length;
+
+  const initialLineItems = initial?.line_items ?? [];
+
   const mathError =
     data.amount_before_vat != null && data.vat_amount != null && data.total_amount != null &&
     Math.abs((data.amount_before_vat + data.vat_amount) - data.total_amount) > 1;
@@ -324,6 +335,9 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
 
       // Ensure the validated data has the correct, dynamic validation_flags before saving
       const updatedData = { ...data };
+      // Keep model confidences only for fields the reviewer left as the AI extracted them
+      updatedData.field_confidence = pruneFieldConfidence(data.field_confidence, invoice.extracted_data, updatedData);
+      if (!updatedData.field_confidence) delete updatedData.field_confidence;
       if (updatedData.validation_flags) {
         const vatIdOk = checkVatId(updatedData.supplier_vat_id ?? null);
         const mathOk = !mathError;
@@ -346,12 +360,28 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
           );
         }
 
+        // Re-evaluate line items after reviewer edits (blank rows are dropped)
+        const lineItems = normalizeLineItems(updatedData.line_items);
+        updatedData.line_items = lineItems.length > 0 ? lineItems : null;
+        const amounts = {
+          line_items: lineItems,
+          amount_before_vat: updatedData.amount_before_vat ?? null,
+          vat_amount: updatedData.vat_amount ?? null,
+          total_amount: updatedData.total_amount ?? null,
+        };
+
         updatedData.validation_flags = {
           ...updatedData.validation_flags,
           vat_id_ok: vatIdOk,
           math_ok: mathOk,
           rule_violations: ruleViolations,
           allocation_required: allocationRequired,
+          warnings: [
+            ...(updatedData.validation_flags.warnings ?? []).filter((w) => !isLineItemWarning(w)),
+            ...lineItemWarnings(amounts),
+          ],
+          line_items_sum_ok: checkLineItemsSum(amounts).ok,
+          mixed_vat: hasMixedVat(lineItems),
         };
       }
 
@@ -442,6 +472,11 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             <span className="text-xs text-slate-500">ביטחון AI: {Math.round(invoice.ai_confidence * 100)}%</span>
           </div>
         )}
+        {lowConfidenceCount > 0 && (
+          <p className="text-[11px] text-amber-700 mt-1">
+            {lowConfidenceCount === 1 ? 'שדה אחד' : `${lowConfidenceCount} שדות`} בביטחון נמוך — מסומנים בפס כתום
+          </p>
+        )}
       </div>
 
       {/* Alerts */}
@@ -522,7 +557,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {activeFormTab === 'invoice' && (
           <div className="space-y-4 animate-in fade-in duration-200">
-            <Field label="שם ספק" error={fieldError('supplier_name')} fieldKey="supplier_name" onFieldFocus={onFieldFocus}
+            <Field label="שם ספק" error={fieldError('supplier_name')} fieldKey="supplier_name" onFieldFocus={onFieldFocus} confidence={confidenceFor('supplier_name')}
               badge={
                 supplierStatus === 'known'
                   ? <span className="flex items-center gap-1 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full font-medium animate-in fade-in duration-200">
@@ -609,7 +644,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
               </div>
             )}
 
-            <Field label="ח.פ. / עוסק מורשה" error={fieldError('supplier_vat_id') || !isVatIdOk} fieldKey="supplier_vat_id" onFieldFocus={onFieldFocus}>
+            <Field label="ח.פ. / עוסק מורשה" error={fieldError('supplier_vat_id') || !isVatIdOk} fieldKey="supplier_vat_id" onFieldFocus={onFieldFocus} confidence={confidenceFor('supplier_vat_id')}>
               <input
                 className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', (fieldError('supplier_vat_id') || !isVatIdOk) && 'input-error')}
                 value={data.supplier_vat_id ?? ''}
@@ -725,7 +760,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             </Field>
 
             <div className="grid grid-cols-2 gap-3">
-              <Field label="מספר חשבונית" error={fieldError('invoice_number')} fieldKey="invoice_number" onFieldFocus={onFieldFocus}>
+              <Field label="מספר חשבונית" error={fieldError('invoice_number')} fieldKey="invoice_number" onFieldFocus={onFieldFocus} confidence={confidenceFor('invoice_number')}>
                 <input
                   className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', fieldError('invoice_number') && 'input-error')}
                   value={data.invoice_number ?? ''}
@@ -736,7 +771,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                 />
               </Field>
 
-              <Field label="תאריך חשבונית" error={fieldError('invoice_date') || isDateEmpty} fieldKey="invoice_date" onFieldFocus={onFieldFocus}>
+              <Field label="תאריך חשבונית" error={fieldError('invoice_date') || isDateEmpty} fieldKey="invoice_date" onFieldFocus={onFieldFocus} confidence={confidenceFor('invoice_date')}>
                 <input
                   type="date"
                   className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', (fieldError('invoice_date') || isDateEmpty) && 'input-error')}
@@ -750,7 +785,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             </div>
 
             <div className="grid grid-cols-3 gap-3">
-              <Field label="לפני מע״מ" error={mathError || isAmountBeforeVatEmpty} fieldKey="amount_before_vat" onFieldFocus={onFieldFocus}>
+              <Field label="לפני מע״מ" error={mathError || isAmountBeforeVatEmpty} fieldKey="amount_before_vat" onFieldFocus={onFieldFocus} confidence={confidenceFor('amount_before_vat')}>
                 <input
                   type="number"
                   step="0.01"
@@ -762,7 +797,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                   disabled={isReadOnly}
                 />
               </Field>
-              <Field label='מע"מ' error={mathError || isVatAmountEmpty} fieldKey="vat_amount" onFieldFocus={onFieldFocus}>
+              <Field label='מע"מ' error={mathError || isVatAmountEmpty} fieldKey="vat_amount" onFieldFocus={onFieldFocus} confidence={confidenceFor('vat_amount')}>
                 <input
                   type="number"
                   step="0.01"
@@ -774,7 +809,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                   disabled={isReadOnly}
                 />
               </Field>
-              <Field label="סה״כ לתשלום" error={mathError || isTotalAmountEmpty} fieldKey="total_amount" onFieldFocus={onFieldFocus}>
+              <Field label="סה״כ לתשלום" error={mathError || isTotalAmountEmpty} fieldKey="total_amount" onFieldFocus={onFieldFocus} confidence={confidenceFor('total_amount')}>
                 <input
                   type="number"
                   step="0.01"
@@ -789,7 +824,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             </div>
             {mathError && <p className="text-xs text-red-600">שגיאה: לפני מע"מ + מע"מ ≠ סה"כ</p>}
 
-            <Field label="מספר הקצאה" error={isAllocationMissing} fieldKey="allocation_number" onFieldFocus={onFieldFocus}>
+            <Field label="מספר הקצאה" error={isAllocationMissing} fieldKey="allocation_number" onFieldFocus={onFieldFocus} confidence={confidenceFor('allocation_number')}>
               <input
                 className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', isAllocationMissing && 'input-error')}
                 value={data.allocation_number ?? ''}
@@ -808,7 +843,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             )}
             {isAllocationMalformed && <p className="text-xs text-amber-700">מספר הקצאה אמור להיות 9 ספרות — אנא ודא</p>}
 
-            <Field label="קטגוריית הוצאה" error={fieldError('expense_category')} fieldKey="expense_category" onFieldFocus={onFieldFocus}
+            <Field label="קטגוריית הוצאה" error={fieldError('expense_category')} fieldKey="expense_category" onFieldFocus={onFieldFocus} confidence={confidenceFor('expense_category')}
               badge={isCategoryFromRule
                 ? <span className="flex items-center gap-1 text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full font-medium" title="ברירת המחדל שהוגדרה לספק במיפוי החשבונות">
                     <CheckCircle2 className="h-3 w-3" /> לפי כלל ספק
@@ -850,6 +885,15 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                   disabled={isReadOnly}
                 />
               </div>
+            )}
+
+            {initialLineItems.length > 0 && (
+              <LineItemsTable
+                items={data.line_items ?? []}
+                amountBeforeVat={data.amount_before_vat}
+                totalAmount={data.total_amount}
+                onChange={isReadOnly ? undefined : (items: LineItem[]) => set('line_items', items)}
+              />
             )}
           </div>
         )}
@@ -962,22 +1006,41 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   );
 }
 
-function Field({ label, error, fieldKey, onFieldFocus, badge, children }: {
+function Field({ label, error, fieldKey, onFieldFocus, badge, confidence, children }: {
   label: string;
   error: boolean;
   fieldKey?: string;
   onFieldFocus?: (field: string | null) => void;
   badge?: React.ReactNode;
+  /** Model confidence 0-1; null/undefined = not reported (old records) or value edited. */
+  confidence?: number | null;
   children: React.ReactNode;
 }) {
+  const lowConfidence = isLowConfidence(confidence);
+  const pct = confidence != null ? Math.round(confidence * 100) : null;
   return (
     <div
       onMouseEnter={() => fieldKey && onFieldFocus?.(fieldKey)}
       onMouseLeave={() => onFieldFocus?.(null)}
+      className={clsx(lowConfidence && !error && 'border-r-2 border-amber-400 pr-2 -mr-2.5')}
     >
-      <div className="flex items-center justify-between mb-1.5">
-        <label className={clsx('text-sm font-semibold', error ? 'text-red-600' : 'text-slate-700')}>
-          {label}{error && <span className="text-red-500 mr-0.5">*</span>}
+      <div className="flex items-center justify-between gap-1.5 mb-1.5">
+        <label className={clsx('text-sm font-semibold flex items-center gap-1.5 min-w-0', error ? 'text-red-600' : 'text-slate-700')}>
+          <span className="truncate">{label}{error && <span className="text-red-500 mr-0.5">*</span>}</span>
+          {pct != null && (
+            lowConfidence ? (
+              <span
+                className="shrink-0 text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 rounded-full"
+                title="ה-AI לא בטוח בשדה זה — בדוק מול המסמך"
+              >
+                {pct}%
+              </span>
+            ) : (
+              <span className="shrink-0 text-[10px] font-normal text-slate-400" title="רמת ביטחון ה-AI בשדה">
+                {pct}%
+              </span>
+            )
+          )}
         </label>
         {badge}
       </div>

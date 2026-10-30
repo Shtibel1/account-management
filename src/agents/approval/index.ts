@@ -1,5 +1,6 @@
 import type { PipelineState, ExtractedData } from '@/shared/types';
 import { supabase } from '@/lib/supabase';
+import { computeConfidence } from '@/shared/confidence';
 
 /**
  * The approval node is executed after the graph resumes from human interruption.
@@ -16,16 +17,8 @@ export async function approvalNode(state: PipelineState): Promise<Partial<Pipeli
     };
   }
 
-  // Calculate final confidence based on validation flags
-  let finalConfidence = 1.0;
-  if (finalData.validation_flags) {
-    const flags = finalData.validation_flags;
-    let penalty = 0;
-    if (!flags.math_ok) penalty += 0.2;
-    if (!flags.vat_id_ok) penalty += 0.1;
-    if (flags.fields_missing.length > 0) penalty += 0.1 * flags.fields_missing.length;
-    finalConfidence = Math.max(0.1, 1.0 - penalty);
-  }
+  // Same scoring as at extraction time (field confidences + validation flags)
+  const finalConfidence = computeConfidence(finalData);
 
   // Update Supabase DB invoice status to approved
   const { error } = await supabase

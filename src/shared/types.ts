@@ -20,6 +20,21 @@ export type BboxMap = Partial<Record<
   FieldBbox
 >>;
 
+/** Main fields the extraction reports a 0-1 confidence for. */
+export type ConfidenceField =
+  'supplier_name' | 'supplier_vat_id' | 'invoice_number' | 'invoice_date' |
+  'amount_before_vat' | 'vat_amount' | 'total_amount' | 'expense_category' | 'allocation_number';
+
+export type FieldConfidenceMap = Partial<Record<ConfidenceField, number>>;
+
+export interface LineItem {
+  description: string | null;
+  quantity: number | null;
+  unit_price: number | null;
+  line_total: number | null;
+  vat_exempt?: boolean;
+}
+
 export interface ExtractedData {
   supplier_name: string | null;
   supplier_vat_id: string | null;
@@ -34,6 +49,8 @@ export interface ExtractedData {
   bank_branch_code?: string | null;
   bank_branch_name?: string | null;
   bank_account?: string | null;
+  line_items?: LineItem[] | null;           // max MAX_LINE_ITEMS (shared/lineItems.ts)
+  field_confidence?: FieldConfidenceMap;     // model confidence per field, absent on old records
   validation_flags?: ValidationResult;
   bboxes?: BboxMap;
   split_suggestion?: SplitSuggestion | null; // file looks like several documents (set by the pipeline)
@@ -93,6 +110,8 @@ export interface ValidationResult {
   requires_manual_review: boolean;
   not_an_invoice?: boolean;
   allocation_required?: boolean;
+  line_items_sum_ok?: boolean | null;  // null = no line items / nothing to compare
+  mixed_vat?: boolean;
   vat_id_sources?: VatIdSources;
   auto_approved?: boolean;            // skipped manual review via the supplier auto-approve opt-in
   auto_approve_blockers?: string[];   // supplier is opted in, but these checks sent it to review

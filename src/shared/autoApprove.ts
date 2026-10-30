@@ -59,6 +59,10 @@ export interface AutoApproveCheck {
   amountsAutoCorrected: boolean;
   /** True when the VAT ID (the opt-in key) was not read from the invoice but filled / replaced from the supplier table or web search. */
   vatIdAutoFilled?: boolean;
+  /** Line-item warnings (sum mismatch vs. the invoice amounts, mixed / inconsistent VAT). */
+  lineItemWarnings?: readonly string[];
+  /** Fields the model itself reported low confidence for (rule-filled / auto-corrected fields excluded). */
+  lowConfidenceFields?: readonly string[];
 }
 
 /** True when any amount differs between the AI output and the edge-case-corrected data. */
@@ -85,6 +89,10 @@ export function autoApproveBlockers(check: AutoApproveCheck): string[] {
   if (result.rule_violations.length > 0) blockers.push(...result.rule_violations);
   if (result.duplicate_found) blockers.push('נמצאה חשבונית כפולה');
   else if (!check.duplicateCheckRan) blockers.push('בדיקת כפילות לא הושלמה');
+  if (check.lineItemWarnings && check.lineItemWarnings.length > 0) blockers.push(...check.lineItemWarnings);
+  if (check.lowConfidenceFields && check.lowConfidenceFields.length > 0) {
+    blockers.push(`ביטחון נמוך בשדות: ${check.lowConfidenceFields.join(', ')}`);
+  }
   return blockers;
 }
 

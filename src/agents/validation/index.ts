@@ -13,6 +13,8 @@ import {
   normalizeAllocationNumber,
 } from '@/shared/allocation';
 import { isValidVatIdChecksum } from '@/shared/vatId';
+import { checkLineItemsSum, hasMixedVat, lineItemWarnings, normalizeLineItems } from '@/shared/lineItems';
+import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
 
 const REQUIRED_FIELDS: (keyof ExtractedData)[] = [
   'supplier_name',
@@ -219,6 +221,23 @@ export async function validateInvoice(
     warnings.push(`מספר ההקצאה ${corrected.allocation_number} אינו בן 9 ספרות — אנא ודא`);
   }
 
+  // Line items (when extracted): sum vs. invoice amounts and mixed VAT — warnings only
+  const lineItems = normalizeLineItems(corrected.line_items);
+  corrected.line_items = lineItems.length > 0 ? lineItems : null;
+  const lineItemsSumOk = checkLineItemsSum(corrected).ok;
+  const mixedVat = hasMixedVat(lineItems);
+  const lineItemsWarnings = lineItemWarnings(corrected);
+  warnings.push(...lineItemsWarnings);
+
+  // Model confidences no longer apply to fields auto-corrected above (amounts, VAT ID from the supplier table)
+  corrected.field_confidence = pruneFieldConfidence(data.field_confidence, data, corrected);
+  if (!corrected.field_confidence) delete corrected.field_confidence;
+  // Low model confidence blocks auto-approve, except for fields the supplier rule fills in
+  const ruleFilled = new Set(Object.keys(supplierRule?.applied ?? {}));
+  const lowConfidenceFields = CONFIDENCE_FIELDS.filter(
+    (f) => !ruleFilled.has(f) && corrected[f] != null && isLowConfidence(fieldConfidence(corrected, f))
+  );
+
   // 4. Duplicate checks: same file, same supplier + invoice number, or same supplier with
   // near-identical total and date (see src/shared/duplicates.ts). Rejected invoices and
   // pairs the reviewer dismissed are ignored.
@@ -261,6 +280,8 @@ export async function validateInvoice(
         amountsAutoCorrected,
         // The opt-in is keyed by VAT ID, so it must come from the invoice itself
         vatIdAutoFilled: normalizeVatId(invoiceVatId) !== supplierVatKey,
+        lineItemWarnings: lineItemsWarnings,
+        lowConfidenceFields,
       })
     : [];
   const autoApproved = optedIn && blockers.length === 0;
@@ -286,6 +307,8 @@ export async function validateInvoice(
     allocation_required: allocationRequired,
     auto_approved: autoApproved,
     ...(optedIn && !autoApproved ? { auto_approve_blockers: blockers } : {}),
+    line_items_sum_ok: lineItemsSumOk,
+    mixed_vat: mixedVat,
     vat_id_sources: {
       invoice: invoiceVatId,
       supplier_table: supplierTableVatId,

@@ -129,13 +129,31 @@ export function applySupplierRule(
     }
   }
 
+  // The model's confidence was about the AI value, not the rule's
+  next.field_confidence = withoutConfidenceFor(next.field_confidence, changed);
+  if (!next.field_confidence) delete next.field_confidence;
+
   return { data: next, changed };
+}
+
+function withoutConfidenceFor(
+  confidence: ExtractedData['field_confidence'],
+  fields: readonly string[]
+): ExtractedData['field_confidence'] {
+  if (!confidence || fields.length === 0) return confidence;
+  const rest = Object.fromEntries(Object.entries(confidence).filter(([f]) => !fields.includes(f)));
+  return Object.keys(rest).length > 0 ? rest : undefined;
 }
 
 /** Writes an already computed trace onto data (used by the pipeline save nodes). */
 export function withSupplierRule(data: ExtractedData, trace: SupplierRuleTrace | null | undefined): ExtractedData {
   if (!trace) return data;
-  return { ...data, ...trace.applied, supplier_rule: trace };
+  const next: ExtractedData = { ...data, ...trace.applied, supplier_rule: trace };
+  // The model's confidence was about the AI value, not the rule's
+  const changed = (Object.keys(trace.applied) as SupplierRuleField[]).filter((f) => data[f] !== trace.applied[f]);
+  next.field_confidence = withoutConfidenceFor(data.field_confidence, changed);
+  if (!next.field_confidence) delete next.field_confidence;
+  return next;
 }
 
 /**
