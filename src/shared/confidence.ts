@@ -41,6 +41,28 @@ export function fieldConfidence(data: Partial<ExtractedData> | null | undefined,
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
+// Formatting-only changes (VAT ID zero padding, allocation number spaces/dashes) keep the score
+const comparable = (v: unknown) => String(v ?? '').replace(/[\s\-\/]/g, '').replace(/^0+(?=\d)/, '');
+
+/**
+ * Drops the model confidence of fields whose value no longer matches what the model extracted
+ * (auto-corrected by validation or edited by the reviewer) — the score was about the old value.
+ */
+export function pruneFieldConfidence(
+  confidence: FieldConfidenceMap | undefined,
+  extracted: Partial<ExtractedData> | null | undefined,
+  current: Partial<ExtractedData>
+): FieldConfidenceMap | undefined {
+  if (!confidence) return undefined;
+  const result: FieldConfidenceMap = {};
+  for (const field of CONFIDENCE_FIELDS) {
+    const v = confidence[field];
+    if (v == null) continue;
+    if (comparable(extracted?.[field]) === comparable(current[field])) result[field] = v;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 export function isLowConfidence(value: number | null | undefined): boolean {
   return value != null && value < LOW_CONFIDENCE_THRESHOLD;
 }

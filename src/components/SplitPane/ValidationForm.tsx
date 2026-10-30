@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { ExtractedData, Invoice, AccountMapping, ConfidenceField, LineItem } from '@/shared/types';
 import { approveInvoice } from '@/lib/api';
 import { allocationThreshold, isAllocationNumberWellFormed, isAllocationRequired } from '@/shared/allocation';
-import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence } from '@/shared/confidence';
+import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
 import { checkLineItemsSum, hasMixedVat, isLineItemWarning, lineItemWarnings, normalizeLineItems } from '@/shared/lineItems';
 import { createClient } from '@/utils/supabase/client';
 import { LineItemsTable } from '@/components/SplitPane/LineItemsTable';
@@ -202,11 +202,8 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
 
   // Model confidence per field; hidden once the value no longer matches what the AI extracted
   const aiData = invoice.extracted_data;
-  const confidenceFor = (field: ConfidenceField): number | null => {
-    const c = fieldConfidence(aiData, field);
-    if (c == null) return null;
-    return String(data[field] ?? '') === String(aiData?.[field] ?? '') ? c : null;
-  };
+  const liveConfidence = { field_confidence: pruneFieldConfidence(aiData?.field_confidence, aiData, data) };
+  const confidenceFor = (field: ConfidenceField): number | null => fieldConfidence(liveConfidence, field);
   const lowConfidenceCount = CONFIDENCE_FIELDS.filter((f) => isLowConfidence(confidenceFor(f))).length;
 
   const initialLineItems = initial?.line_items ?? [];
@@ -307,6 +304,9 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
 
       // Ensure the validated data has the correct, dynamic validation_flags before saving
       const updatedData = { ...data };
+      // Keep model confidences only for fields the reviewer left as the AI extracted them
+      updatedData.field_confidence = pruneFieldConfidence(data.field_confidence, invoice.extracted_data, updatedData);
+      if (!updatedData.field_confidence) delete updatedData.field_confidence;
       if (updatedData.validation_flags) {
         const vatIdOk = checkVatId(updatedData.supplier_vat_id ?? null);
         const mathOk = !mathError;

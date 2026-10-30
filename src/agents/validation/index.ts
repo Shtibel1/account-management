@@ -8,6 +8,7 @@ import {
   normalizeAllocationNumber,
 } from '@/shared/allocation';
 import { checkLineItemsSum, hasMixedVat, lineItemWarnings, normalizeLineItems } from '@/shared/lineItems';
+import { pruneFieldConfidence } from '@/shared/confidence';
 
 const REQUIRED_FIELDS: (keyof ExtractedData)[] = [
   'supplier_name',
@@ -227,6 +228,10 @@ export async function validateInvoice(
   const lineItemsSumOk = checkLineItemsSum(corrected).ok;
   const mixedVat = hasMixedVat(lineItems);
   warnings.push(...lineItemWarnings(corrected));
+
+  // Model confidences no longer apply to fields auto-corrected above (amounts, VAT ID from the supplier table)
+  corrected.field_confidence = pruneFieldConfidence(data.field_confidence, data, corrected);
+  if (!corrected.field_confidence) delete corrected.field_confidence;
 
   // 4. Duplicate checks
   let duplicateFound = false;

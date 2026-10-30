@@ -51,8 +51,8 @@ export interface ExtractedData {
 ```
 
 ### Line Items & Field Confidence
-- `line_items`: `{ description, quantity, unit_price, line_total, vat_exempt? }` per printed line (discounts as negative lines, no summary rows). Sanitized and capped by `normalizeLineItems`; `max_tokens` is 4096 to fit 50 lines.
-- `field_confidence`: the model's own 0-1 score per main field, normalized by `normalizeFieldConfidence` (shared/confidence.ts). Old records have none.
+- `line_items`: `{ description, quantity, unit_price, line_total, vat_exempt? }` per printed line (discounts as negative lines, no summary rows). Sanitized and capped by `normalizeLineItems`; `max_tokens` is 4096 (one retry at 16384 if the tool call is cut off).
+- `field_confidence`: the model's own 0-1 score per main field, normalized by `normalizeFieldConfidence` (shared/confidence.ts) and dropped by `pruneFieldConfidence` for fields later auto-corrected by validation or edited by the reviewer. Old records have none.
 
 ### Cumulative Cost Metrics
 Each time the Extraction Agent calls the LLM, it must log usage metrics to the shared LangGraph State:

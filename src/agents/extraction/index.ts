@@ -188,18 +188,30 @@ export async function extractInvoiceData(
     text: promptText,
   });
 
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-5-20250929',
-    // 1024 was enough for the scalar fields; up to MAX_LINE_ITEMS lines + confidences need more
-    max_tokens: 4096,
-    system: shouldSendImage ? SYSTEM_PROMPT_VISION : SYSTEM_PROMPT_TEXT_ONLY,
-    tools: [TOOL_DEFINITION],
-    tool_choice: { type: 'any' },
-    messages: [{ role: 'user', content }],
-  });
+  const callModel = (maxTokens: number) =>
+    anthropic.messages.create({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: maxTokens,
+      system: shouldSendImage ? SYSTEM_PROMPT_VISION : SYSTEM_PROMPT_TEXT_ONLY,
+      tools: [TOOL_DEFINITION],
+      tool_choice: { type: 'any' },
+      messages: [{ role: 'user', content }],
+    });
 
+  // 1024 was enough for the scalar fields; up to MAX_LINE_ITEMS lines + confidences need more.
+  // A tool call cut at max_tokens may lose every field (not just line_items), so retry once
+  // with a larger budget (billing is per token actually generated).
+  let response = await callModel(4096);
+  let inputTokens = response.usage?.input_tokens ?? 0;
+  let outputTokens = response.usage?.output_tokens ?? 0;
   if (response.stop_reason === 'max_tokens') {
-    console.warn('[Extraction] Response hit max_tokens — tool input (likely line_items) may be truncated');
+    console.warn('[Extraction] Response hit max_tokens (4096) — retrying with 16384');
+    response = await callModel(16384);
+    inputTokens += response.usage?.input_tokens ?? 0;
+    outputTokens += response.usage?.output_tokens ?? 0;
+    if (response.stop_reason === 'max_tokens') {
+      console.warn('[Extraction] Response hit max_tokens again — tool input may be truncated');
+    }
   }
 
   const toolUse = response.content.find((b) => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
@@ -245,7 +257,7 @@ export async function extractInvoiceData(
 
   return {
     extractedData,
-    inputTokens: response.usage?.input_tokens ?? 0,
-    outputTokens: response.usage?.output_tokens ?? 0,
+    inputTokens,
+    outputTokens,
   };
 }
