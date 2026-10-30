@@ -105,6 +105,23 @@ async function sendViaSES(data: LeadData): Promise<void> {
 
 const memoryLimiter = new MemoryRateLimiter();
 
+/** Per-bucket DB counters (lead_rate_limit_hit), short-circuiting on the first full bucket; null when unavailable. */
+async function withinLegacyDbRateLimits(entries: { bucket: string; windowSeconds: number; max: number }[]): Promise<boolean | null> {
+  for (const e of entries) {
+    const { data, error } = await supabase.rpc('lead_rate_limit_hit', {
+      p_bucket: e.bucket,
+      p_window_seconds: e.windowSeconds,
+      p_max: e.max,
+    });
+    if (error || typeof data !== 'boolean') {
+      console.warn('[Lead] DB rate limit unavailable, using the in-memory limiter:', error?.message ?? 'no result');
+      return null;
+    }
+    if (!data) return false;
+  }
+  return true;
+}
+
 /**
  * Rate limits of this request, all-or-nothing: true = within every limit (one hit counted on each
  * bucket); false = some bucket is full and NOTHING was counted, so requests refused by the per-IP
@@ -123,7 +140,16 @@ async function withinRateLimits(request: NextRequest): Promise<boolean> {
         p_buckets: entries.map((e) => ({ bucket: e.bucket, window_seconds: e.windowSeconds, max: e.max })),
       });
       if (!error && typeof data === 'boolean') return data;
-      if (error) console.warn('[Lead] DB rate limit unavailable, using the in-memory limiter:', error.message);
+      const missing = !!error && (error.code === 'PGRST202' || error.code === '42883');
+      if (missing) {
+        // lead_rate_limit_hit_all not deployed yet: keep the cross-instance DB counters with the
+        // older per-bucket function, stopping at the first full bucket. Per-IP buckets come first,
+        // so a request refused by its IP limit never counts toward the global bucket.
+        const legacy = await withinLegacyDbRateLimits(entries);
+        if (legacy !== null) return legacy;
+      } else if (error) {
+        console.warn('[Lead] DB rate limit unavailable, using the in-memory limiter:', error.message);
+      }
     }
   } catch (err) {
     console.warn('[Lead] DB rate limit failed, using the in-memory limiter:', err instanceof Error ? err.message : String(err));

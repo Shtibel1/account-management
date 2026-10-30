@@ -182,8 +182,10 @@ export function isRealIsoDate(value: string): boolean {
 }
 
 /** U+0000: Postgres text cannot store it (the insert fails), so it's rejected up front with a 400. */
-const hasNoNul = (value: string | null | undefined) => value == null || !value.includes('\u0000');
-const NUL_MESSAGE = 'מכיל תו לא חוקי (NUL) - ייתכן שהקובץ אינו קובץ טקסט תקין';
+// Unpaired UTF-16 surrogates are rejected the same way: Postgres jsonb/text refuses them too.
+const BAD_TEXT_CHARS = /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+const hasNoNul = (value: string | null | undefined) => value == null || !BAD_TEXT_CHARS.test(value);
+const NUL_MESSAGE = 'מכיל תו לא חוקי (כגון NUL) - ייתכן שהקובץ אינו קובץ טקסט תקין';
 
 export const NormalizedBankRowSchema = z.object({
   txn_date: z.string({ message: 'חסר תאריך' }).refine(isRealIsoDate, { message: 'תאריך לא תקין' }),
