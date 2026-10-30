@@ -73,12 +73,19 @@ expense category blocks the export with "קטגוריה: X").
    - `pending` younger than 10 min -> skipped "in progress";
    - `pending` older (the earlier run died mid-request) -> `findExisting` if the plugin has it, else **blocked**
      until the user re-runs with `force` ("ייצוא חוזר בכל זאת") after checking the target;
-   - `failed` / `skipped` / none -> export (after `findExisting` when available; a found document is *adopted*);
+   - `failed` with `outcome_uncertain` (the failed attempt was a write that timed out, lost the connection after
+     sending, or got a 5xx, so the document may exist anyway) -> same as a stale `pending`: `findExisting`, else
+     **blocked** until `force`;
+   - `failed` (certain, e.g. 4xx / validation) / `skipped` / none -> export (after `findExisting` when available; a
+     found document is *adopted*);
    - invoice not `approved` / `exported` -> skipped (a `skipped` row is recorded).
 4. Invoices are claimed with an optimistic update (`status`, `attempts` must match) before any call, so two
    concurrent runs never send the same invoice.
 5. The plugin is called; the row ends as `success` (external id / url, `exported_at`) or `failed`
-   (`last_error`). Successful invoices still in `approved` become `exported`.
+   (`last_error`, `outcome_uncertain`). The runner tracks every write call of the invoice through `ctx.http` to set
+   `outcome_uncertain`. If the document was created but recording `success` fails, the row is left `pending` (never
+   `failed`), so a later run blocks / checks instead of creating a duplicate. Successful invoices still in
+   `approved` become `exported`.
 6. **Dry run** builds the payloads (redacted) or the file without any HTTP call or DB write.
 
 Response: `{ correlationId, pluginId, dryRun, environment, results[], summary, file? }` (file = base64 for file
@@ -95,11 +102,13 @@ timeoutMs?, idempotent? })`; never `fetch` directly. It provides:
   honoured; if it asks for more than 30 s we stop and report instead. **Non-idempotent requests** (POST / PATCH
   unless `idempotent: true`) are retried only on 429 and connection errors where nothing was sent, because a
   5xx / timeout may already have created the document. Mark a POST `idempotent: true` only when it carries an
-  idempotency key the target honours (the webhook plugin sends `Idempotency-Key`).
+  idempotency key the target is **known** to honour. The webhook plugin sends `Idempotency-Key` but does not rely on
+  it (generic receivers such as Make / Zapier ignore it), so its export POST is non-idempotent.
 - **Outbound URL guard**: https only, no credentials in the URL, no localhost / `.local` / `.internal` /
-  single-label hosts / private, loopback, link-local (cloud metadata) or CGNAT IP literals. DNS names that resolve to
-  private addresses are not detected (no DNS pinning) - acceptable because only office members can configure a
-  URL, but keep it in mind for self-hosted targets. Redirects are not followed (`redirect: 'manual'`).
+  single-label hosts / private, loopback, link-local (cloud metadata), CGNAT, IPv4-mapped / NAT64 / 6to4 IP literals.
+  Host names are also resolved (`dns.lookup`, all addresses) before the call and refused if any address is
+  private. There is no connection pinning, so a DNS-rebinding host with a tiny TTL is not fully excluded.
+  Redirects are not followed (`redirect: 'manual'`).
 - **Redaction** (`src/integrations/redact.ts`, unit-tested), applied before anything is stored or printed:
   auth headers (`Authorization`, `Cookie`, `X-Api-Key`, signatures...), secret-looking keys at any depth incl.
   arrays (`password`, `token`, `api_key`, `client_secret`, `*Secret`, `*Token`...), the plugin's secret config keys,
@@ -140,6 +149,9 @@ select cron.schedule('purge-integration-logs', '15 3 * * *', $$select public.pur
 - Decryption happens only server-side, right before building the plugin context. The browser only ever gets
   `config_masked` (secret values as `••••` + last 4 characters of values with 12+ characters). Saving a form with a
   secret left empty (or still showing the mask) keeps the stored value; "נקה" sends `null` to remove it.
+- **Endpoint changes require re-entering the secrets**: if a `url` field changes while a stored secret would be kept
+  (sent empty / masked), save and "בדוק חיבור" are refused (422). Otherwise any office member could point the stored
+  token, which they cannot see, at their own server.
 - `authenticated` cannot select `config_encrypted` (column-level grant) and has no write access to the three
   tables; all writes go through the guarded API routes (service role).
 - **Key rotation**: there is one key version (`v1`). To rotate, deploy with the new key and have each client
@@ -151,7 +163,7 @@ select cron.schedule('purge-integration-logs', '15 3 * * *', $$select public.pur
 - `client_integrations` (client_id, plugin_id, enabled, environment `sandbox|production`, config_encrypted,
   config_masked jsonb, created_at, updated_at; unique (client_id, plugin_id)).
 - `invoice_exports` (invoice_id, client_id, plugin_id, status `pending|success|failed|skipped`, external_id,
-  external_url, attempts, last_error, correlation_id, exported_at; unique (invoice_id, plugin_id)). A trigger
+  external_url, attempts, last_error, outcome_uncertain, correlation_id, exported_at; unique (invoice_id, plugin_id)). A trigger
   enforces that client_id is the invoice's client.
 - `integration_logs` (org_id, client_id, plugin_id, invoice_id, correlation_id, operation, http_method, url,
   request_body, response_status, response_body, duration_ms, attempt, outcome `ok|error|retry`, error_code,

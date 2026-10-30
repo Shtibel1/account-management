@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { requireClientAccess } from '@/lib/auth';
 import { isEncryptionConfigured, SecretsError } from '@/lib/secrets';
 import { getPlugin } from '@/integrations/registry';
-import { maskConfig, mergeConfigUpdate, type ConfigValues } from '@/integrations/config';
+import { maskConfig, keptSecretsWithChangedEndpoint, mergeConfigUpdate, type ConfigValues } from '@/integrations/config';
 import { deleteIntegration, getStoredIntegration, upsertIntegration } from '@/integrations/store';
 import {
   decryptStoredConfig,
@@ -61,6 +61,10 @@ export async function PUT(request: Request, { params }: Params) {
       return NextResponse.json({ error: 'לתוסף זה אין סביבת בדיקות' }, { status: 400 });
     }
 
+    const kept = keptSecretsWithChangedEndpoint(plugin.configFields, existing, body.config ?? {});
+    if (kept.length > 0) {
+      throw new IntegrationConfigError('כתובת השרת השתנתה: יש להזין מחדש את הסודות (או לנקות אותם)', kept);
+    }
     const merged = mergeConfigUpdate(plugin.configFields, existing, body.config ?? {});
     validateConfig(plugin, merged);
     if (Object.keys(merged).length > 0 && !isEncryptionConfigured()) {

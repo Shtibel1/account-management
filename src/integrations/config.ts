@@ -35,6 +35,37 @@ export function mergeConfigUpdate(fields: ConfigField[], existing: ConfigValues,
   return out;
 }
 
+function normalized(value: unknown): unknown {
+  if (value === null || value === undefined) return '';
+  return typeof value === 'string' ? value.trim() : value;
+}
+
+/**
+ * Secret fields that an update would KEEP from the stored config (sent empty / masked) although an
+ * endpoint field (type 'url': where the secrets are sent) changed. Such an update must be refused:
+ * otherwise anyone who can edit the settings could point the stored token, which they cannot see,
+ * at a server of their own. Returns the labels of those secrets (empty = OK).
+ */
+export function keptSecretsWithChangedEndpoint(fields: ConfigField[], existing: ConfigValues, incoming: ConfigValues): string[] {
+  const endpointChanged = fields.some((f) =>
+    !f.secret && f.type === 'url' &&
+    Object.prototype.hasOwnProperty.call(incoming, f.key) &&
+    existing[f.key] !== undefined && existing[f.key] !== '' &&
+    normalized(incoming[f.key]) !== normalized(existing[f.key])
+  );
+  if (!endpointChanged) return [];
+  return fields
+    .filter((f) => {
+      if (!f.secret) return false;
+      if (existing[f.key] === undefined || existing[f.key] === '') return false;
+      const has = Object.prototype.hasOwnProperty.call(incoming, f.key);
+      const value = incoming[f.key];
+      if (has && value === null) return false; // cleared
+      return !has || value === undefined || value === '' || isMaskedValue(value);
+    })
+    .map((f) => f.label);
+}
+
 /** Config with secret values replaced by masks (safe to store in config_masked / send to the browser). */
 export function maskConfig(fields: ConfigField[], config: ConfigValues): ConfigValues {
   const out: ConfigValues = {};

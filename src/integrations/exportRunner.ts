@@ -7,6 +7,9 @@ import type {
   PluginContext,
 } from '@/integrations/types';
 import type { ExportStore } from '@/integrations/store';
+import type { HttpRequestOptions, IntegrationHttpClient } from '@/integrations/types';
+import { IntegrationHttpError } from '@/integrations/http';
+import { writeMayHaveBeenProcessed } from '@/integrations/retry';
 import { decideAfterLookup, decideExport, DECISION_MESSAGES } from '@/integrations/idempotency';
 import { resolveInvoiceMapping, toExportInvoice } from '@/integrations/mapping';
 import { redactDeep, scrubString, type RedactionOptions } from '@/integrations/redact';
@@ -67,6 +70,35 @@ export function safeExternalUrl(url: string | null | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
+ * Wraps the invoice's HTTP client and remembers whether any WRITE call ended in a state where the
+ * target may have created the document anyway (timeout / connection lost / 5xx). Such a failure is
+ * recorded as "uncertain" so the next run checks / blocks instead of creating a duplicate.
+ */
+function trackUncertainWrites(http: IntegrationHttpClient): { http: IntegrationHttpClient; uncertain: () => boolean } {
+  let uncertain = false;
+  const wrap = (inner: IntegrationHttpClient): IntegrationHttpClient => ({
+    async request<T>(req: HttpRequestOptions) {
+      const isWrite = !READ_METHODS.has(String(req.method).toUpperCase());
+      try {
+        const res = await inner.request<T>(req);
+        if (isWrite && writeMayHaveBeenProcessed({ status: res.status }) && !res.ok) uncertain = true;
+        return res;
+      } catch (err) {
+        if (isWrite) {
+          const code = err instanceof IntegrationHttpError ? err.code : null;
+          if (writeMayHaveBeenProcessed({ code })) uncertain = true;
+        }
+        throw err;
+      }
+    },
+    forInvoice: (id: string | null) => wrap(inner.forInvoice(id)),
+  });
+  return { http: wrap(http), uncertain: () => uncertain };
 }
 
 function summarize(results: InvoiceExportOutcome[]): Record<InvoiceOutcomeStatus, number> {
@@ -222,7 +254,9 @@ export async function runExport(input: RunExportInput): Promise<RunExportResult>
     }
   } else {
     for (const c of claimed) {
-      const invoiceCtx: PluginContext<unknown> = { ...ctx, http: ctx.http.forInvoice(c.ei.id) };
+      const tracked = trackUncertainWrites(ctx.http.forInvoice(c.ei.id));
+      const invoiceCtx: PluginContext<unknown> = { ...ctx, http: tracked.http };
+      let exported: { externalId: string; url: string | null } | null = null;
       try {
         if (c.checkExisting && plugin.findExisting) {
           const after = decideAfterLookup(await plugin.findExisting(invoiceCtx, c.ei));
@@ -235,25 +269,49 @@ export async function runExport(input: RunExportInput): Promise<RunExportResult>
           }
         }
         const res = await plugin.exportInvoice(invoiceCtx, c.ei, c.mapping);
-        const externalId = String(res.externalId).slice(0, 500);
-        const url = safeExternalUrl(res.url);
-        await store.complete(c.record.id, { status: 'success', external_id: externalId, external_url: url });
+        exported = { externalId: String(res.externalId).slice(0, 500), url: safeExternalUrl(res.url) };
+        await store.complete(c.record.id, { status: 'success', external_id: exported.externalId, external_url: exported.url });
         succeeded.push(c.ei.id);
-        results.push({ invoiceId: c.ei.id, status: 'success', externalId, url });
+        results.push({ invoiceId: c.ei.id, status: 'success', externalId: exported.externalId, url: exported.url });
       } catch (err) {
         const message = errorText(err, redaction);
-        ctx.logger.error('export_invoice failed', { invoiceId: c.ei.id, error: message });
+        if (exported) {
+          // The document WAS created; only recording it failed. Never mark it failed (a later run
+          // would create a duplicate): the row stays "pending", becomes stale and is then blocked /
+          // checked with findExisting.
+          ctx.logger.error('export succeeded but recording the result failed', {
+            invoiceId: c.ei.id, externalId: exported.externalId, error: message,
+          });
+          succeeded.push(c.ei.id);
+          results.push({
+            invoiceId: c.ei.id, status: 'success', externalId: exported.externalId, url: exported.url,
+            message: 'המסמך נוצר במערכת היעד אך שמירת הסטטוס נכשלה',
+          });
+          continue;
+        }
+        const uncertain = tracked.uncertain();
+        ctx.logger.error('export_invoice failed', { invoiceId: c.ei.id, error: message, uncertain });
         try {
-          await store.complete(c.record.id, { status: 'failed', last_error: message });
+          await store.complete(c.record.id, { status: 'failed', last_error: message, uncertain });
         } catch (storeErr) {
           console.error(`[integrations] Failed to record export failure for invoice ${c.ei.id}:`, errorText(storeErr, redaction));
         }
-        results.push({ invoiceId: c.ei.id, status: 'failed', reason: 'error', message });
+        results.push({
+          invoiceId: c.ei.id, status: 'failed', reason: uncertain ? 'uncertain' : 'error',
+          message: uncertain ? `${message} (ייתכן שהמסמך נוצר בכל זאת: בדקו במערכת היעד)` : message,
+        });
       }
     }
   }
 
-  if (succeeded.length > 0) await store.markInvoicesExported(succeeded);
+  if (succeeded.length > 0) {
+    try {
+      await store.markInvoicesExported(succeeded);
+    } catch (err) {
+      // invoice_exports already holds the truth; the invoice status is cosmetic here.
+      ctx.logger.error('failed to mark invoices exported', { invoices: succeeded.length, error: errorText(err, redaction) });
+    }
+  }
 
   return { correlationId: ctx.correlationId, pluginId: plugin.id, dryRun, results, summary: summarize(results), file };
 }

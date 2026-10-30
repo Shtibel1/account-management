@@ -46,6 +46,9 @@ create table if not exists public.invoice_exports (
   external_url text,
   attempts integer not null default 0 check (attempts >= 0),
   last_error text,
+  -- true when the last failed attempt may still have created the document in the target (timeout,
+  -- connection lost after sending, 5xx on a write): the next run must not blindly re-send it.
+  outcome_uncertain boolean not null default false,
   correlation_id uuid,
   exported_at timestamptz,
   created_at timestamptz not null default now(),

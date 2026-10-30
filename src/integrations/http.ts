@@ -1,3 +1,4 @@
+import { lookup as dnsLookup } from 'node:dns/promises';
 import type {
   HttpMethod,
   HttpRequestOptions,
@@ -58,9 +59,54 @@ function isPrivateIpv4([a, b]: number[]): boolean {
   );
 }
 
+/** IPv4 / IPv6 literal (brackets stripped) that is loopback / private / link-local / reserved. */
+export function isPrivateIpLiteral(rawHost: string): boolean {
+  const host = rawHost.toLowerCase().replace(/^\[|\]$/g, '');
+  const v4 = ipv4Parts(host);
+  if (v4) return isPrivateIpv4(v4);
+  if (!host.includes(':')) return false;
+  const mapped = host.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (mapped) {
+    const parts = ipv4Parts(mapped[1]);
+    return parts ? isPrivateIpv4(parts) : true;
+  }
+  // loopback, unspecified, unique-local, link-local, site-local, multicast, IPv4-mapped / -compatible,
+  // NAT64 (64:ff9b::/96) and 6to4 (2002::/16, may embed a private IPv4).
+  return (
+    host === '::1' || host === '::' || /^f[cd]/.test(host) || /^fe[89a-f]/.test(host) || /^ff/.test(host) ||
+    host.startsWith('::ffff:') || /^::[0-9a-f]/.test(host) || host.startsWith('64:ff9b:') || host.startsWith('2002:')
+  );
+}
+
+/** Resolves a host name to its addresses (injectable for tests). */
+export type HostResolver = (host: string) => Promise<string[]>;
+
+export const defaultHostResolver: HostResolver = async (host) =>
+  (await dnsLookup(host, { all: true, verbatim: true })).map((a) => a.address);
+
 /**
- * Throws unless `rawUrl` is an https URL to a public host name / address. Literal checks only: DNS
- * rebinding to a private address is not covered here (see docs/integrations.md).
+ * DNS half of the SSRF guard: every address the host name resolves to must be public. (A host that
+ * resolves differently between this check and the connection - DNS rebinding with a tiny TTL - is
+ * not fully excluded, but static internal names pointing at private addresses are.)
+ */
+export async function assertResolvedHostPublic(url: URL, resolve: HostResolver): Promise<void> {
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (ipv4Parts(host) || host.includes(':')) return; // literal, already checked
+  let addresses: string[];
+  try {
+    addresses = await resolve(host);
+  } catch {
+    throw new IntegrationHttpError('לא ניתן לאתר את שם השרת', 'dns_failed', 0);
+  }
+  if (addresses.length === 0) throw new IntegrationHttpError('לא ניתן לאתר את שם השרת', 'dns_failed', 0);
+  if (addresses.some((a) => isPrivateIpLiteral(a))) {
+    throw new IntegrationHttpError('כתובת פנימית אינה מותרת', 'private_address', 0);
+  }
+}
+
+/**
+ * Throws unless `rawUrl` is an https URL to a public host name / address (literal checks; the HTTP
+ * client additionally resolves the host name, see assertResolvedHostPublic).
  */
 export function assertOutboundUrlAllowed(rawUrl: string): URL {
   let url: URL;
@@ -78,14 +124,7 @@ export function assertOutboundUrlAllowed(rawUrl: string): URL {
   ) {
     throw new IntegrationHttpError('כתובת פנימית אינה מותרת', 'private_address', 0);
   }
-  const v4 = ipv4Parts(host);
-  if (v4 && isPrivateIpv4(v4)) throw new IntegrationHttpError('כתובת פנימית אינה מותרת', 'private_address', 0);
-  if (host.includes(':')) {
-    // IPv6 literal: refuse loopback, unspecified, unique-local, link-local, IPv4-mapped.
-    if (host === '::1' || host === '::' || /^f[cd]/.test(host) || /^fe[89ab]/.test(host) || host.startsWith('::ffff:')) {
-      throw new IntegrationHttpError('כתובת פנימית אינה מותרת', 'private_address', 0);
-    }
-  }
+  if (isPrivateIpLiteral(host)) throw new IntegrationHttpError('כתובת פנימית אינה מותרת', 'private_address', 0);
   return url;
 }
 
@@ -109,6 +148,11 @@ export interface HttpClientOptions {
   now?: () => number;
   /** Disable the URL guard (scratch tests only). */
   allowAnyUrl?: boolean;
+  /**
+   * Host name resolver for the DNS part of the URL guard. Defaults to the system resolver when the
+   * real fetch is used; with an injected fetchImpl (tests) the DNS check is skipped unless given.
+   */
+  resolveHost?: HostResolver | null;
   /** Console line writer (default console.log). */
   consoleLine?: (line: string) => void;
 }
@@ -147,6 +191,9 @@ export function createIntegrationHttpClient(options: HttpClientOptions): Integra
   const now = options.now ?? Date.now;
   const consoleLine = options.consoleLine ?? ((line: string) => console.log(line));
   const redaction = options.redaction;
+  const resolveHost = options.resolveHost !== undefined
+    ? options.resolveHost
+    : (options.fetchImpl ? null : defaultHostResolver);
 
   const writeLog = async (row: IntegrationLogRow) => {
     consoleLine(JSON.stringify({
@@ -203,7 +250,8 @@ export function createIntegrationHttpClient(options: HttpClientOptions): Integra
 
     if (!options.allowAnyUrl) {
       try {
-        assertOutboundUrlAllowed(req.url);
+        const parsedUrl = assertOutboundUrlAllowed(req.url);
+        if (resolveHost) await assertResolvedHostPublic(parsedUrl, resolveHost);
       } catch (err) {
         const e = err as IntegrationHttpError;
         await writeLog({

@@ -33,6 +33,20 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
 /** Network error codes meaning the request never reached the server. */
 const NOT_SENT_ERROR_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT']);
 
+/** Errors raised before anything left this server (URL guard, DNS check). */
+const BLOCKED_BEFORE_SEND_CODES = new Set(['invalid_url', 'insecure_url', 'credentials_in_url', 'private_address', 'dns_failed']);
+
+/**
+ * Whether a final failure of a WRITE request (POST / PUT / PATCH / DELETE) may still have been
+ * processed by the server: timeouts, connection errors after the request was sent, and 5xx responses.
+ * Used by the export runner to mark the attempt "uncertain" so the next run does not blindly re-send.
+ */
+export function writeMayHaveBeenProcessed(failure: { status?: number | null; code?: string | null }): boolean {
+  if (typeof failure.status === 'number') return failure.status >= 500;
+  const code = failure.code ?? '';
+  return !NOT_SENT_ERROR_CODES.has(code) && !BLOCKED_BEFORE_SEND_CODES.has(code);
+}
+
 export type AttemptFailure =
   | { kind: 'status'; status: number; retryAfter?: string | null }
   | { kind: 'network'; code?: string | null }

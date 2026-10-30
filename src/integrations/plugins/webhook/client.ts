@@ -60,8 +60,10 @@ export async function postInvoice(
     url: ctx.config.url,
     headers: headersFor(ctx, body, payload.idempotency_key),
     body,
-    // The Idempotency-Key header lets the receiver drop repeats, so retrying a 5xx is safe.
-    idempotent: true,
+    // Not treated as idempotent: generic receivers (Make / Zapier / custom code) often ignore the
+    // Idempotency-Key header, so a timeout or 5xx is NOT retried automatically (only 429 and
+    // connection errors before sending). The run records such a failure as uncertain instead.
+    idempotent: false,
     invoiceId: payload.invoice.id,
   });
 }

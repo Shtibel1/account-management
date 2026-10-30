@@ -102,6 +102,8 @@ export interface ExportStore {
     external_id?: string | null;
     external_url?: string | null;
     last_error?: string | null;
+    /** Failed, but the document may have been created anyway (see idempotency.ts). */
+    uncertain?: boolean;
   }): Promise<void>;
   /** Records "skipped" (e.g. not approved) unless a row already exists. */
   recordSkipped(params: { invoiceId: string; clientId: string; pluginId: string; correlationId: string; reason: string }): Promise<void>;
@@ -167,6 +169,7 @@ export function supabaseExportStore(db: SupabaseClient = supabase): ExportStore 
           external_id: patch.external_id ?? null,
           external_url: patch.external_url ?? null,
           last_error: patch.last_error ? patch.last_error.slice(0, 2000) : null,
+          outcome_uncertain: patch.status === 'failed' && patch.uncertain === true,
           exported_at: patch.status === 'success' ? now : null,
           updated_at: now,
         })

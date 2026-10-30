@@ -11,7 +11,10 @@ import { isExportableStatus } from '@/integrations/mapping';
  *   pending, stale               -> the earlier run died mid-request, it may or may not have been
  *                                   created: findExisting when available, else "blocked" unless
  *                                   force (the user checked the target system by hand)
- *   failed                       -> retry (after findExisting when available)
+ *   failed, certain              -> retry (after findExisting when available)
+ *   failed, uncertain            -> same as a stale pending row: the failed attempt timed out / lost
+ *                                   the connection / got a 5xx on a write, so the document may exist
+ *                                   in the target: findExisting, else "blocked" unless force
  *   invoice not approved         -> skip "not_approved"
  */
 
@@ -28,7 +31,7 @@ export type ExportDecision =
 
 export interface DecideExportInput {
   invoiceStatus: string;
-  record: Pick<InvoiceExportRecord, 'status' | 'external_id' | 'external_url' | 'updated_at'> | null;
+  record: Pick<InvoiceExportRecord, 'status' | 'external_id' | 'external_url' | 'updated_at' | 'outcome_uncertain'> | null;
   hasFindExisting: boolean;
   force?: boolean;
   now?: number;
@@ -53,6 +56,10 @@ export function decideExport(input: DecideExportInput): ExportDecision {
     return input.force ? { action: 'export' } : { action: 'blocked', reason: 'uncertain_previous_attempt' };
   }
 
+  if (record?.status === 'failed' && record.outcome_uncertain === true) {
+    if (hasFindExisting) return { action: 'check_existing' };
+    return input.force ? { action: 'export' } : { action: 'blocked', reason: 'uncertain_previous_attempt' };
+  }
   if (record?.status === 'failed' && hasFindExisting) return { action: 'check_existing' };
   if (!record && hasFindExisting) return { action: 'check_existing' };
   return { action: 'export' };
@@ -68,5 +75,5 @@ export const DECISION_MESSAGES: Record<string, string> = {
   already_exported: 'כבר יוצאה למערכת זו',
   in_progress: 'ייצוא של החשבונית כבר מתבצע',
   not_approved: 'החשבונית אינה מאושרת',
-  uncertain_previous_attempt: 'ייצוא קודם לא הסתיים וייתכן שהמסמך כבר נוצר. בדקו במערכת היעד ונסו שוב עם "ייצוא חוזר בכל זאת".',
+  uncertain_previous_attempt: 'ניסיון ייצוא קודם לא הסתיים בוודאות וייתכן שהמסמך כבר נוצר. בדקו במערכת היעד ונסו שוב עם "ייצוא חוזר בכל זאת".',
 };

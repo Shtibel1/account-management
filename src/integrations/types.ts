@@ -257,6 +257,8 @@ export interface InvoiceExportRecord {
   external_url: string | null;
   attempts: number;
   last_error: string | null;
+  /** The last failed attempt may have created the document anyway (timeout / 5xx on a write). */
+  outcome_uncertain?: boolean;
   correlation_id: string | null;
   exported_at: string | null;
   created_at: string;

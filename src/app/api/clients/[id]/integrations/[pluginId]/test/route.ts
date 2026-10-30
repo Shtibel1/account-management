@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { requireClientAccess } from '@/lib/auth';
 import { getPlugin } from '@/integrations/registry';
-import { mergeConfigUpdate, secretsOf, type ConfigValues } from '@/integrations/config';
+import { keptSecretsWithChangedEndpoint, mergeConfigUpdate, secretsOf, type ConfigValues } from '@/integrations/config';
 import { scrubString } from '@/integrations/redact';
 import { getStoredIntegration } from '@/integrations/store';
 import { buildPluginContext, decryptStoredConfig, IntegrationConfigError, validateConfig } from '@/integrations/service';
@@ -47,6 +47,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       } catch (err) {
         console.error(`[Integrations API] Stored config of client ${id} / ${plugin.id} cannot be decrypted:`, err instanceof Error ? err.message : String(err));
       }
+    }
+    const kept = keptSecretsWithChangedEndpoint(plugin.configFields, existing, body.config ?? {});
+    if (kept.length > 0) {
+      throw new IntegrationConfigError('כתובת השרת השתנתה: יש להזין מחדש את הסודות לפני הבדיקה', kept);
     }
     rawConfig = mergeConfigUpdate(plugin.configFields, existing, body.config ?? {});
     const config = validateConfig(plugin, rawConfig);
