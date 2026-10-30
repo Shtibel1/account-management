@@ -168,22 +168,60 @@ export const CostMetricsSchema = z.object({
 // ── Bank statement matching (/api/bank) ───────────────────────────────
 // Ids are plain strings: the local mock DB doesn't generate UUIDs.
 
+/** numeric(14,2): |amount| must stay below 10^12. */
+export const MAX_BANK_AMOUNT = 999_999_999_999.99;
+
+/** YYYY-MM-DD that is a real calendar date (no 2026-02-30 / 2026-13-45), years 1900-2200. */
+export function isRealIsoDate(value: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!m) return false;
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (year < 1900 || year > 2200) return false;
+  const d = new Date(Date.UTC(year, month - 1, day));
+  return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
+}
+
 export const NormalizedBankRowSchema = z.object({
-  txn_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  description: z.string().max(500),
-  amount: z.number().finite(),
-  reference: z.string().max(100).nullable(),
+  txn_date: z.string({ message: 'חסר תאריך' }).refine(isRealIsoDate, { message: 'תאריך לא תקין' }),
+  description: z.string({ message: 'תיאור לא תקין' }).max(500, { message: 'התיאור ארוך מדי (עד 500 תווים)' }),
+  amount: z
+    .number({ message: 'סכום לא תקין' })
+    .finite({ message: 'סכום לא תקין' })
+    .refine((n) => Math.abs(n) <= MAX_BANK_AMOUNT, { message: 'הסכום גדול מדי' }),
+  reference: z.string({ message: 'אסמכתא לא תקינה' }).max(100, { message: 'האסמכתא ארוכה מדי (עד 100 תווים)' }).nullable(),
 });
+
+export const MAX_BANK_IMPORT_ROWS = 20000;
 
 export const BankImportSchema = z.object({
-  clientId: z.string().min(1),
-  accountLabel: z.string().trim().max(100),
-  fileName: z.string().max(255).nullable().optional(),
-  rows: z.array(NormalizedBankRowSchema).min(1).max(20000),
+  clientId: z.string({ message: 'חסר לקוח' }).min(1, { message: 'חסר לקוח' }),
+  accountLabel: z
+    .string({ message: 'חסר שם חשבון / כרטיס' })
+    .trim()
+    .min(1, { message: 'חסר שם חשבון / כרטיס' })
+    .max(100, { message: 'שם החשבון ארוך מדי (עד 100 תווים)' }),
+  fileName: z.string().max(255, { message: 'שם הקובץ ארוך מדי' }).nullable().optional(),
+  rows: z
+    .array(NormalizedBankRowSchema, { message: 'חסרות שורות לייבוא' })
+    .min(1, { message: 'אין שורות לייבוא' })
+    .max(MAX_BANK_IMPORT_ROWS, { message: `ניתן לייבא עד ${MAX_BANK_IMPORT_ROWS.toLocaleString('en-US')} שורות בפעם אחת` }),
 });
 
+/**
+ * First validation problem of a bank import as a Hebrew message that names the row
+ * (1-based, as in the statement preview), e.g. "שורה 551: תאריך לא תקין".
+ */
+export function bankImportErrorMessage(error: z.ZodError): string {
+  const issue = error.issues[0];
+  if (!issue) return 'נתוני הייבוא אינם תקינים';
+  const [first, index] = issue.path;
+  if (first === 'rows' && typeof index === 'number') return `שורה ${index + 1}: ${issue.message}`;
+  return issue.message;
+}
+
 export const BankActionSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('match'), invoiceId: z.string().min(1) }),
+  // force: the reviewer confirmed matching an invoice whose total differs from the charge.
+  z.object({ action: z.literal('match'), invoiceId: z.string().min(1), force: z.boolean().optional() }),
   z.object({ action: z.literal('unmatch') }),
   z.object({ action: z.literal('ignore') }),
   z.object({ action: z.literal('restore') }),

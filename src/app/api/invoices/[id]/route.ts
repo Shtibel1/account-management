@@ -6,6 +6,7 @@ import { invoiceObjectPath } from '@/lib/invoiceFiles';
 import { dbErrorResponse, readJsonObject, transitionInvoice } from '@/lib/invoiceTransitions';
 import { canTransition, DELETABLE_STATUSES, isInvoiceStatus, STATUS_LABELS, transitionRefusedMessage } from '@/shared/invoiceStatus';
 import type { InvoiceStatus } from '@/shared/types';
+import { invoiceUpdateReleasesBankMatch, releaseBankMatchesForInvoice } from '@/lib/bankTransactions';
 
 /** Columns the client may not set through PATCH. */
 const PROTECTED_COLUMNS = [
@@ -116,6 +117,12 @@ export async function PATCH(
 
     const { data, error } = await supabase.from('invoices').select('*').eq('id', id).single();
     if (error || !data) return NextResponse.json({ error: 'שגיאה בטעינת החשבונית לאחר העדכון' }, { status: 500 });
+
+    // Moved to another client, or no longer approved/exported: its bank line is not a valid match
+    // any more (the DB trigger invoices_release_bank_matches does the same for other write paths).
+    if (invoiceUpdateReleasesBankMatch(access.value.invoice, data as { client_id?: unknown; status?: unknown })) {
+      await releaseBankMatchesForInvoice(supabase, id);
+    }
 
     return NextResponse.json(data);
   } catch (err) {

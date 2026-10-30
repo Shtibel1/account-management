@@ -5,6 +5,8 @@ import { applyBankAction, BankActionError, BankTableMissingError } from '@/lib/b
 import { requireBankTransactionAccess } from '@/lib/auth';
 
 // Manual match / unmatch / ignore / restore of one statement line.
+// match: debit lines only; an invoice total outside the tolerance needs { force: true } (the UI
+// asks the reviewer to confirm after a 409 with code 'amount_mismatch').
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -15,22 +17,31 @@ export async function PATCH(
   const access = await requireBankTransactionAccess(id);
   if (!access.ok) return access.response;
 
+  let raw: unknown;
   try {
-    const parsed = BankActionSchema.safeParse(await request.json());
-    if (!parsed.success) {
-      return NextResponse.json({ error: 'פעולה לא תקינה' }, { status: 400 });
-    }
+    raw = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'גוף הבקשה אינו JSON תקין' }, { status: 400 });
+  }
+  const parsed = BankActionSchema.safeParse(raw);
+  if (!parsed.success) {
+    return NextResponse.json({ error: 'פעולה לא תקינה' }, { status: 400 });
+  }
+
+  try {
     const transaction = await applyBankAction(supabase, id, parsed.data);
     return NextResponse.json(transaction);
   } catch (err) {
     if (err instanceof BankActionError) {
-      return NextResponse.json({ error: err.message }, { status: err.status });
+      return NextResponse.json(
+        { error: err.message, ...(err.code ? { code: err.code } : {}), ...(err.details ? { details: err.details } : {}) },
+        { status: err.status }
+      );
     }
     console.error(`[bank] Action on ${id} failed:`, err);
-    const status = err instanceof BankTableMissingError ? 503 : 500;
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status }
-    );
+    if (err instanceof BankTableMissingError) {
+      return NextResponse.json({ error: err.message }, { status: 503 });
+    }
+    return NextResponse.json({ error: 'הפעולה על התנועה נכשלה. נסו שוב.' }, { status: 500 });
   }
 }

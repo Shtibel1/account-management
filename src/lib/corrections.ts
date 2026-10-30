@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { ExtractedData } from '@/shared/types';
-import { systemProposal } from '@/shared/supplierRules';
+import { normalizeVatId, systemProposal } from '@/shared/supplierRules';
 
 // Keep in sync with the field list in the field_accuracy view (supabase/migrations).
 export const TRACKED_FIELDS = [
@@ -27,15 +27,32 @@ export interface FieldCorrection {
   corrected_value: string | number | null;
 }
 
-/** Normalizes a value so formatting-only differences (whitespace, '', 100 vs 100.00) don't count as corrections. */
-function normalize(value: unknown): string | number | null {
+/** Money fields: compared as numbers (100 vs 100.00 vs '1,000' are the same value). */
+const AMOUNT_FIELDS: ReadonlySet<TrackedField> = new Set(['amount_before_vat', 'vat_amount', 'total_amount']);
+
+function normalizeText(value: unknown): string | null {
   if (value === undefined || value === null) return null;
-  if (typeof value === 'number') return Number.isFinite(value) ? Math.round(value * 100) / 100 : null;
+  if (typeof value === 'number' && !Number.isFinite(value)) return null;
   const s = String(value).trim().replace(/\s+/g, ' ');
-  if (s === '') return null;
+  return s === '' ? null : s;
+}
+
+function normalizeAmount(value: unknown): string | number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? Math.round(value * 100) / 100 : null;
+  const s = normalizeText(value);
+  if (s === null) return null;
   const asNumber = Number(s.replace(/,/g, ''));
   if (/^-?[\d,]+(\.\d+)?$/.test(s) && Number.isFinite(asNumber)) return Math.round(asNumber * 100) / 100;
   return s;
+}
+
+/**
+ * Normalizes a value so formatting-only differences don't count as corrections. Only amount fields
+ * are normalized as numbers; identifiers (VAT ID, invoice / allocation / bank numbers) stay text,
+ * so '05891' vs '5891' is a real correction and leading zeros are kept in the log.
+ */
+export function normalizeFieldValue(field: TrackedField, value: unknown): string | number | null {
+  return AMOUNT_FIELDS.has(field) ? normalizeAmount(value) : normalizeText(value);
 }
 
 /** Returns the fields the reviewer changed relative to the AI extraction. */
@@ -48,8 +65,8 @@ export function diffCorrections(
   for (const field of TRACKED_FIELDS) {
     // Partial payloads: a field the form didn't send was not corrected.
     if (!(field in approvedData)) continue;
-    const ai = normalize(aiData[field]);
-    const corrected = normalize(approvedData[field]);
+    const ai = normalizeFieldValue(field, aiData[field]);
+    const corrected = normalizeFieldValue(field, approvedData[field]);
     if (ai !== corrected) corrections.push({ field, ai_value: ai, corrected_value: corrected });
   }
   return corrections;
@@ -91,7 +108,8 @@ export async function recordCorrections(
     }
 
     const corrections = diffCorrections(systemProposal(invoice.extracted_data, invoice.validated_data), approvedData);
-    const supplierVatId = normalize(approvedData.supplier_vat_id ?? invoice.extracted_data?.supplier_vat_id);
+    // Same key as supplier_automation / eligibility (digits only, 8 digits padded to 9).
+    const supplierVatId = normalizeVatId(approvedData.supplier_vat_id ?? invoice.extracted_data?.supplier_vat_id);
 
     await db.from('invoice_corrections').delete().eq('invoice_id', invoiceId);
     if (corrections.length > 0) {
@@ -99,7 +117,7 @@ export async function recordCorrections(
         corrections.map((c) => ({
           invoice_id: invoiceId,
           client_id: invoice.client_id,
-          supplier_vat_id: supplierVatId === null ? null : String(supplierVatId),
+          supplier_vat_id: supplierVatId,
           ...c,
         }))
       );

@@ -10,7 +10,8 @@ export async function POST(
 ) {
   const { id } = await params;
 
-  // dismissDuplicate() itself rejects pairs from different clients, so access to `id` covers both.
+  // dismissDuplicate() treats an otherInvoiceId of a different client as not found (uniform 404),
+  // so access to `id` covers both without revealing ids of other offices.
   const access = await requireInvoiceAccess(id);
   if (!access.ok) return access.response;
 
@@ -18,7 +19,7 @@ export async function POST(
     const body = (await request.json().catch(() => ({}))) as { otherInvoiceId?: unknown } | null;
     const otherInvoiceId = typeof body?.otherInvoiceId === 'string' ? body.otherInvoiceId.trim() : '';
     if (!otherInvoiceId) {
-      return NextResponse.json({ error: 'Missing otherInvoiceId' }, { status: 400 });
+      return NextResponse.json({ error: 'חסר מזהה החשבונית הכפולה' }, { status: 400 });
     }
 
     const validationFlags = await dismissDuplicate(supabase, id, otherInvoiceId);
@@ -28,9 +29,6 @@ export async function POST(
       return NextResponse.json({ error: err.message }, { status: err.status });
     }
     console.error(`[Duplicates API] Failed to dismiss duplicate for invoice ${id}:`, err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'סימון "לא כפילות" נכשל' }, { status: 500 });
   }
 }

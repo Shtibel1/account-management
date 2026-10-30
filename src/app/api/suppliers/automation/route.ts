@@ -9,13 +9,14 @@ import {
 import { readJsonObject } from '@/lib/invoiceTransitions';
 import { AUTO_APPROVE_HISTORY_SIZE } from '@/shared/autoApprove';
 import { requireClientAccess } from '@/lib/auth';
+import { normalizeVatId } from '@/shared/supplierRules';
 
 /** Auto-approve eligibility + opt-in state for every supplier of a client. */
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const clientId = searchParams.get('clientId');
   if (!clientId) {
-    return NextResponse.json({ error: 'Missing clientId' }, { status: 400 });
+    return NextResponse.json({ error: 'חסר לקוח' }, { status: 400 });
   }
 
   const access = await requireClientAccess(clientId);
@@ -26,10 +27,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ historySize: AUTO_APPROVE_HISTORY_SIZE, suppliers });
   } catch (err) {
     console.error(`[suppliers/automation] Failed to load auto-approve status for client ${clientId}:`, err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'שגיאה בטעינת מצב האישור האוטומטי' }, { status: 500 });
   }
 }
 
@@ -40,7 +38,10 @@ export async function PUT(request: Request) {
   const body = parsed.body;
   try {
     if (typeof body.clientId !== 'string' || typeof body.supplierVatId !== 'string' || typeof body.autoApprove !== 'boolean') {
-      return NextResponse.json({ error: 'נדרשים לקוח, ח.פ. ספק והגדרת אישור אוטומטי' }, { status: 400 });
+      return NextResponse.json({ error: 'בקשה לא תקינה: נדרשים לקוח, ח.פ. ספק ומצב אישור אוטומטי' }, { status: 400 });
+    }
+    if (!normalizeVatId(body.supplierVatId)) {
+      return NextResponse.json({ error: 'ח.פ. ספק אינו תקין' }, { status: 400 });
     }
 
     const access = await requireClientAccess(body.clientId);
@@ -56,6 +57,6 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: err.message }, { status: 400 });
     }
     console.error('[suppliers/automation] Failed to update auto-approve opt-in:', err);
-    return NextResponse.json({ error: 'שגיאה בעדכון האישור האוטומטי' }, { status: 500 });
+    return NextResponse.json({ error: 'שמירת הגדרת האישור האוטומטי נכשלה' }, { status: 500 });
   }
 }

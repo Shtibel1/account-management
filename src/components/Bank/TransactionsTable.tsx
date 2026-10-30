@@ -1,17 +1,36 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import clsx from 'clsx';
 import { ChevronLeft, ChevronRight, EyeOff, Link2, Loader2, RotateCcw, Search, Unlink } from 'lucide-react';
 import type { BankMatchStatus, BankTransaction, MatchableInvoice } from '@/shared/types';
+import type { BankStatusFilter } from '@/shared/bankOverview';
 import { formatIsoDateHe } from '@/lib/exporters/missingInvoices';
 import { formatAmount } from '@/components/Bank/format';
 
 export type BankRowAction = 'match' | 'unmatch' | 'ignore' | 'restore';
 
+export interface BankTableFilters {
+  status: BankStatusFilter;
+  /** null = every account. */
+  account: string | null;
+  search: string;
+}
+
 interface Props {
+  /** The current page of lines, already filtered and paged by the server (GET /api/bank). */
   transactions: BankTransaction[];
+  /** Lines matching the filters, across all pages. */
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  /** Every account label of the client (from the server summary). */
+  accounts: string[];
+  filters: BankTableFilters;
+  onFiltersChange: (patch: Partial<BankTableFilters>) => void;
+  onPageChange: (page: number) => void;
   invoicesById: Map<string, MatchableInvoice>;
   candidates: Record<string, string[]>;
   busyId: string | null;
@@ -20,7 +39,7 @@ interface Props {
   onAction: (transaction: BankTransaction, action: BankRowAction) => void;
 }
 
-const ITEMS_PER_PAGE = 25;
+const SEARCH_DEBOUNCE_MS = 300;
 
 const STATUS_CONFIG: Record<BankMatchStatus, { label: string; className: string; dot: string }> = {
   auto:      { label: 'הותאם אוטומטית', className: 'bg-emerald-50 text-emerald-700 border-emerald-200', dot: 'bg-emerald-500' },
@@ -57,40 +76,34 @@ function getPageNumbers(currentPage: number, totalPages: number) {
   return pages;
 }
 
-export function TransactionsTable({ transactions, invoicesById, candidates, busyId, mode, onAction }: Props) {
-  const [statusFilter, setStatusFilter] = useState<'all' | BankMatchStatus | 'debits'>('all');
-  const [accountFilter, setAccountFilter] = useState('all');
-  const [search, setSearch] = useState('');
-  const [currentPage, setCurrentPage] = useState(1);
-
-  const accounts = useMemo(
-    () => Array.from(new Set(transactions.map((t) => t.account_label))).sort(),
-    [transactions]
-  );
-
+export function TransactionsTable({
+  transactions,
+  total,
+  page,
+  pageSize,
+  totalPages,
+  accounts,
+  filters,
+  onFiltersChange,
+  onPageChange,
+  invoicesById,
+  candidates,
+  busyId,
+  mode,
+  onAction,
+}: Props) {
+  // The search box is local so typing stays responsive; the server query follows after a pause.
+  const [search, setSearch] = useState(filters.search);
   useEffect(() => {
-    setCurrentPage(1);
-  }, [statusFilter, accountFilter, search, mode]);
+    setSearch(filters.search);
+  }, [filters.search]);
+  useEffect(() => {
+    if (search === filters.search) return;
+    const timer = setTimeout(() => onFiltersChange({ search }), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [search, filters.search, onFiltersChange]);
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return transactions.filter((t) => {
-      if (mode === 'missing' && !(t.match_status === 'unmatched' && t.amount < 0)) return false;
-      if (mode === 'all' && statusFilter === 'debits' && t.amount >= 0) return false;
-      if (mode === 'all' && statusFilter !== 'all' && statusFilter !== 'debits' && t.match_status !== statusFilter) return false;
-      if (accountFilter !== 'all' && t.account_label !== accountFilter) return false;
-      if (q) {
-        const inv = t.matched_invoice_id ? invoicesById.get(t.matched_invoice_id) : undefined;
-        const haystack = [t.description, t.reference, t.account_label, inv?.supplier_name, inv?.invoice_number, String(Math.abs(t.amount))];
-        if (!haystack.some((v) => v?.toLowerCase().includes(q))) return false;
-      }
-      return true;
-    });
-  }, [transactions, invoicesById, mode, statusFilter, accountFilter, search]);
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / ITEMS_PER_PAGE));
-  const page = Math.min(currentPage, totalPages);
-  const pageRows = filtered.slice((page - 1) * ITEMS_PER_PAGE, page * ITEMS_PER_PAGE);
+  const pageRows = transactions;
 
   return (
     <div className="card overflow-hidden">
@@ -105,7 +118,7 @@ export function TransactionsTable({ transactions, invoicesById, candidates, busy
           />
         </div>
         {mode === 'all' && (
-          <select className="input-base py-2 w-auto" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}>
+          <select className="input-base py-2 w-auto" value={filters.status} onChange={(e) => onFiltersChange({ status: e.target.value as BankStatusFilter })}>
             <option value="all">כל הסטטוסים</option>
             <option value="debits">חיובים בלבד</option>
             <option value="unmatched">ללא חשבונית</option>
@@ -115,8 +128,12 @@ export function TransactionsTable({ transactions, invoicesById, candidates, busy
           </select>
         )}
         {accounts.length > 1 && (
-          <select className="input-base py-2 w-auto" value={accountFilter} onChange={(e) => setAccountFilter(e.target.value)}>
-            <option value="all">כל החשבונות</option>
+          <select
+            className="input-base py-2 w-auto"
+            value={filters.account ?? '__all__'}
+            onChange={(e) => onFiltersChange({ account: e.target.value === '__all__' ? null : e.target.value })}
+          >
+            <option value="__all__">כל החשבונות</option>
             {accounts.map((a) => (
               <option key={a} value={a}>{a || 'ללא שם'}</option>
             ))}
@@ -203,16 +220,16 @@ export function TransactionsTable({ transactions, invoicesById, candidates, busy
         </table>
       </div>
 
-      {filtered.length > ITEMS_PER_PAGE && (
+      {totalPages > 1 && (
         <div className="px-5 py-3 border-t border-slate-200 flex items-center justify-between text-sm text-slate-500">
           <span>
-            {(page - 1) * ITEMS_PER_PAGE + 1}–{Math.min(page * ITEMS_PER_PAGE, filtered.length)} מתוך {filtered.length}
+            {((page - 1) * pageSize + 1).toLocaleString('he-IL')}–{Math.min(page * pageSize, total).toLocaleString('he-IL')} מתוך {total.toLocaleString('he-IL')}
           </span>
           <div className="flex items-center gap-1">
             <button
               className="p-1.5 rounded-lg hover:bg-slate-100 disabled:opacity-40"
               disabled={page === 1}
-              onClick={() => setCurrentPage(page - 1)}
+              onClick={() => onPageChange(page - 1)}
               title="הקודם"
             >
               <ChevronRight className="h-4 w-4" />
@@ -221,7 +238,7 @@ export function TransactionsTable({ transactions, invoicesById, candidates, busy
               typeof p === 'number' ? (
                 <button
                   key={i}
-                  onClick={() => setCurrentPage(p)}
+                  onClick={() => onPageChange(p)}
                   className={clsx('min-w-[2rem] h-8 rounded-lg', p === page ? 'bg-blue-600 text-white font-semibold' : 'hover:bg-slate-100')}
                 >
                   {p}
@@ -233,7 +250,7 @@ export function TransactionsTable({ transactions, invoicesById, candidates, busy
             <button
               className="p-1.5 rounded-lg hover:bg-slate-100 disabled:opacity-40"
               disabled={page === totalPages}
-              onClick={() => setCurrentPage(page + 1)}
+              onClick={() => onPageChange(page + 1)}
               title="הבא"
             >
               <ChevronLeft className="h-4 w-4" />
