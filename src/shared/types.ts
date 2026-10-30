@@ -1,7 +1,8 @@
 import type { SplitSuggestion } from '@/shared/documentSplit';
 import type { FewShotExample } from '@/shared/fewshot';
 
-export type InvoiceStatus = 'processing' | 'review' | 'approved' | 'exported' | 'error' | 'rejected';
+/** 'returned' = sent back to the client for a corrected document (feature flag accountant_review_loop). */
+export type InvoiceStatus = 'processing' | 'review' | 'approved' | 'exported' | 'error' | 'rejected' | 'returned';
 
 /** Channel an invoice arrived through (invoices.source). */
 export type InvoiceSource = 'upload' | 'email' | 'whatsapp';
@@ -128,6 +129,8 @@ export interface Client {
   inbound_alias?: string | null;
   /** Owning organization (bookkeeping office); see docs/auth.md. Absent in the local mock DB. */
   org_id?: string;
+  /** Where "returned to client" notifications are emailed (accountant_review_loop). */
+  contact_email?: string | null;
   created_at: string;
 }
 
@@ -199,8 +202,31 @@ export interface Invoice {
   fewshot_example_count?: number | null;
   fewshot_example_ids?: string[] | null;
   file_hash?: string | null;          // SHA-256 (hex) of the stored file bytes
+  // Accountant review loop (status 'returned'; see docs/feature_flags.md)
+  return_reason_code?: string | null;  // RETURN_REASONS code (shared/returns.ts)
+  return_reason?: string | null;       // text sent to the client
+  returned_at?: string | null;
+  returned_by?: string | null;
+  resubmitted_invoice_id?: string | null; // on the returned invoice: the corrected document
+  resubmission_of?: string | null;        // on the corrected document: the returned invoice
   created_at: string;
   updated_at: string;
+}
+
+/** One notification attempt to a client (table client_notifications). */
+export interface ClientNotification {
+  id: string;
+  org_id: string;
+  client_id: string;
+  invoice_id: string | null;
+  kind: 'invoice_returned';
+  channel: 'email' | 'whatsapp';
+  recipient: string | null;
+  status: 'sent' | 'failed' | 'not_sent';
+  error: string | null;
+  provider_message_id?: string | null;
+  created_by?: string | null;
+  created_at: string;
 }
 
 export interface DuplicateDismissal {

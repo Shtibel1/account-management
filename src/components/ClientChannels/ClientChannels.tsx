@@ -12,6 +12,7 @@ import {
 import { formatPhoneForDisplay, normalizePhone } from '@/lib/phone';
 import { useToast } from '@/components/ui/Toast';
 import type { ClientContact } from '@/shared/types';
+import { ClientNotifyEmailSection } from '@/components/ReviewLoop/ClientNotifyEmail';
 
 /** Loads inbound email aliases + WhatsApp contacts for all clients (reloads when `reloadKey` changes). */
 export function useClientChannels(reloadKey: unknown) {
@@ -256,6 +257,9 @@ export function ClientChannelsDialog({
             <p className="text-xs text-red-500">מספר טלפון לא תקין</p>
           )}
         </section>
+
+        {/* "Returned to client" notifications (accountant_review_loop flag; renders nothing while off) */}
+        <ClientNotifyEmailSection clientId={clientId} />
       </div>
     </div>
   );

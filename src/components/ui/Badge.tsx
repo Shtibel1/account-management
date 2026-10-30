@@ -6,6 +6,7 @@ const statusConfig: Record<string, { label: string; className: string; dot: stri
   approved:   { label: 'אושר',    className: 'bg-emerald-50 text-emerald-700 border-emerald-200', dot: 'bg-emerald-500' },
   rejected:   { label: 'לא אושר',  className: 'bg-rose-50 text-rose-700 border-rose-200',    dot: 'bg-rose-500' },
   exported:   { label: 'יוצא',    className: 'bg-slate-100 text-slate-600 border-slate-200', dot: 'bg-slate-400' },
+  returned:   { label: 'הוחזר ללקוח', className: 'bg-orange-50 text-orange-700 border-orange-200', dot: 'bg-orange-500' },
   error:      { label: 'חריג',     className: 'bg-red-50 text-red-700 border-red-200',       dot: 'bg-red-500' },
 };
 

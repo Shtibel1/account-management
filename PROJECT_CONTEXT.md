@@ -6,6 +6,7 @@ Welcome! This document serves as the source of truth for the codebase architectu
 - [Database Schema (docs/db_schema.md)](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/docs/db_schema.md): Detailed schemas, tables, relationships, and JSONB formats.
 - [Supplier Rules & Auto-Approve (docs/supplier_automation.md)](docs/supplier_automation.md): Per-supplier defaults, precedence, auto-approve eligibility and opt-in.
 - [Authentication & Tenancy (docs/auth.md)](docs/auth.md): Login, offices (organizations) + memberships, RLS model, route guards, inviting members.
+- [Feature Flags & Review Loop (docs/feature_flags.md)](docs/feature_flags.md): Per-office feature flags ("תכונות ניסיוניות") and the accountant "החזר ללקוח" flow (flag `accountant_review_loop`).
 - [Coding Standards & AI Guidelines (docs/coding_standards.md)](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/docs/coding_standards.md): Mandatory conventions, type-safety, import rules, and Git commit guidelines.
 
 ---
@@ -117,6 +118,11 @@ Make sure the following environment variables are present in `.env.local`:
 Optional ingestion channels (off unless set, see [docs/ingestion.md](docs/ingestion.md)):
 - `INGEST_EMAIL_SECRET`, `INBOUND_EMAIL_DOMAIN` (inbound email webhook)
 - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WEBHOOK_URL`, `TWILIO_WHATSAPP_NUMBER` (WhatsApp via Twilio)
+
+Feature flags / review loop (see [docs/feature_flags.md](docs/feature_flags.md)):
+- `FEATURE_FLAGS_DEFAULT` (optional, comma-separated flags on by default for every office, e.g. `accountant_review_loop`; offices can override)
+- `CLIENT_NOTIFY_EMAIL_FROM` (optional, SES-verified sender for "returned to client" emails; falls back to `CONTACT_FROM_EMAIL`)
+- `TWILIO_WHATSAPP_FROM` (optional, WhatsApp sender for client notifications; falls back to `TWILIO_WHATSAPP_NUMBER`)
 
 ---
 

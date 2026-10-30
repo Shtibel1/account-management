@@ -10,6 +10,10 @@ import { ArrowRight, Loader2, Eye, EyeOff, SlidersHorizontal, Scissors, Sparkles
 import { splitInvoice } from '@/lib/api';
 import { formatRangesForInput, usableSuggestion } from '@/shared/documentSplit';
 import { useToast } from '@/components/ui/Toast';
+import { useFeatureFlags } from '@/components/FeatureFlags/useFeatureFlags';
+import { ReturnToClientDialog } from '@/components/ReviewLoop/ReturnToClientDialog';
+import { ReturnedNotice } from '@/components/ReviewLoop/ReturnedNotice';
+import { canReturnInvoice } from '@/shared/returns';
 
 const ImageViewer = dynamic(() => import('@/components/SplitPane/ImageViewer').then((m) => m.ImageViewer), {
   ssr: false,
@@ -116,6 +120,11 @@ export default function ReviewDetailPage() {
   // Automatic split suggestion (set by the pipeline when the file looks like several documents)
   const [suggestionDismissed, setSuggestionDismissed] = useState(false);
   const [prefilledFromSuggestion, setPrefilledFromSuggestion] = useState(false);
+
+  // Accountant review loop ("החזר ללקוח"), behind the office's feature flag
+  const { isEnabled: isFlagEnabled } = useFeatureFlags({ clientId: invoice?.client_id ?? null });
+  const reviewLoop = !!invoice?.client_id && isFlagEnabled('accountant_review_loop');
+  const [showReturnDialog, setShowReturnDialog] = useState(false);
 
   const load = async () => {
     const { data } = await supabase.from('invoices').select('*').eq('id', id).single();
@@ -266,6 +275,8 @@ export default function ReviewDetailPage() {
         )}
       </div>
 
+      {reviewLoop && <ReturnedNotice invoice={invoice} />}
+
       {/* Automatic split suggestion */}
       {splitSuggestion && !suggestionDismissed && (
         <div className="mb-4 flex items-start gap-3 p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">
@@ -314,6 +325,7 @@ export default function ReviewDetailPage() {
             invoice={invoice}
             onApproved={load}
             onFieldFocus={hasBboxes ? setActiveField : undefined}
+            onReturnToClient={reviewLoop && canReturnInvoice(invoice.status) ? () => setShowReturnDialog(true) : undefined}
           />
         </div>
 
@@ -346,6 +358,15 @@ export default function ReviewDetailPage() {
           </div>
         </div>
       </div>
+
+      {showReturnDialog && (
+        <ReturnToClientDialog
+          invoiceId={invoice.id}
+          fileName={invoice.file_name}
+          onClose={() => setShowReturnDialog(false)}
+          onReturned={load}
+        />
+      )}
 
       {/* Split Modal */}
       {showSplitModal && (

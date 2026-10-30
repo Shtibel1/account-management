@@ -41,6 +41,8 @@ auth.users ──< memberships (role owner|member) >── organizations ──<
   - `invoices`, `account_mappings`, `supplier_automation`, `client_contacts`: `client_id in (select accessible_client_ids())`.
   - `duplicate_dismissals`, `bank_transactions`: same, plus the referenced invoices must belong to the same client.
   - `invoice_corrections`: through the invoice.
+  - `org_feature_flags` (migration `20261030151000`): select for members, insert/update/delete for owners;
+    `client_notifications`: select for members (written by the server only). See docs/feature_flags.md.
 - Helpers (all `security definer`, `stable`, `set search_path = ''`): `is_org_member(org)`, `is_org_owner(org)`,
   `accessible_client_ids()`, `can_access_storage_object(name)`.
 - Views `field_accuracy`, `supplier_accuracy`, `fewshot_accuracy` stay `security_invoker` → scoped by the policies above.

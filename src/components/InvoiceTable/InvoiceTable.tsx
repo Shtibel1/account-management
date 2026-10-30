@@ -13,6 +13,8 @@ interface Props {
   invoices: Invoice[];
   clients?: Record<string, string>;
   onExported?: () => void;
+  /** Accountant review loop flag: offers the "הוחזר ללקוח" status filter. */
+  showReturned?: boolean;
 }
 
 function getPageNumbers(currentPage: number, totalPages: number) {
@@ -33,7 +35,7 @@ function getPageNumbers(currentPage: number, totalPages: number) {
   return pages;
 }
 
-export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
+export function InvoiceTable({ invoices, clients = {}, onExported, showReturned = false }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
   const [missingMappings, setMissingMappings] = useState<string[] | null>(null);
@@ -189,6 +191,11 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
             <option value="approved">אושר</option>
             <option value="rejected">לא אושר</option>
             <option value="exported">יוצא</option>
+            {showReturned && (
+              <option value="returned">
+                הוחזר ללקוח ({invoices.filter((i) => i.status === 'returned').length})
+              </option>
+            )}
             <option value="error">חריג</option>
           </select>
         </div>
@@ -259,6 +266,11 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
                       <FileText className="h-4 w-4 text-slate-400 shrink-0 self-start mt-0.5" />
                       <div className="flex flex-col min-w-0">
                         <span className="text-slate-700 font-medium max-w-[160px] truncate" title={inv.file_name}>{inv.file_name}</span>
+                        {showReturned && inv.status === 'returned' && inv.return_reason && (
+                          <span className="text-xs text-orange-600 font-normal max-w-[200px] truncate mt-0.5" title={inv.return_reason}>
+                            {inv.return_reason}
+                          </span>
+                        )}
                         {inv.status === 'error' && inv.error_message && (
                           <span className="text-xs text-red-500 font-normal max-w-[200px] truncate mt-0.5" title={inv.error_message}>
                             {inv.error_message}
