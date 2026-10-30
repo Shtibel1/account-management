@@ -155,6 +155,8 @@ export default function BankPage() {
         result.matched > 0 ? `הותאמו ${result.matched} תנועות נוספות` : 'לא נמצאו התאמות חדשות',
         result.matched > 0 ? 'success' : 'info'
       );
+      // The run is bounded by a deadline (large statements): another click continues it
+      if (result.complete === false) toast('ההתאמה האוטומטית הושלמה חלקית בגלל מגבלת זמן - לחצו שוב להמשך', 'info');
       await load();
     } catch (err) {
       console.error('[bank] Auto-match failed:', err);

@@ -5,6 +5,7 @@ import { bankDedupeKeys } from '@/shared/bankStatement';
 import {
   AMOUNT_TOLERANCE,
   autoMatch,
+  type AutoMatch,
   findCandidates,
   isMatchableDebit,
   MAX_CANDIDATES,
@@ -346,32 +347,245 @@ export async function importBankRows(
 export interface MatchRunResult {
   matched: number;
   ambiguous: number;
+  /**
+   * False when the run stopped at its deadline (or had too many candidate lines) before every
+   * confident pair was stored. Running it again continues: matched lines drop out of the next run.
+   */
+  complete: boolean;
 }
 
-/** Runs auto-matching over the client's unmatched debits and stores the confident pairs. */
-export async function runAutoMatch(db: SupabaseClient, clientId: string): Promise<MatchRunResult> {
-  const [transactions, invoices] = await Promise.all([
-    loadTransactions(db, clientId),
+export interface AutoMatchOptions {
+  /** Epoch ms by which the run must have returned; whatever is left stays for a later run. */
+  deadline?: number;
+  /** Pairs of this import batch's lines are stored first (the lines the user just imported). */
+  preferBatchId?: string;
+}
+
+const MATCH_INPUT_RPC = 'bank_auto_match_input';
+const APPLY_MATCHES_RPC = 'apply_bank_auto_matches';
+/** Candidate lines one run handles; more (a pathological statement) -> nothing is matched, see below. */
+const MAX_MATCH_LINES = 20_000;
+/** Pairs per apply call (one short statement each; the deadline is checked between calls). */
+const APPLY_CHUNK = 500;
+/** A DB step is started only when at least this much of the deadline is left. */
+const MIN_STEP_MS = 1_500;
+
+type MatchLine = Pick<
+  BankTransaction,
+  'id' | 'txn_date' | 'description' | 'amount' | 'match_status' | 'matched_invoice_id' | 'rejected_invoice_ids' | 'import_batch_id'
+>;
+
+/** Ran out of time (deadline reached, or the request was aborted at it). */
+class DeadlineError extends Error {
+  constructor() {
+    super('auto-match deadline reached');
+  }
+}
+
+function remainingMs(deadline: number | undefined): number {
+  return deadline == null ? Number.POSITIVE_INFINITY : deadline - Date.now();
+}
+
+function assertTime(deadline: number | undefined): void {
+  if (remainingMs(deadline) < MIN_STEP_MS) throw new DeadlineError();
+}
+
+/** Cuts the request at the deadline when the client supports it (supabase-js; the mock does not). */
+function withDeadline<Q>(query: Q, deadline: number | undefined): Q {
+  const q = query as Q & { abortSignal?: (signal: AbortSignal) => Q };
+  if (deadline == null || typeof q.abortSignal !== 'function') return query;
+  return q.abortSignal(AbortSignal.timeout(Math.max(1, remainingMs(deadline))));
+}
+
+/** supabase-js reports an aborted fetch as an error object (AbortError), not as a throw. */
+function isAbort(error: unknown): boolean {
+  const e = error as { name?: string; message?: string; code?: string } | null;
+  return !!e && (e.name === 'AbortError' || e.name === 'TimeoutError' || /abort/i.test(e.message ?? ''));
+}
+
+interface MatchInput {
+  lines: MatchLine[];
+  /** Approved/exported invoices of the client not paired with any line yet. */
+  invoices: MatchableInvoice[];
+  /** More candidate lines than MAX_MATCH_LINES. */
+  truncated: boolean;
+}
+
+/**
+ * Preferred path: bank_auto_match_input() (migration 20261030192000) returns, in one call, only
+ * the unmatched debits whose amount is within the tolerance of a free invoice's total (every line
+ * that can be matched, so also every rival of a match), plus those invoices with just the fields
+ * matching needs. Its cost grows with the invoices, not with the client's total line count.
+ * Returns null when the function isn't deployed yet.
+ */
+async function loadMatchInputRpc(db: SupabaseClient, clientId: string, deadline: number | undefined): Promise<MatchInput | null> {
+  if (typeof db.rpc !== 'function') return null;
+  assertTime(deadline);
+  const { data, error } = await withDeadline(
+    db.rpc(MATCH_INPUT_RPC, {
+      p_client_id: clientId,
+      // A cent of slack: the exact (rounded) comparison runs in autoMatch()
+      p_tolerance: AMOUNT_TOLERANCE + 0.01,
+      p_max_lines: MAX_MATCH_LINES,
+    }),
+    deadline
+  );
+  if (error && isAbort(error)) throw new DeadlineError();
+  if (isMissingFunction(error)) return null;
+  throwDbError(error, 'load auto-match input');
+  const body = (data ?? {}) as { lines?: MatchLine[] | null; invoices?: MatchableInvoice[] | null; truncated?: boolean };
+  return {
+    lines: (body.lines ?? []).map((l) => ({
+      ...l,
+      amount: Number(l.amount),
+      match_status: 'unmatched' as const,
+      matched_invoice_id: null,
+      rejected_invoice_ids: l.rejected_invoice_ids ?? [],
+    })),
+    invoices: (body.invoices ?? []).map((i) => ({
+      ...i,
+      total_amount: i.total_amount == null ? null : Number(i.total_amount),
+    })),
+    truncated: body.truncated === true,
+  };
+}
+
+/**
+ * Fallback (mock DB / function not deployed): the client's unmatched debits only, with the columns
+ * matching needs, page by page with the deadline checked between pages; invoices already paired
+ * with a line are dropped from the matchable list.
+ */
+async function loadMatchInputFallback(db: SupabaseClient, clientId: string, deadline: number | undefined): Promise<MatchInput> {
+  const paged = async <T>(makeQuery: () => PagedQuery<T>, context: string): Promise<T[]> => {
+    const first = makeQuery();
+    if (typeof first.range !== 'function') {
+      assertTime(deadline);
+      const { data, error } = await first;
+      throwDbError(error, context);
+      return data ?? [];
+    }
+    const rows: T[] = [];
+    for (let from = 0; ; from += PAGE_SIZE) {
+      assertTime(deadline);
+      const { data, error } = await withDeadline(makeQuery().range!(from, from + PAGE_SIZE - 1), deadline);
+      if (error && isAbort(error)) throw new DeadlineError();
+      throwDbError(error, context);
+      rows.push(...(data ?? []));
+      if (!data || data.length < PAGE_SIZE) return rows;
+    }
+  };
+
+  const [lines, usedRows, invoices] = await Promise.all([
+    paged<MatchLine>(
+      () =>
+        db
+          .from(TABLE)
+          .select('id, txn_date, description, amount, match_status, matched_invoice_id, rejected_invoice_ids, import_batch_id')
+          .eq('client_id', clientId)
+          .eq('match_status', 'unmatched')
+          .lt('amount', 0)
+          .order('id'),
+      'load unmatched lines'
+    ),
+    paged<{ matched_invoice_id: string | null }>(
+      () => db.from(TABLE).select('matched_invoice_id').eq('client_id', clientId).not('matched_invoice_id', 'is', null).order('id'),
+      'load matched invoice ids'
+    ),
     loadMatchableInvoices(db, clientId),
   ]);
-  const result = autoMatch(transactions, invoices);
+  const used = new Set(usedRows.map((r) => r.matched_invoice_id).filter((id): id is string => !!id));
+  return {
+    lines: lines.map((l) => ({ ...l, amount: Number(l.amount), rejected_invoice_ids: l.rejected_invoice_ids ?? [] })),
+    invoices: invoices.filter((i) => !used.has(i.id)),
+    truncated: false,
+  };
+}
 
+/**
+ * Stores pairs, a chunk per call. Preferred: apply_bank_auto_matches() (one statement per chunk;
+ * a pair whose line was handled meanwhile or whose invoice was matched elsewhere is skipped inside
+ * it). Fallback: one update per pair. Only lines still unmatched are touched - a reviewer may have
+ * acted on them meanwhile. Stops at the deadline; returns how many pairs were stored.
+ */
+async function applyMatches(
+  db: SupabaseClient,
+  clientId: string,
+  matches: AutoMatch[],
+  deadline: number | undefined
+): Promise<{ matched: number; complete: boolean }> {
   let matched = 0;
-  for (const m of result.matches) {
-    // Only touch lines still unmatched - a reviewer may have acted on them meanwhile.
-    const { error } = await db
-      .from(TABLE)
-      .update({ matched_invoice_id: m.invoiceId, match_status: 'auto' })
-      .eq('id', m.transactionId)
-      .eq('match_status', 'unmatched');
-    if (error) {
-      // e.g. the invoice was matched manually to another line in parallel (unique index)
-      console.error(`[bank] Auto-match ${m.transactionId} -> ${m.invoiceId} failed:`, error.message);
-      continue;
+  let useRpc = typeof db.rpc === 'function';
+  for (let i = 0; i < matches.length; i += APPLY_CHUNK) {
+    if (remainingMs(deadline) < MIN_STEP_MS) return { matched, complete: false };
+    const chunk = matches.slice(i, i + APPLY_CHUNK);
+    if (useRpc) {
+      const { data, error } = await withDeadline(
+        db.rpc(APPLY_MATCHES_RPC, {
+          p_client_id: clientId,
+          p_matches: chunk.map((m) => ({ transaction_id: m.transactionId, invoice_id: m.invoiceId })),
+        }),
+        deadline
+      );
+      // An aborted call may still commit in the database; the next run sees those lines as matched.
+      if (error && isAbort(error)) return { matched, complete: false };
+      if (!isMissingFunction(error)) {
+        throwDbError(error, 'apply auto-matches');
+        matched += typeof data === 'number' ? data : Number(data ?? 0);
+        continue;
+      }
+      console.warn(`[bank] ${APPLY_MATCHES_RPC}() not deployed, storing auto-matches one by one`);
+      useRpc = false;
     }
-    matched++;
+    for (const m of chunk) {
+      if (remainingMs(deadline) < MIN_STEP_MS) return { matched, complete: false };
+      const { error } = await withDeadline(
+        db
+          .from(TABLE)
+          .update({ matched_invoice_id: m.invoiceId, match_status: 'auto' })
+          .eq('id', m.transactionId)
+          .eq('match_status', 'unmatched'),
+        deadline
+      );
+      if (error) {
+        if (isAbort(error)) return { matched, complete: false };
+        // e.g. the invoice was matched manually to another line in parallel (unique index)
+        console.error(`[bank] Auto-match ${m.transactionId} -> ${m.invoiceId} failed:`, error.message);
+        continue;
+      }
+      matched++;
+    }
   }
-  return { matched, ambiguous: Object.keys(result.ambiguous).length };
+  return { matched, complete: true };
+}
+
+/**
+ * Runs auto-matching over the client's unmatched debits and stores the confident pairs. Bounded:
+ * only lines that can match a free invoice are loaded, the pairs are stored in batches, and with a
+ * `deadline` the run returns in time (complete: false) instead of running into the request cut;
+ * the rest is matched by the next run (the "הרץ התאמה אוטומטית" button on the bank page).
+ */
+export async function runAutoMatch(db: SupabaseClient, clientId: string, options: AutoMatchOptions = {}): Promise<MatchRunResult> {
+  const { deadline, preferBatchId } = options;
+  try {
+    const input = (await loadMatchInputRpc(db, clientId, deadline)) ?? (await loadMatchInputFallback(db, clientId, deadline));
+    if (input.truncated) {
+      // Without every candidate line the "clear favourite among all competing lines" rule can't be
+      // checked, so nothing is matched rather than risking a wrong pair.
+      console.warn(`[bank] Auto-match for client ${clientId}: more than ${MAX_MATCH_LINES} candidate lines - skipped`);
+      return { matched: 0, ambiguous: 0, complete: false };
+    }
+    const result = autoMatch(input.lines, input.invoices);
+    let matches = result.matches;
+    if (preferBatchId) {
+      const inBatch = new Set(input.lines.filter((l) => l.import_batch_id === preferBatchId).map((l) => l.id));
+      matches = [...matches.filter((m) => inBatch.has(m.transactionId)), ...matches.filter((m) => !inBatch.has(m.transactionId))];
+    }
+    const applied = await applyMatches(db, clientId, matches, deadline);
+    return { matched: applied.matched, ambiguous: Object.keys(result.ambiguous).length, complete: applied.complete };
+  } catch (err) {
+    if (err instanceof DeadlineError) return { matched: 0, ambiguous: 0, complete: false };
+    throw err;
+  }
 }
 
 export interface BankLinesPage {

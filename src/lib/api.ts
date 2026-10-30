@@ -445,7 +445,7 @@ export function importBankStatement(payload: {
   fileName: string | null;
   rows: NormalizedBankRow[];
 }) {
-  return bankRequest<ImportResult & MatchRunResult & { matchError?: string }>('/api/bank/import', {
+  return bankRequest<ImportResult & Omit<MatchRunResult, 'complete'> & { matchComplete?: boolean; matchError?: string; matchNote?: string }>('/api/bank/import', {
     method: 'POST',
     body: JSON.stringify(payload),
   });

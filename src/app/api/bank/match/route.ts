@@ -3,8 +3,13 @@ import { supabase } from '@/lib/supabase';
 import { BankTableMissingError, runAutoMatch } from '@/lib/bankTransactions';
 import { requireClientAccess } from '@/lib/auth';
 
-// Re-runs auto-matching for a client (e.g. after more invoices were approved).
+// Re-runs auto-matching for a client (e.g. after more invoices were approved, or to finish a
+// partial run). Bounded by a deadline so the response arrives before Amplify's ~28 s cut; a run
+// that stops there reports complete: false and the next click continues.
+const AUTO_MATCH_DEADLINE_MS = 20_000;
+
 export async function POST(request: Request) {
+  const startedAt = Date.now();
   let body: unknown;
   try {
     body = await request.json();
@@ -21,7 +26,7 @@ export async function POST(request: Request) {
   if (!access.ok) return access.response;
 
   try {
-    const result = await runAutoMatch(supabase, clientId);
+    const result = await runAutoMatch(supabase, clientId, { deadline: startedAt + AUTO_MATCH_DEADLINE_MS });
     return NextResponse.json(result);
   } catch (err) {
     console.error('[bank] Auto-match failed:', err);
