@@ -11,7 +11,7 @@ import { checkLineItemsSum, hasMixedVat, isLineItemWarning, lineItemWarnings, no
 import { createClient } from '@/utils/supabase/client';
 import { LineItemsTable } from '@/components/SplitPane/LineItemsTable';
 import clsx from 'clsx';
-import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark, Zap } from 'lucide-react';
+import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark, Zap, Undo2 } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
 import { DuplicateAlert } from './DuplicateAlert';
 
@@ -19,11 +19,13 @@ interface Props {
   invoice: Invoice;
   onApproved: () => void;
   onFieldFocus?: (field: string | null) => void;
+  /** Accountant review loop: shows "החזר ללקוח" (only passed while the feature flag is on). */
+  onReturnToClient?: () => void;
 }
 
 type SupplierStatus = 'known' | 'unknown' | 'loading';
 
-export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
+export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToClient }: Props) {
   const supabase = createClient();
   const { toast } = useToast();
   
@@ -432,7 +434,8 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const isApproved = invoice.status === 'approved';
   const isRejected = invoice.status === 'rejected';
   const isError = invoice.status === 'error';
-  const isReadOnly = isApproved || isRejected || isError || invoice.status === 'exported';
+  const isReturned = invoice.status === 'returned';
+  const isReadOnly = isApproved || isRejected || isError || isReturned || invoice.status === 'exported';
 
   // The server already cleared the flag in validated_data; mirror it locally so approving
   // right after a dismissal doesn't write the stale duplicate flag back.
@@ -977,14 +980,38 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                 <XCircle className="h-4 w-4 shrink-0" /> {invoice.error_message || 'המסמך לא זוהה כחשבונית'}
               </span>
             )}
+            {isReturned && (
+              <span className="text-orange-700 bg-orange-50 border-orange-200 flex items-center gap-2 px-3 py-1 rounded-full border">
+                <Undo2 className="h-4 w-4" /> חשבונית זו הוחזרה ללקוח
+              </span>
+            )}
             {invoice.status === 'exported' && (
               <span className="text-slate-600 bg-slate-50 border-slate-200 flex items-center gap-2 px-3 py-1 rounded-full border">
                 <CheckCircle className="h-4 w-4" /> חשבונית זו כבר יוצאה
               </span>
             )}
+            {onReturnToClient && (
+              <button
+                type="button"
+                onClick={onReturnToClient}
+                className="mr-3 flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border border-orange-200 text-orange-700 bg-white hover:bg-orange-50 transition-colors"
+              >
+                <Undo2 className="h-3.5 w-3.5" /> החזר ללקוח
+              </button>
+            )}
           </div>
         ) : (
           <div className="flex items-center gap-3">
+            {onReturnToClient && (
+              <button
+                type="button"
+                onClick={onReturnToClient}
+                disabled={saving || rejecting}
+                className="flex-1 py-3 bg-white border border-orange-200 hover:bg-orange-50 text-orange-700 font-semibold text-sm rounded-xl transition-colors disabled:opacity-60 flex items-center justify-center gap-2 shadow-sm"
+              >
+                <Undo2 className="h-4 w-4" /> החזר ללקוח
+              </button>
+            )}
             <button
               onClick={handleReject}
               disabled={saving || rejecting}

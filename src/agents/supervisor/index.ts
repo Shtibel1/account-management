@@ -10,6 +10,7 @@ import { supabase } from '@/lib/supabase';
 import { withSupplierRule } from '@/shared/supplierRules';
 import { loadFewShotExamples, saveExtractionContext } from '@/lib/fewshot';
 import { saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
+import { linkResubmission } from '@/lib/returns';
 import { computeConfidence } from '@/shared/confidence';
 import { PDFDocument } from 'pdf-lib';
 
@@ -597,6 +598,8 @@ const graph = new StateGraph<any>({
       updated_at: new Date().toISOString(),
     }).eq('id', state.invoiceId);
     await saveRunContext(state);
+    // A corrected document for an invoice the accountant returned to the client (review loop flag)
+    await linkResubmission(state.invoiceId);
 
     return { status: 'review' };
   })
@@ -622,6 +625,7 @@ const graph = new StateGraph<any>({
       updated_at: new Date().toISOString(),
     }).eq('id', state.invoiceId);
     await saveRunContext(state);
+    await linkResubmission(state.invoiceId);
 
     return { status: 'approved' };
   })

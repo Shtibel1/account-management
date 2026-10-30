@@ -5,6 +5,7 @@ import { createClient } from '@/utils/supabase/client';
 import { Invoice } from '@/shared/types';
 import { InvoiceTable } from '@/components/InvoiceTable/InvoiceTable';
 import { useToast } from '@/components/ui/Toast';
+import { useFeatureFlag } from '@/components/FeatureFlags/useFeatureFlags';
 import { Loader2, RefreshCw } from 'lucide-react';
 
 const STATUS_LABELS: Record<string, string> = {
@@ -12,6 +13,7 @@ const STATUS_LABELS: Record<string, string> = {
   approved: 'אושר',
   rejected: 'לא אושר',
   error:    'חריג',
+  returned: 'הוחזר ללקוח',
 };
 
 export default function ReviewPage() {
@@ -22,6 +24,7 @@ export default function ReviewPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [clients, setClients] = useState<Record<string, string>>({});
   const prevStatuses = useRef<Record<string, string>>({});
+  const reviewLoop = useFeatureFlag('accountant_review_loop');
 
   const load = async (silent = false) => {
     if (!silent) setRefreshing(true);
@@ -113,7 +116,7 @@ export default function ReviewPage() {
           <Loader2 className="h-7 w-7 animate-spin" />
         </div>
       ) : (
-        <InvoiceTable invoices={invoices} clients={clients} onExported={() => load()} />
+        <InvoiceTable invoices={invoices} clients={clients} onExported={() => load()} showReturned={reviewLoop} />
       )}
     </div>
   );

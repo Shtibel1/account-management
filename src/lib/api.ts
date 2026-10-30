@@ -1,4 +1,6 @@
-import type { BankTransaction, ClientContact, ExtractedData, NormalizedBankRow, SupplierAutomation, SupplierAutomationStatus, ValidationResult } from '@/shared/types';
+import type { BankTransaction, ClientContact, ClientNotification, ExtractedData, Invoice, NormalizedBankRow, SupplierAutomation, SupplierAutomationStatus, ValidationResult } from '@/shared/types';
+import type { FeatureFlag, FeatureFlagsResponse, OrgFeatureFlagsResponse } from '@/shared/featureFlags';
+import type { NotificationOutcome, ReturnReasonCode } from '@/shared/returns';
 import type { BankAction, BankOverview, ImportResult, MatchRunResult } from '@/lib/bankTransactions';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
@@ -316,4 +318,65 @@ export function bankTransactionAction(id: string, action: BankAction) {
     method: 'PATCH',
     body: JSON.stringify(action),
   });
+}
+
+// ── Feature flags + accountant review loop ────────────────────────────
+
+async function jsonRequest<T>(url: string, fallbackError: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_URL}${url}`, {
+    cache: 'no-store',
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error ?? fallbackError);
+  return body as T;
+}
+
+export function fetchFeatureFlags(scope: { orgId?: string | null; clientId?: string | null } = {}) {
+  const params = new URLSearchParams();
+  if (scope.clientId) params.set('clientId', scope.clientId);
+  else if (scope.orgId) params.set('orgId', scope.orgId);
+  const qs = params.toString();
+  return jsonRequest<FeatureFlagsResponse>(`/api/feature-flags${qs ? `?${qs}` : ''}`, 'שגיאה בטעינת התכונות');
+}
+
+export function fetchOrgFeatureFlags(orgId: string | null) {
+  const qs = orgId ? `?orgId=${encodeURIComponent(orgId)}` : '';
+  return jsonRequest<OrgFeatureFlagsResponse>(`/api/org/feature-flags${qs}`, 'שגיאה בטעינת התכונות');
+}
+
+/** enabled null = back to the server default. */
+export function setOrgFeatureFlag(orgId: string | null, flag: FeatureFlag, enabled: boolean | null) {
+  return jsonRequest<OrgFeatureFlagsResponse>('/api/org/feature-flags', 'שגיאה בשמירת התכונה', {
+    method: 'PUT',
+    body: JSON.stringify({ orgId, flag, enabled }),
+  });
+}
+
+export function returnInvoiceToClient(id: string, reasonCode: ReturnReasonCode, note: string) {
+  return jsonRequest<{ invoice: Invoice; notifications: NotificationOutcome[] }>(
+    `/api/invoices/${encodeURIComponent(id)}/return`,
+    'שגיאה בהחזרת החשבונית ללקוח',
+    { method: 'POST', body: JSON.stringify({ reasonCode, note }) }
+  );
+}
+
+export function fetchInvoiceNotifications(id: string) {
+  return jsonRequest<ClientNotification[]>(`/api/invoices/${encodeURIComponent(id)}/notifications`, 'שגיאה בטעינת היסטוריית ההודעות');
+}
+
+export function fetchClientContactEmail(clientId: string) {
+  return jsonRequest<{ contactEmail: string | null }>(
+    `/api/clients/${encodeURIComponent(clientId)}/contact-email`,
+    'שגיאה בטעינת כתובת האימייל'
+  );
+}
+
+export function saveClientContactEmail(clientId: string, email: string | null) {
+  return jsonRequest<{ contactEmail: string | null }>(
+    `/api/clients/${encodeURIComponent(clientId)}/contact-email`,
+    'שגיאה בשמירת כתובת האימייל',
+    { method: 'PUT', body: JSON.stringify({ email }) }
+  );
 }

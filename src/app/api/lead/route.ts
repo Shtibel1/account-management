@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
+import { escapeHtml, sendEmail } from '@/lib/email';
 
 const CONTACT_TO = process.env.CONTACT_TO_EMAIL || process.env.CONTACT_TO || process.env.CONTACT_EMAIL || 'nadavshtibel@gmail.com';
 const CONTACT_FROM = process.env.CONTACT_FROM_EMAIL || process.env.CONTACT_FROM || 'contact@nadav-shtibel.com';
-const AWS_REGION = process.env.AWS_REGION || 'eu-west-1';
 
 interface LeadData {
   name: string;
@@ -95,39 +94,9 @@ function formatLeadEmail(data: LeadData): { subject: string; textBody: string; h
   return { subject, textBody, htmlBody };
 }
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;')
-    .replace(/\n/g, '<br>');
-}
-
 async function sendViaSES(data: LeadData): Promise<void> {
-  if (!AWS_REGION) {
-    throw new Error('AWS_REGION not configured');
-  }
-
-  const sesClient = new SESClient({ region: AWS_REGION });
   const { subject, textBody, htmlBody } = formatLeadEmail(data);
-
-  const command = new SendEmailCommand({
-    Source: CONTACT_FROM,
-    Destination: {
-      ToAddresses: [CONTACT_TO],
-    },
-    Message: {
-      Subject: { Data: subject, Charset: 'UTF-8' },
-      Body: {
-        Text: { Data: textBody, Charset: 'UTF-8' },
-        Html: { Data: htmlBody, Charset: 'UTF-8' },
-      },
-    },
-  });
-
-  await sesClient.send(command);
+  await sendEmail({ from: CONTACT_FROM, to: [CONTACT_TO], subject, textBody, htmlBody });
 }
 
 export async function POST(request: NextRequest) {

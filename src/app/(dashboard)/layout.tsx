@@ -6,7 +6,7 @@ import { useState } from 'react';
 import clsx from 'clsx';
 import { Logo } from '@/components/ui/Logo';
 import {
-  Upload, ClipboardCheck, Users, BookOpen, LayoutDashboard, Landmark, LogOut, Building2,
+  Upload, ClipboardCheck, Users, BookOpen, LayoutDashboard, Landmark, LogOut, Building2, FlaskConical,
 } from 'lucide-react';
 import versionData from '@/shared/version.json';
 import { SessionProvider, useSession } from '@/components/Auth/SessionContext';
@@ -18,6 +18,11 @@ const navItems = [
   { href: '/review',   label: 'בדיקה ואישור',     icon: ClipboardCheck },
   { href: '/mappings', label: 'מיפוי חשבונות',    icon: BookOpen },
   { href: '/bank',     label: 'התאמות בנק',       icon: Landmark },
+];
+
+/** Shown only to office owners (and in local mock mode, where the page explains the env default). */
+const ownerNavItems = [
+  { href: '/settings/experimental', label: 'תכונות ניסיוניות', icon: FlaskConical },
 ];
 
 /** Office name, signed-in user and logout at the bottom of the sidebar. */
@@ -67,6 +72,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
 function DashboardShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const { me } = useSession();
+  const isOwner = !!me && (me.mock || me.organizations.some((o) => o.role === 'owner'));
+  const items = isOwner ? [...navItems, ...ownerNavItems] : navItems;
 
   return (
     <div className="flex flex-row min-h-screen bg-slate-100">
@@ -79,7 +87,7 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
 
         {/* Nav */}
         <nav className="flex-1 px-3 py-4 space-y-1">
-          {navItems.map(({ href, label, icon: Icon }) => {
+          {items.map(({ href, label, icon: Icon }) => {
             const active = pathname === href || pathname.startsWith(href + '/');
             return (
               <Link
@@ -107,7 +115,7 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
         {/* Top bar */}
         <header className="bg-white border-b border-slate-200 px-8 py-4 flex items-center justify-between sticky top-0 z-10">
           <h1 className="text-lg font-semibold text-slate-800">
-            {navItems.find(i => pathname.startsWith(i.href))?.label ?? 'מערכת חשבוניות'}
+            {[...navItems, ...ownerNavItems].find(i => pathname.startsWith(i.href))?.label ?? 'מערכת חשבוניות'}
           </h1>
           <div className="flex items-center gap-2">
             <span className="text-xs text-slate-400 bg-slate-100 px-3 py-1 rounded-full">
