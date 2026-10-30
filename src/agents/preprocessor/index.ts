@@ -115,17 +115,17 @@ async function runOcrForPageRange(
   return { pageTexts, ocrWords };
 }
 
-/** Downloads the stored invoice file. */
-export async function fetchInvoiceFile(fileUrl: string): Promise<Buffer> {
+/** Downloads a stored invoice file; `timeoutMs` bounds the whole download (the processing queue's step deadline). */
+export async function fetchInvoiceFile(fileUrl: string, timeoutMs?: number): Promise<Buffer> {
   try {
-    const response = await fetch(fileUrl);
+    const response = await fetch(fileUrl, timeoutMs ? { signal: AbortSignal.timeout(Math.max(1_000, Math.floor(timeoutMs))) } : undefined);
     if (!response.ok) {
       throw new Error(`Failed to download invoice file. HTTP status: ${response.status}`);
     }
     return Buffer.from(await response.arrayBuffer());
   } catch (e) {
     console.error(`[Preprocessor] Error downloading invoice file from URL: ${fileUrl.split('?')[0]}`, e);
-    throw new Error(`Preprocessor failed to retrieve invoice file: ${e instanceof Error ? e.message : String(e)}`);
+    throw new Error(`Preprocessor failed to retrieve invoice file: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
   }
 }
 

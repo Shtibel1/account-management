@@ -37,16 +37,38 @@ export const TICK_OCR_BUDGET_MS = 14_000;
  * (Lambda, no waitUntil: code after the response is frozen until another request thaws the instance,
  * QA round 3), so a tick only starts a step it can finish by then: OCR rounds are budgeted, LLM calls
  * get a timeout that ends before it, and a step that can't fit is left for the next tick.
+ * 23 s: an LLM step that starts right away gets the whole MAX_LLM_CALL_MS, and the answer still
+ * leaves well before Amplify's ~28 s cut.
  */
-export const TICK_RESPONSE_MS = 20_000;
-/** /process/tick answers by then whatever happens (Amplify answers a bare 504 at ~28 s). */
-export const TICK_HARD_LIMIT_MS = 25_000;
+export const TICK_RESPONSE_MS = 23_000;
+/** /process/tick and the worker answer by then whatever happens (Amplify answers a bare 504 at ~28 s). */
+export const TICK_HARD_LIMIT_MS = 26_000;
 /** Time kept after a step's last external call for saving its result before the deadline. */
 export const STEP_SAVE_MARGIN_MS = 2_500;
-/** One LLM call never runs longer than this (also when a request's deadline is further away). */
-export const MAX_LLM_CALL_MS = 22_000;
-/** A step with an LLM call (boundary detection, an extraction part) starts only with this much time left. */
-export const MIN_LLM_STEP_MS = 12_000;
+/**
+ * One LLM call never runs longer than this. Sonnet writes ~60-80 tokens/s, so ~1.2-1.6k output tokens
+ * fit; extraction calls are streamed, so a part that needs more is cut here with its partial tool
+ * input kept, and split in two while it has several pages (src/agents/extraction).
+ */
+export const MAX_LLM_CALL_MS = 20_000;
+/**
+ * A step with an LLM call (boundary detection, an extraction part) starts only with this much time
+ * left, so its call always gets at least LLM_FULL_WINDOW_MS: in practice an LLM step runs at the start
+ * of a request (one per tick / worker slot), never squeezed into the end of one (QA round 3 review).
+ */
+export const MIN_LLM_STEP_MS = 18_000;
+/**
+ * A call that ran out of time with at least this long a timeout is really too long for one call (its
+ * part is split, or a one-page part keeps its partial result); one with a shorter timeout only started
+ * late and is retried as a transient failure instead.
+ */
+export const LLM_FULL_WINDOW_MS = MIN_LLM_STEP_MS - STEP_SAVE_MARGIN_MS;
+/**
+ * Optional LLM steps (boundary detection, the math re-read) are retried this many times on transient
+ * failures; then the run goes on without them (no split suggestion / the first-pass result) instead
+ * of failing.
+ */
+export const OPTIONAL_STEP_TRANSIENT_RETRIES = 2;
 /** An OCR step (download + at least one batch of pages) starts only with this much time left. */
 export const MIN_OCR_STEP_MS = 7_000;
 /** Validation + save (no LLM) starts only with this much time left. */

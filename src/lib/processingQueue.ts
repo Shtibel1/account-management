@@ -11,6 +11,7 @@ import {
   INTERRUPTED_STEP_ERROR,
   JOB_HEARTBEAT_MS,
   JOB_LEASE_MS,
+  LLM_FULL_WINDOW_MS,
   MAX_LLM_CALL_MS,
   MAX_STAGE_ATTEMPTS,
   MAX_STEP_MS,
@@ -18,6 +19,7 @@ import {
   MIN_FINALIZE_STEP_MS,
   MIN_LLM_STEP_MS,
   MIN_OCR_STEP_MS,
+  OPTIONAL_STEP_TRANSIENT_RETRIES,
   STALE_PROCESSING_MS,
   STEP_SAVE_MARGIN_MS,
   STUCK_RUN_MESSAGE,
@@ -156,8 +158,10 @@ export interface ExtractCallResult {
   inputTokens: number;
   outputTokens: number;
   fewShotInvoiceIds: string[];
-  /** The response was cut at max_tokens. */
+  /** The response was cut at max_tokens or at its time limit (its data may be incomplete). */
   truncated?: boolean;
+  /** Cut at its time limit (streamed; the data written by then is kept), not at max_tokens. */
+  timedOut?: boolean;
 }
 
 /** Time limit of one external call of a step (OCR batch, LLM call). */
@@ -175,7 +179,7 @@ export interface QueueDeps {
   db: SupabaseClient;
   now: () => number;
   /** Bytes of a stored file_url (a storage reference since QA #31) of this client. */
-  fetchFile: (url: string, clientId: string) => Promise<Buffer>;
+  fetchFile: (url: string, clientId: string, options: CallOptions) => Promise<Buffer>;
   ocrPdfPages: (file: Buffer, pdf: unknown, pages: number[], options: CallOptions) => Promise<{ pageTexts: string[]; ocrWords: OcrWord[] }>;
   loadPdf: (file: Buffer) => Promise<{ getPageCount(): number } | null>;
   ocrImage: (file: Buffer, options: CallOptions) => Promise<{ rawOcrText: string; ocrWords: OcrWord[]; confidence: number; detectedLanguages: string[] }>;
@@ -201,8 +205,8 @@ async function defaultDeps(): Promise<QueueDeps> {
     db: supabase,
     now: () => Date.now(),
     // file_url is a storage reference (not a link, QA #31): read it through a short-lived signed URL
-    fetchFile: async (url, clientId) => {
-      return pre.fetchInvoiceFile((await files.signedInvoiceFileUrl(url, clientId, files.PIPELINE_URL_TTL_SECONDS)) ?? url);
+    fetchFile: async (url, clientId, options) => {
+      return pre.fetchInvoiceFile((await files.signedInvoiceFileUrl(url, clientId, files.PIPELINE_URL_TTL_SECONDS)) ?? url, options.timeoutMs);
     },
     ocrPdfPages: (file, pdf, pages, options) => pre.ocrPdfPages(file, pdf as Awaited<ReturnType<typeof pre.loadPdf>>, pages, options),
     loadPdf: pre.loadPdf,
@@ -226,6 +230,7 @@ async function defaultDeps(): Promise<QueueDeps> {
         outputTokens: r.outputTokens,
         fewShotInvoiceIds: r.fewShotInvoiceIds,
         truncated: r.truncated,
+        timedOut: r.timedOut,
       };
     },
     finalize: (input) => {
@@ -526,6 +531,20 @@ class LostJobLockError extends Error {
 }
 
 /**
+ * A streamed extraction call was cut at its time limit, and its partial result isn't kept: it had a
+ * short window (it started late), or a one-page part gets one more try. A timeout, so the step is
+ * retried with backoff on the transient budget.
+ */
+class CallCutLateError extends Error {
+  constructor(timeoutMs: number, retryOnce = false) {
+    super(retryOnce
+      ? `Extraction call timed out at its ${timeoutMs} ms limit; retrying the page once before keeping a partial result`
+      : `Extraction call timed out at its ${timeoutMs} ms limit (started late); retrying with a full window`);
+    this.name = 'TimeoutError';
+  }
+}
+
+/**
  * Saves job fields; conditioned on the lock version this tick holds (throws LostJobLockError otherwise).
  * Progress (stage_attempts reset to 0) also resets the transient counter.
  */
@@ -541,10 +560,11 @@ async function saveJob(d: QueueDeps, job: JobRow, patch: Partial<JobRow>): Promi
 
 /**
  * Renews the lease of the job this tick holds every `heartbeatMs` while its step runs. Only while
- * the lease is still held (lock_version unchanged, not released): a beat can never re-lock a job
- * the step already released. Steps end before their request's deadline, well inside the lease; if
- * the compute is frozen or killed anyway, the beats stop and the lease runs out after JOB_LEASE_MS,
- * and the next tick takes over (counted as an interruption, a transient failure).
+ * the lease is still held (lock_version unchanged, not released, not expired): a beat can never
+ * re-lock a job the step already released, nor revive a lease that ran out (a frozen step thawing).
+ * Steps end before their request's deadline, well inside the lease; if the compute is frozen or
+ * killed anyway, the beats stop and the lease runs out after JOB_LEASE_MS, and the next tick takes
+ * over (counted as an interruption, a transient failure).
  */
 function startHeartbeat(d: QueueDeps, job: JobRow): () => void {
   if (!d.heartbeatMs || d.heartbeatMs <= 0) return () => {};
@@ -564,7 +584,7 @@ function startHeartbeat(d: QueueDeps, job: JobRow): () => void {
           .update({ locked_until: iso(now + JOB_LEASE_MS), updated_at: iso(now) })
           .eq('invoice_id', job.invoice_id)
           .eq('lock_version', lockVersion)
-          .not('locked_until', 'is', null)
+          .gt('locked_until', iso(now))
       ).then(({ error }) => {
         if (error) console.warn(`[Queue] Lease renewal failed for invoice ${job.invoice_id}:`, error.message);
       }, (err) => console.warn(`[Queue] Lease renewal failed for invoice ${job.invoice_id}:`, err));
@@ -625,6 +645,14 @@ function callTimeoutMs(d: QueueDeps, deadline: number, cap: number = MAX_LLM_CAL
   return Math.max(1_000, Math.min(cap, deadline - d.now() - STEP_SAVE_MARGIN_MS));
 }
 
+/**
+ * Transient failures of the current step so far (optional-step retries). Without migration
+ * 20261030191000 they are counted as real ones, in stage_attempts.
+ */
+function transientTries(job: JobRow): number {
+  return transientColumnsUnsupported ? job.stage_attempts : job.transient_attempts ?? 0;
+}
+
 /** The technical cause of a step failure, for processing_error_detail. */
 function stepDetail(job: JobRow, kind: string, cause: unknown): string {
   return `stage ${job.stage}, ${kind} (real ${job.stage_attempts}/${MAX_STAGE_ATTEMPTS}, transient ${job.transient_attempts ?? 0}/${MAX_TRANSIENT_ATTEMPTS}): ${typeof cause === 'string' ? cause : errorDetail(cause)}`;
@@ -638,17 +666,20 @@ function stepDetail(job: JobRow, kind: string, cause: unknown): string {
 export async function runProcessingTick(invoiceId: string, options: TickOptions = {}): Promise<TickResult> {
   const d = await deps();
   const deadline = options.deadline ?? d.now() + TICK_RESPONSE_MS;
+  // The job is read before the invoice: an enqueue in between then shows up as a newer run on the
+  // invoice (this job really is superseded), never as a "stale" invoice next to the new run's job.
+  // Deletes are conditioned on the job's own run, so a new run's job is never removed.
+  let job = await readJob(d.db, invoiceId);
   const invoice = await readInvoice(d.db, invoiceId);
   if (!invoice) return { state: 'done' };
-  let job = await readJob(d.db, invoiceId);
 
   if (invoice.status !== 'processing') {
-    if (job) await d.db.from(JOBS).delete().eq('invoice_id', invoiceId);
+    if (job) await deleteJob(d, invoiceId, job.run_id);
     return { state: 'done' };
   }
 
   if (!job || job.run_id !== invoice.processing_run_id) {
-    if (job) await d.db.from(JOBS).delete().eq('invoice_id', invoiceId); // left over from a superseded run
+    if (job) await deleteJob(d, invoiceId, job.run_id); // left over from a superseded run
     return handleOrphanRun(d, invoice);
   }
 
@@ -802,7 +833,8 @@ async function handleOrphanRun(d: QueueDeps, invoice: InvoiceRow): Promise<TickR
 
 async function ocrStep(d: QueueDeps, job: JobRow, deadline: number): Promise<TickResult> {
   const started = d.now();
-  const file = await d.fetchFile(job.file_url, job.client_id);
+  // The download is bounded too (up to 20 MB): a slow one must not push the answer past the deadline
+  const file = await d.fetchFile(job.file_url, job.client_id, { timeoutMs: callTimeoutMs(d, deadline, Number.POSITIVE_INFINITY) });
   // Reject what Vision can't read before calling it (empty, oversized, not a PDF / image)
   const check = checkStoredBytes(file);
   if (!check.ok) throw new UserFacingError(check.error);
@@ -864,7 +896,17 @@ async function ocrStep(d: QueueDeps, job: JobRow, deadline: number): Promise<Tic
 }
 
 async function detectStep(d: QueueDeps, job: JobRow, deadline: number): Promise<TickResult> {
-  const detection = await d.detect(job.page_texts, { timeoutMs: callTimeoutMs(d, deadline) });
+  let detection: BoundaryDetectionResult;
+  try {
+    // With a time limit, detect() throws transient failures (instead of "no suggestion")
+    detection = await d.detect(job.page_texts, { timeoutMs: callTimeoutMs(d, deadline) });
+  } catch (err) {
+    // Detection is optional: retried a couple of times on transient failures, then the run goes on
+    // without a split suggestion (flagged as failed for the reviewer) instead of failing
+    if (!isTransientError(err) || transientTries(job) < OPTIONAL_STEP_TRANSIENT_RETRIES) throw err;
+    console.warn(`[Queue] Boundary detection of invoice ${job.invoice_id} keeps failing; going on without a split suggestion:`, errorDetail(err));
+    detection = { suggestion: null, inputTokens: 0, outputTokens: 0, failed: true };
+  }
   await saveJob(d, job, {
     split_suggestion: detection.suggestion,
     split_detection_failed: detection.failed === true,
@@ -895,11 +937,13 @@ function wordsInSpan(words: OcrWord[], span: PageSpan): OcrWord[] {
  * Extraction in resumable steps (QA round 2, N5 / N14 / N22; QA round 3). Each tick makes at most
  * ONE LLM call (one page chunk, or the math retry), with a timeout that ends before the tick's
  * deadline, and stores its result in processing_jobs.extract_state before it returns, so no request
- * has to outlive the Amplify limit and a killed tick re-pays only for its own call. A part whose
- * call runs out of time or of output tokens is split in two (smaller calls fit); a one-page part
- * keeps its partial result (cut at max_tokens) or is retried as a transient failure (timeout).
- * When every chunk is in, the merged result is validated and saved (no LLM), in the same tick if
- * there is time left, else in the next.
+ * has to outlive the Amplify limit and a killed tick re-pays only for its own call. Calls are
+ * streamed and cut at their limit with what they wrote so far. A part whose call had the full
+ * window (LLM_FULL_WINDOW_MS) and still ran out of time or of output tokens is split in two
+ * (smaller calls fit); a one-page part is tried once more, then keeps its partial result. A call
+ * cut only because it started late is retried as a transient failure, not split. The math re-read
+ * is optional: cut or failing, the first-pass result is saved. When every chunk is in, the merged
+ * result is validated and saved (no LLM), in the same tick if there is time left, else in the next.
  */
 async function extractStep(d: QueueDeps, job: JobRow, deadline: number): Promise<TickResult> {
   const pageCount = job.page_count ?? Math.max(1, job.page_texts.length);
@@ -924,6 +968,19 @@ async function extractStep(d: QueueDeps, job: JobRow, deadline: number): Promise
       return false;
     }
   };
+  /**
+   * Keeps the tokens of a call whose result is thrown away, without counting progress (the attempt
+   * counters stay as they are, so a part that keeps failing still runs out of attempts).
+   */
+  const keepTokens = async (discarded: { input: number; output: number }): Promise<void> => {
+    state = { ...state, discarded_tokens: discarded };
+    job.extract_state = state;
+    if (extractStateUnsupported) return;
+    await saveJob(d, job, { extract_state: state }).catch((err) => {
+      if (err instanceof LostJobLockError) throw err;
+      console.warn(`[Queue] Could not keep the tokens of a discarded call of invoice ${job.invoice_id}:`, err);
+    });
+  };
   /** Ends this tick after its LLM call; the next tick continues from the stored state. */
   const yieldTick = async (): Promise<TickResult> => {
     await saveJob(d, job, { locked_until: null });
@@ -945,7 +1002,13 @@ async function extractStep(d: QueueDeps, job: JobRow, deadline: number): Promise
       if (mustYield()) return yieldTick();
       const fewShot = state.few_shot ?? (await d.loadFewShot(job.invoice_id, job.client_id, rangeText));
       const span = state.chunks[index];
+      const timeoutMs = callTimeoutMs(d, deadline);
+      // Only a call that had (about) the whole window was really too long; one that started late
+      // is retried later with a full window instead of breaking the part up for nothing
+      const fullWindow = timeoutMs >= LLM_FULL_WINDOW_MS;
+      const pages = span.start === span.end ? `page ${span.start}` : `pages ${span.start}-${span.end}`;
       let r: ExtractCallResult;
+      const callStarted = d.now();
       try {
         r = await d.extract({
           invoiceId: job.invoice_id,
@@ -960,30 +1023,40 @@ async function extractStep(d: QueueDeps, job: JobRow, deadline: number): Promise
           // multi-page part is redone as two smaller parts instead (below).
           allowLargeRetry: false,
           fewShot,
-          timeoutMs: callTimeoutMs(d, deadline),
+          timeoutMs,
         });
       } catch (err) {
-        const smaller = isTimeoutError(err) ? splitChunk(state, index) : null;
+        // A timeout here means nothing was written in time (a streamed call keeps what it wrote)
+        const smaller = isTimeoutError(err) && fullWindow ? splitChunk(state, index) : null;
         if (!smaller) throw err;
-        console.warn(`[Queue] Extraction of pages ${span.start}-${span.end} of invoice ${job.invoice_id} timed out; splitting the part.`);
+        console.warn(`[Queue] Extraction of ${pages} of invoice ${job.invoice_id} timed out (${timeoutMs} ms); splitting the part.`);
         llmCalls++;
         await persist({ ...smaller, few_shot: fewShot });
         continue;
       }
       llmCalls++;
+      console.log(`[Queue] Extraction of ${pages} of invoice ${job.invoice_id}: ${d.now() - callStarted} ms (limit ${timeoutMs} ms, ${r.outputTokens} output tokens${r.timedOut ? ', cut at the limit' : r.truncated ? ', cut at max_tokens' : ''}).`);
       if (r.truncated) {
+        const discarded = state.discarded_tokens ?? { input: 0, output: 0 };
+        const discard = { input: discarded.input + r.inputTokens, output: discarded.output + r.outputTokens };
+        if (r.timedOut && !fullWindow) {
+          // Cut only because it started late: redo the same part with a full window (transient)
+          await keepTokens(discard);
+          throw new CallCutLateError(timeoutMs);
+        }
         const smaller = splitChunk(state, index);
         if (smaller) {
-          console.warn(`[Queue] Extraction of pages ${span.start}-${span.end} of invoice ${job.invoice_id} hit max_tokens; splitting the part.`);
-          const discarded = state.discarded_tokens ?? { input: 0, output: 0 };
-          await persist({
-            ...smaller,
-            few_shot: fewShot,
-            discarded_tokens: { input: discarded.input + r.inputTokens, output: discarded.output + r.outputTokens },
-          });
+          console.warn(`[Queue] Extraction of ${pages} of invoice ${job.invoice_id} was cut (${r.timedOut ? 'time limit' : 'max_tokens'}); splitting the part.`);
+          await persist({ ...smaller, few_shot: fewShot, discarded_tokens: discard });
           continue;
         }
-        console.warn(`[Queue] Extraction of page ${span.start} of invoice ${job.invoice_id} hit max_tokens; keeping the partial result.`);
+        if (r.timedOut && transientTries(job) < 1) {
+          // A one-page part cut at the time limit: try it once more (the model's speed varies)
+          await keepTokens(discard);
+          throw new CallCutLateError(timeoutMs, true);
+        }
+        // Nothing smaller to try: keep what was written (validation flags what is missing)
+        console.warn(`[Queue] Extraction of ${pages} of invoice ${job.invoice_id} was cut again; keeping the partial result.`);
       }
       const results = [...state.results];
       results[index] = { data: r.data, input_tokens: r.inputTokens, output_tokens: r.outputTokens };
@@ -1002,22 +1075,46 @@ async function extractStep(d: QueueDeps, job: JobRow, deadline: number): Promise
       // A one-page image is sent as the image itself, as the pipeline always did.
       const index = amountsChunkIndex(state);
       const previous = state.results[index];
-      const r = await d.extract({
-        invoiceId: job.invoice_id,
-        clientId: job.client_id,
-        text: chunkText(job.page_texts, state.chunks[index]),
-        fileUrl: job.file_url,
-        mimeType: job.mime_type,
-        useVision: job.mime_type.startsWith('image/') && state.chunks.length === 1,
-        retryHint: true,
-        hint: chunkHint(state, index),
-        // A 16k-token retry can't end before the deadline; a cut response keeps its partial tool input
-        allowLargeRetry: false,
-        fewShot: state.few_shot ?? { examples: [], supplierVatId: null },
-        timeoutMs: callTimeoutMs(d, deadline),
-      });
+      let r: ExtractCallResult;
+      try {
+        r = await d.extract({
+          invoiceId: job.invoice_id,
+          clientId: job.client_id,
+          text: chunkText(job.page_texts, state.chunks[index]),
+          fileUrl: job.file_url,
+          mimeType: job.mime_type,
+          useVision: job.mime_type.startsWith('image/') && state.chunks.length === 1,
+          retryHint: true,
+          hint: chunkHint(state, index),
+          // A 16k-token retry can't end before the deadline
+          allowLargeRetry: false,
+          fewShot: state.few_shot ?? { examples: [], supplierVatId: null },
+          timeoutMs: callTimeoutMs(d, deadline),
+        });
+      } catch (err) {
+        // The re-read is optional: the first-pass result is already stored. A transient failure is
+        // retried a couple of times; after that, or on a real error, the run is saved without it.
+        if (err instanceof LostJobLockError) throw err;
+        if (isTransientError(err) && transientTries(job) < OPTIONAL_STEP_TRANSIENT_RETRIES) throw err;
+        console.warn(`[Queue] Math re-read of invoice ${job.invoice_id} failed; saving the first-pass result:`, errorDetail(err));
+        llmCalls++;
+        await persist({ ...state, retry_count: state.retry_count + 1, phase: 'finalize' });
+        continue;
+      }
       llmCalls++;
       const results = [...state.results];
+      if (r.truncated && previous) {
+        // A cut re-read may miss fields the first pass has: keep the first pass, count the tokens
+        console.warn(`[Queue] Math re-read of invoice ${job.invoice_id} was cut; keeping the first-pass result.`);
+        const discarded = state.discarded_tokens ?? { input: 0, output: 0 };
+        await persist({
+          ...state,
+          discarded_tokens: { input: discarded.input + r.inputTokens, output: discarded.output + r.outputTokens },
+          retry_count: state.retry_count + 1,
+          phase: 'finalize',
+        });
+        continue;
+      }
       results[index] = {
         data: r.data,
         input_tokens: (previous?.input_tokens ?? 0) + r.inputTokens,
@@ -1089,25 +1186,31 @@ export interface SweepResult {
  * error too. A run with a queued job is left to the ticks, which resume it. `clientIds` limits the
  * sweep (null = all, for the scheduled worker).
  */
-export async function sweepStaleProcessing(clientIds: string[] | null = null, limit = 50): Promise<SweepResult> {
+export async function sweepStaleProcessing(clientIds: string[] | null = null, limit = 100): Promise<SweepResult> {
   const d = await deps();
   const result: SweepResult = { failed: [], enqueued: [] };
-  const cutoff = iso(d.now() - ENQUEUE_GRACE_MS);
-  let query = d.db
-    .from('invoices')
-    .select(INVOICE_COLUMNS)
-    .eq('status', 'processing')
-    .lt('updated_at', cutoff);
-  if (clientIds) {
-    if (clientIds.length === 0) return result;
-    query = query.in('client_id', clientIds);
-  }
-  const { data, error } = await query.order('updated_at', { ascending: true }).limit(limit);
-  if (error) {
-    console.error('[Queue] Stale sweep query failed:', error);
+  if (clientIds && clientIds.length === 0) return result;
+  // Only rows that may need action, so a long queue of live jobs can't crowd them out (QA round 3
+  // review): never-queued rows past the enqueue grace, and rows without any change for
+  // STALE_PROCESSING_MS (a stale run has an old updated_at; a live job's steps keep bumping it).
+  const candidates = (cutoffMs: number, neverQueued: boolean) => {
+    let query = d.db
+      .from('invoices')
+      .select(INVOICE_COLUMNS)
+      .eq('status', 'processing')
+      .lt('updated_at', iso(d.now() - cutoffMs));
+    if (neverQueued) query = query.or('processing_attempts.is.null,processing_attempts.eq.0');
+    if (clientIds) query = query.in('client_id', clientIds);
+    return query.order('updated_at', { ascending: true }).limit(limit);
+  };
+  const [fresh, stale] = await Promise.all([candidates(ENQUEUE_GRACE_MS, true), candidates(STALE_PROCESSING_MS, false)]);
+  if (fresh.error || stale.error) {
+    console.error('[Queue] Stale sweep query failed:', fresh.error ?? stale.error);
     return result;
   }
-  const invoices = (data ?? []) as unknown as InvoiceRow[];
+  const byId = new Map<string, InvoiceRow>();
+  for (const row of [...(fresh.data ?? []), ...(stale.data ?? [])] as unknown as InvoiceRow[]) byId.set(row.id, row);
+  const invoices = [...byId.values()];
   if (invoices.length === 0) return result;
 
   const { data: jobRows, error: jobsErr } = await d.db

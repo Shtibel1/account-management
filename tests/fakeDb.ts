@@ -1,5 +1,5 @@
 // In-memory stand-in for the parts of the Supabase client the processing queue uses (tests only):
-// from(table).select / insert / update / delete with eq / is / not / lt / in / order / limit /
+// from(table).select / insert / update / delete with eq / is / not / lt / gt / or / in / order / limit /
 // single, awaited as { data, error }. `missingColumns` simulates a migration that isn't applied.
 import type { SupabaseClient } from '@supabase/supabase-js';
 
@@ -56,6 +56,20 @@ class Query implements PromiseLike<{ data: unknown; error: { message: string; co
   }
   lt(col: string, val: string) {
     this.filters.push((r) => typeof r[col] === 'string' && (r[col] as string) < val);
+    return this;
+  }
+  gt(col: string, val: string) {
+    this.filters.push((r) => typeof r[col] === 'string' && (r[col] as string) > val);
+    return this;
+  }
+  /** PostgREST `or` with `col.is.null` / `col.eq.value` terms only. */
+  or(expr: string) {
+    const terms = expr.split(',').map((t) => {
+      const [col, op, ...rest] = t.split('.');
+      const val = rest.join('.');
+      return (r: Row) => (op === 'is' && val === 'null' ? r[col] === null || r[col] === undefined : op === 'eq' ? String(r[col]) === val : false);
+    });
+    this.filters.push((r) => terms.some((f) => f(r)));
     return this;
   }
   in(col: string, vals: unknown[]) {

@@ -13,8 +13,11 @@ import {
   CONNECTION_ERROR_MESSAGE,
   ENQUEUE_GRACE_MS,
   INTERRUPTED_STEP_ERROR,
+  LLM_FULL_WINDOW_MS,
   MAX_STAGE_ATTEMPTS,
   MAX_TRANSIENT_ATTEMPTS,
+  MIN_LLM_STEP_MS,
+  OPTIONAL_STEP_TRANSIENT_RETRIES,
   STALE_PROCESSING_MS,
   STUCK_RUN_MESSAGE,
   transientBackoffMs,
@@ -207,7 +210,7 @@ describe('deadline', () => {
   test('a step that does not fit before the deadline is not started', async () => {
     seedInvoice();
     seedJob();
-    const r = await runProcessingTick('inv1', { deadline: clock + 5_000 });
+    const r = await runProcessingTick('inv1', { deadline: clock + MIN_LLM_STEP_MS - 1 });
     assert.equal(r.state, 'pending');
     assert.equal(r.deferred, true);
     assert.equal(job()?.lock_version, 0);
@@ -217,9 +220,10 @@ describe('deadline', () => {
   test('LLM calls get a timeout that ends before the deadline', async () => {
     seedInvoice();
     seedJob();
-    await runProcessingTick('inv1', { deadline: clock + 15_000 });
+    await runProcessingTick('inv1', { deadline: clock + 19_000 });
     assert.equal(extractCalls.length, 1);
-    assert.ok(extractCalls[0].timeoutMs <= 15_000 - 2_000, `timeout ${extractCalls[0].timeoutMs}`);
+    assert.ok(extractCalls[0].timeoutMs >= LLM_FULL_WINDOW_MS, `timeout ${extractCalls[0].timeoutMs}`);
+    assert.ok(extractCalls[0].timeoutMs <= 19_000 - 2_000, `timeout ${extractCalls[0].timeoutMs}`);
     assert.equal(extractCalls[0].allowLargeRetry, false);
   });
 
@@ -279,6 +283,177 @@ describe('rows without a job', () => {
     assert.equal(invoice('lost').status, 'error');
     assert.equal(invoice('young').processing_attempts, 0);
     assert.equal(invoice('queued').status, 'processing');
+  });
+});
+
+/** Test deps with a few overrides (the rest as in beforeEach). */
+function useDeps(over: Partial<Parameters<typeof setQueueDepsForTests>[0] & object>) {
+  setQueueDepsForTests({
+    db: db.client,
+    now: () => clock,
+    fetchFile: async () => Buffer.from('%PDF-1.4 test'),
+    loadFewShot: async () => ({ examples: [], supplierVatId: null }),
+    extract: (input) => {
+      extractCalls.push(input);
+      return extract(input);
+    },
+    finalize: async () => ({ outcome: 'saved', status: 'review', saved: true }),
+    heartbeatMs: 0,
+    ...over,
+  });
+}
+
+const cutAtLimit = (): ExtractCallResult => ({
+  data: { supplier_name: 'חלקי' } as unknown as ExtractedData,
+  inputTokens: 10,
+  outputTokens: 900,
+  fewShotInvoiceIds: [],
+  truncated: true,
+  timedOut: true,
+});
+
+describe('time-limited extraction calls (QA round 3 review)', () => {
+  test('a call that only had a short window (started late) is retried, not split', async () => {
+    seedInvoice();
+    seedJob();
+    extract = async () => {
+      throw Object.assign(new Error('Request timed out.'), { name: 'APIConnectionTimeoutError' });
+    };
+    // a slow few-shot lookup eats the window
+    useDeps({
+      loadFewShot: async () => {
+        clock += 6_000;
+        return { examples: [], supplierVatId: null };
+      },
+    });
+    const r = await runProcessingTick('inv1', { deadline: clock + 20_000 });
+    assert.ok(extractCalls[0].timeoutMs < LLM_FULL_WINDOW_MS);
+    assert.equal(r.state, 'busy');
+    assert.equal(job()?.transient_attempts, 1);
+    const state = job()?.extract_state as { chunks: unknown[] } | null;
+    assert.ok(!state || state.chunks.length === 1, 'not split');
+  });
+
+  test('a multi-page part cut at the time limit with a full window is split, its tokens kept', async () => {
+    seedInvoice();
+    seedJob();
+    extract = async () => cutAtLimit();
+    const r = await runProcessingTick('inv1', { deadline: clock + 23_000 });
+    assert.equal(r.state, 'pending');
+    const state = job()?.extract_state as { chunks: unknown[]; discarded_tokens: { input: number; output: number } };
+    assert.equal(state.chunks.length, 2);
+    assert.deepEqual(state.discarded_tokens, { input: 10, output: 900 });
+  });
+
+  test('a one-page part cut at the time limit is tried once more, then keeps its partial result', async () => {
+    seedInvoice();
+    seedJob({ page_count: 1, pages_done: 1, page_texts: ['עמוד יחיד'] });
+    const saved: ExtractedData[] = [];
+    extract = async () => cutAtLimit();
+    useDeps({
+      finalize: async (input) => {
+        saved.push(input.extractedData);
+        return { outcome: 'saved', status: 'review', saved: true };
+      },
+    });
+    const first = await runProcessingTick('inv1', { deadline: clock + 23_000 });
+    assert.equal(first.state, 'busy');
+    assert.equal(job()?.transient_attempts, 1);
+    clock += 60_000;
+    const second = await runProcessingTick('inv1', { deadline: clock + 23_000 });
+    assert.equal(second.state, 'done');
+    assert.equal(extractCalls.length, 2);
+    assert.equal(saved[0]?.supplier_name, 'חלקי');
+  });
+});
+
+describe('optional steps (QA round 3 review)', () => {
+  /** A one-page job whose first validation asks for the math re-read; finalize records what it got. */
+  function retrySetup(retryCall: () => Promise<ExtractCallResult>) {
+    seedInvoice();
+    seedJob({ page_count: 1, pages_done: 1, page_texts: ['עמוד יחיד'] });
+    const finals: { data: ExtractedData; retryCount: number }[] = [];
+    extract = async () => (extractCalls.length === 1 ? { data: DATA, inputTokens: 10, outputTokens: 5, fewShotInvoiceIds: [] } : retryCall());
+    useDeps({
+      finalize: async (input) => {
+        finals.push({ data: input.extractedData, retryCount: input.retryCount });
+        return finals.length === 1 ? { outcome: 'retry' } : { outcome: 'saved', status: 'review', saved: true };
+      },
+    });
+    return finals;
+  }
+
+  test('a re-read cut at its limit keeps the complete first-pass result', async () => {
+    const finals = retrySetup(async () => cutAtLimit());
+    assert.equal((await runProcessingTick('inv1', { deadline: clock + 23_000 })).state, 'pending');
+    assert.equal((await runProcessingTick('inv1', { deadline: clock + 23_000 })).state, 'done');
+    assert.equal(finals.length, 2);
+    assert.equal(finals[1].retryCount, 1);
+    assert.equal(finals[1].data.total_amount, 117);
+  });
+
+  test('a re-read that keeps failing transiently saves the first-pass result instead of failing the run', async () => {
+    const finals = retrySetup(async () => {
+      throw Object.assign(new Error('Connection error.'), { name: 'APIConnectionError' });
+    });
+    await runProcessingTick('inv1', { deadline: clock + 23_000 });
+    let last;
+    for (let i = 0; i <= OPTIONAL_STEP_TRANSIENT_RETRIES; i++) {
+      clock += 5 * 60_000;
+      last = await runProcessingTick('inv1', { deadline: clock + 23_000 });
+    }
+    assert.equal(last?.state, 'done');
+    assert.equal(extractCalls.length, 1 + OPTIONAL_STEP_TRANSIENT_RETRIES + 1);
+    assert.equal(finals[1].data.total_amount, 117);
+    assert.notEqual(invoice().status, 'error');
+  });
+
+  test('a real error of the re-read saves the first-pass result at once', async () => {
+    const finals = retrySetup(async () => {
+      throw new Error('Unexpected tool input');
+    });
+    await runProcessingTick('inv1', { deadline: clock + 23_000 });
+    const r = await runProcessingTick('inv1', { deadline: clock + 23_000 });
+    assert.equal(r.state, 'done');
+    assert.equal(finals.length, 2);
+    assert.equal(finals[1].retryCount, 1);
+  });
+
+  test('boundary detection is retried on transient failures, then the run goes on without a suggestion', async () => {
+    seedInvoice();
+    seedJob({ stage: 'detect' });
+    let detectCalls = 0;
+    useDeps({
+      detect: async () => {
+        detectCalls++;
+        throw Object.assign(new Error('Request timed out.'), { name: 'APIConnectionTimeoutError' });
+      },
+    });
+    for (let i = 0; i < OPTIONAL_STEP_TRANSIENT_RETRIES; i++) {
+      clock += 5 * 60_000;
+      assert.equal((await runProcessingTick('inv1', { deadline: clock + 23_000 })).state, 'busy');
+      assert.equal(job()?.stage, 'detect');
+    }
+    clock += 5 * 60_000;
+    const r = await runProcessingTick('inv1', { deadline: clock + 23_000 });
+    assert.equal(r.state, 'pending');
+    assert.equal(detectCalls, OPTIONAL_STEP_TRANSIENT_RETRIES + 1);
+    assert.equal(job()?.stage, 'extract');
+    assert.equal(job()?.split_detection_failed, true);
+  });
+});
+
+describe('sweep selection (QA round 3 review)', () => {
+  test('a never-queued row is found behind many older rows with live jobs', async () => {
+    const old = iso(T0 - 2 * 60 * 60_000);
+    for (let i = 0; i < 120; i++) {
+      seedInvoice({ id: `q${i}`, processing_run_id: `r${i}`, updated_at: old });
+      seedJob({ invoice_id: `q${i}`, run_id: `r${i}`, updated_at: old });
+    }
+    seedInvoice({ id: 'legacy', processing_run_id: null, processing_started_at: null, processing_attempts: 0, processing_stage: null, updated_at: iso(clock - 2 * ENQUEUE_GRACE_MS) });
+    const result = await sweepStaleProcessing(null);
+    assert.deepEqual(result.enqueued, ['legacy']);
+    assert.deepEqual(result.failed, []);
   });
 });
 

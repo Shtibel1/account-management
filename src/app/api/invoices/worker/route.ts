@@ -11,11 +11,15 @@ export const dynamic = 'force-dynamic';
  * any cron): queues 'processing' rows that were never queued, marks stuck ones as error, then drives
  * due jobs (any job whose lease is free and whose retry backoff is over) in bounded steps.
  *
- * All of it runs INSIDE this request, within PROCESSING_WORKER_BUDGET_MS (default 20 s, at most
+ * All of it runs INSIDE this request, within PROCESSING_WORKER_BUDGET_MS (default 23 s, at most
  * 24 s): on Amplify nothing runs after the response (Lambda without waitUntil - after() work is frozen
- * until a later request, QA round 3), and Amplify cuts responses at ~28 s. Sizing and limits:
+ * until a later request, QA round 3), and Amplify cuts responses at ~28 s. Steps start only if they
+ * fit the budget and their calls / downloads have time limits; should one overrun anyway, the answer
+ * still leaves at budget + 3 s (at most 26 s) with what was done, listing the overrunning jobs in
+ * `overran` (their leases run out and the next pass redoes those steps). Sizing and limits:
  * src/lib/processingWorker.ts. Safe to call back to back and concurrently: jobs are leased, so two
- * calls never run the same step. Answers 200 `{ stuck, enqueued, driven: [{ id, state }], due, ms }`.
+ * calls never run the same step. Answers 200
+ * `{ stuck, enqueued, driven: [{ id, state }], due, ms, overran? }`.
  *
  * Auth: `PROCESSING_WORKER_SECRET` as `X-Ingest-Secret` / `X-Worker-Secret` / `X-Api-Key`,
  * `Authorization: Bearer <secret>` or Basic (secret as password or user). Surrounding whitespace or

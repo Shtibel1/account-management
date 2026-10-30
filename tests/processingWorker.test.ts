@@ -87,6 +87,43 @@ describe('runWorkerPass', () => {
   });
 });
 
+describe('runWorkerPass hard limit (QA round 3 review)', () => {
+  test('answers with a partial summary when a step overruns', async () => {
+    const s = setup(['a', 'b'], 10);
+    const drive = s.deps.drive;
+    s.deps.drive = async (id, deadline) => (id === 'a' ? new Promise<TickResult>(() => {}) : drive(id, deadline));
+    // the hard-limit timer fires as soon as the fast job is done
+    s.deps.wait = () => new Promise((resolve) => setTimeout(resolve, 20));
+    const summary = await runWorkerPass(s.deps, { budgetMs: 20_000, maxJobs: 2 });
+    assert.deepEqual(summary.overran, ['a']);
+    assert.deepEqual(summary.driven, [{ id: 'b', state: 'done' }]);
+    assert.equal(summary.stuck, 1);
+  });
+
+  test('the sweep runs beside the slots', async () => {
+    const s = setup(['a'], 10);
+    let release: () => void = () => {};
+    let drovePendingSweep = false;
+    let sweepDone = false;
+    s.deps.sweep = () => new Promise((resolve) => {
+      release = () => {
+        sweepDone = true;
+        resolve({ failed: [], enqueued: ['x'] });
+      };
+    });
+    const drive = s.deps.drive;
+    s.deps.drive = async (id, deadline) => {
+      drovePendingSweep = !sweepDone;
+      const r = await drive(id, deadline);
+      release();
+      return r;
+    };
+    const summary = await runWorkerPass(s.deps, { budgetMs: 20_000, maxJobs: 1 });
+    assert.ok(drovePendingSweep);
+    assert.equal(summary.enqueued, 1);
+  });
+});
+
 describe('workerConfig', () => {
   test('defaults', () => {
     assert.deepEqual(workerConfig({}), { budgetMs: WORKER_BUDGET_MS, maxJobs: WORKER_MAX_JOBS });

@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { isTransientError } from '@/shared/processing';
 import {
   buildSplitSuggestion,
   describeHints,
@@ -111,7 +112,10 @@ export interface BoundaryDetectionResult {
 /**
  * Detects document boundaries in a multi-page PDF from its per-page OCR text.
  * Runs the cheap heuristic pre-check first and only calls the LLM when it can't decide.
- * Never throws: a failed detection means no suggestion, with `failed` set so the reviewer is warned.
+ * Never throws without `timeoutMs`: a failed detection means no suggestion, with `failed` set so the
+ * reviewer is warned. With `timeoutMs` (the processing queue) transient failures - timeouts, dropped
+ * connections, 429 / 5xx - are thrown, so the queue retries detection with backoff instead of
+ * silently losing the split suggestion of a long document (QA round 3 review).
  */
 export async function detectDocumentBoundaries(
   pageTexts: string[],
@@ -225,6 +229,7 @@ ${formattedPages}`;
     );
     return { suggestion, ...usage };
   } catch (err) {
+    if (timeoutMs && isTransientError(err)) throw err;
     console.error('[Splitter] Boundary detection request failed, continuing without a suggestion:', err);
     return failed;
   }

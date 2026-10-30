@@ -10,7 +10,7 @@ import { TICK_HARD_LIMIT_MS, TICK_RESPONSE_MS } from '@/shared/processing';
  * steps when no screen is open. Safe to call concurrently: a tick that finds the job leased answers
  * `busy`.
  *
- * The step runs inside this request and ends by TICK_RESPONSE_MS (20 s): it starts only if it fits,
+ * The step runs inside this request and ends by TICK_RESPONSE_MS (23 s): it starts only if it fits,
  * and its calls time out before then. Nothing is left running after the response (Amplify freezes it,
  * QA round 3). If a step overran anyway, the answer still leaves at TICK_HARD_LIMIT_MS (before
  * Amplify's bare 504); the job's lease then runs out and the next tick redoes that step (counted as

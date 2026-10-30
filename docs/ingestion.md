@@ -44,11 +44,18 @@ there is no `after()` in `src`.
   approved before it is split), then validation + save (no LLM). Every step's result is stored in
   `processing_jobs` (`extract_state`, migration `20261030180000_qa2_pipeline2.sql`) before the next one
   starts, so a killed tick re-pays only for its own call. The math retry is a step of its own.
-- Every tick has a **deadline** (20 s for `/process/tick`, the worker's budget for the worker) and starts a
-  step only if it fits (12 s left for an LLM step, 7 s for OCR, 5 s for validation + save). OCR rounds are
-  budgeted, and Vision, extraction and boundary-detection calls get timeouts that end before the deadline
-  (no SDK retries, no 16k-token "large retry"). An extraction part that times out or is cut at `max_tokens`
-  is split in two (smaller calls fit); a one-page part keeps its partial result when cut.
+- Every tick has a **deadline** (23 s for `/process/tick`, the worker's budget for the worker) and starts a
+  step only if it fits (18 s left for an LLM step, so its call gets a full window of 15.5-20 s; 7 s for OCR;
+  5 s for validation + save). OCR rounds are budgeted, file downloads, Vision, extraction and
+  boundary-detection calls get time limits that end before the deadline (no SDK retries, no 16k-token
+  "large retry"). Extraction calls are **streamed**: a call still writing at its limit is cut there and keeps
+  the tool input written so far (the value being written is dropped). A part cut that way (or at
+  `max_tokens`) with a full window is split in two; a one-page part is tried once more, then keeps its
+  partial result (validation flags what is missing). A call cut only because it started late is retried as a
+  transient failure, not split. Each call's duration is logged (`[Queue] Extraction of pages ...: N ms`).
+- Boundary detection and the math re-read are optional: transient failures are retried twice, then the run
+  goes on without them (no split suggestion - the reviewer is warned - / the first-pass result). A re-read
+  that is cut keeps the first-pass result.
 - A tick holds the job by a **45 s lease** (renewed by a heartbeat while the step runs). A lease that ran
   out without being released means the tick was interrupted: the next tick redoes only that step.
 - **Transient vs real errors**: network drops (`fetch failed`, `Connection error.`, `ECONNRESET`, socket hang
@@ -58,17 +65,17 @@ there is no `after()` in `src`.
   `error_message` (connection problems have their own) and the technical cause in
   `invoices.processing_error_detail` (migration `20261030191000_qa3_processing_error_detail.sql`; until it is
   applied, transient failures count as real ones).
-- `POST /api/invoices/[id]/process/tick` runs one step inside the request and answers by 20 s (at the
-  latest 25 s, before Amplify's bare 504).
+- `POST /api/invoices/[id]/process/tick` runs one step inside the request and answers by 23 s (at the
+  latest 26 s, before Amplify's bare 504).
 - Ticks are driven by the **scheduled worker** `GET|POST /api/invoices/worker` and by the review screens
   (`/process/tick` every few seconds while an invoice shows as processing). The worker does its work
-  **inside the request** and answers `200 { stuck, enqueued, driven: [{ id, state }], due, ms }` within
-  `PROCESSING_WORKER_BUDGET_MS` (default 20 s, at most 24 s): the sweep, then up to
-  `PROCESSING_WORKER_MAX_JOBS` (default 6) due jobs in parallel, a freed slot taking the next due job while
-  an LLM step still fits. Call it every minute from an AWS Lambda (timeout 60 s) that calls again while
+  **inside the request** and answers `200 { stuck, enqueued, driven: [{ id, state }], due, ms, overran? }` within
+  `PROCESSING_WORKER_BUDGET_MS` (default 23 s, at most 24 s; at the latest budget + 3 s, listing steps that
+  overran in `overran`): the sweep beside up to `PROCESSING_WORKER_MAX_JOBS` (default 6) due jobs in
+  parallel, a freed slot taking the next due job while a step still fits. Call it every minute from an AWS Lambda (timeout 60 s) that calls again while
   `due > 0`; back-to-back and concurrent calls are safe (leases). Sizing: see
   [`src/lib/processingWorker.ts`](../src/lib/processingWorker.ts) - 6 concurrent uploads (22- / 25-page PDFs
-  included) each get a step per call, 2-3 calls a minute.
+  included) each get an LLM step (or OCR rounds) per call, ~2 calls a minute.
   Auth: `PROCESSING_WORKER_SECRET` as `X-Ingest-Secret` / `X-Worker-Secret` / `X-Api-Key`,
   `Authorization: Bearer`, or Basic (secret as password); surrounding spaces / quotes in the configured value
   are ignored; 503 when unset. Schedule it every minute, e.g. with EventBridge Scheduler (API destination).

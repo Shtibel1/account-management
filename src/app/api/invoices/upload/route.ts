@@ -6,6 +6,8 @@ import { checkUploadDeclaration, mimeFromFileName } from '@/shared/uploadValidat
 
 /** Max files registered in one request. */
 const MAX_FILES = 50;
+/** Registered rows queued in parallel. */
+const ENQUEUE_CONCURRENCY = 5;
 
 /**
  * Registers files the browser already PUT into raw-invoices (see /api/invoices/upload-url).
@@ -58,12 +60,17 @@ export async function POST(request: Request) {
       }
       // registerStoredDocument also fingerprints the stored bytes (invoices.file_hash) before
       // returning, so the hash is in place before the job is queued.
-      const registered = await registerStoredDocument({ clientId, filePath: file.filePath, fileName: file.fileName, source: 'upload' });
-      results.push(
-        registered.status === 'success'
-          ? { ...registered, queued: await schedulePipeline(registered.id, mimeFromFileName(file.fileName)) }
-          : registered
-      );
+      results.push(await registerStoredDocument({ clientId, filePath: file.filePath, fileName: file.fileName, source: 'upload' }));
+    }
+
+    // Queue the registered rows after the loop, a few at a time (each enqueue is several DB round
+    // trips), so a large batch still answers well before Amplify's ~28 s cut. A row that could not be
+    // queued is queued by the worker's sweep (never-queued rows).
+    const registered = results.filter((r): r is Extract<RegisterResult, { status: 'success' }> => r.status === 'success');
+    for (let i = 0; i < registered.length; i += ENQUEUE_CONCURRENCY) {
+      await Promise.all(registered.slice(i, i + ENQUEUE_CONCURRENCY).map(async (r) => {
+        r.queued = await schedulePipeline(r.id, mimeFromFileName(r.fileName));
+      }));
     }
 
     const anySuccess = results.some((r) => r.status === 'success');
