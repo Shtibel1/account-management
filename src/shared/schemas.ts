@@ -53,7 +53,7 @@ export const DuplicateMatchSchema = z.object({
   invoice_number: z.string().nullable().optional(),
   invoice_date: z.string().nullable().optional(),
   total_amount: z.number().nullable().optional(),
-  status: z.enum(['processing', 'review', 'approved', 'exported', 'error', 'rejected']).nullable().optional(),
+  status: z.enum(['processing', 'review', 'approved', 'exported', 'error', 'rejected', 'returned']).nullable().optional(),
 });
 
 export const ValidationResultSchema = z.object({
@@ -140,7 +140,7 @@ export const InvoiceSchema = z.object({
   client_id: z.string().uuid(),
   file_url: z.string().url(),
   file_name: z.string(),
-  status: z.enum(['processing', 'review', 'approved', 'exported', 'error']),
+  status: z.enum(['processing', 'review', 'approved', 'exported', 'error', 'rejected', 'returned']),
   extracted_data: ExtractedDataSchema.nullable(),
   validated_data: ExtractedDataSchema.nullable(),
   ai_confidence: z.number().nullable(),

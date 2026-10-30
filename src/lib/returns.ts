@@ -239,6 +239,21 @@ export async function returnInvoiceToClient(params: {
     );
   }
 
+  // An approved invoice may already be matched to a bank statement line; returning it would leave
+  // the line matched to a document that is no longer a valid expense. Ask for an unmatch first.
+  if (current.status === 'approved') {
+    const { data: matched, error: bankErr } = await deps.db
+      .from('bank_transactions')
+      .select('id')
+      .eq('matched_invoice_id', current.id)
+      .limit(1);
+    if (bankErr) {
+      console.warn(`[returns] bank_transactions unavailable, skipping match check for ${current.id}:`, bankErr.message);
+    } else if (Array.isArray(matched) && matched.length > 0) {
+      throw new ReturnInvoiceError('החשבונית מותאמת לתנועת בנק - יש לבטל את ההתאמה במסך התאמות בנק לפני ההחזרה ללקוח', 409);
+    }
+  }
+
   const returnedAt = new Date().toISOString();
   const { error: updErr } = await deps.db
     .from('invoices')

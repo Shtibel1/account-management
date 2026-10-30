@@ -57,37 +57,46 @@ create policy org_feature_flags_owner_delete on public.org_feature_flags
 -- plain text, a text with a CHECK constraint, or an enum. Handle all three.
 do $$
 declare
+  v_attnum smallint;
   v_type regtype;
-  v_enum_type text;
+  v_is_enum boolean;
+  v_had_check boolean := false;
   r record;
 begin
-  select a.atttypid::regtype into v_type
-  from pg_attribute a
-  where a.attrelid = 'public.invoices'::regclass and a.attname = 'status' and not a.attisdropped;
-
-  select t.typname into v_enum_type
+  select a.attnum, a.atttypid::regtype, (t.typtype = 'e')
+    into v_attnum, v_type, v_is_enum
   from pg_attribute a
   join pg_type t on t.oid = a.atttypid
-  where a.attrelid = 'public.invoices'::regclass and a.attname = 'status' and t.typtype = 'e';
+  where a.attrelid = 'public.invoices'::regclass and a.attname = 'status' and not a.attisdropped;
 
-  if v_enum_type is not null then
+  if v_attnum is null then
+    raise exception 'public.invoices.status not found';
+  end if;
+
+  if v_is_enum then
+    -- Usable after this migration's transaction commits; nothing below compares status to it.
     execute format('alter type %s add value if not exists %L', v_type, 'returned');
   else
-    -- Replace any CHECK constraint on status with one that also allows 'returned'.
+    -- Replace CHECK constraints on the status column only (conkey = {status}); constraints that
+    -- merely mention another *status column (e.g. match_status) are left alone.
     for r in
       select c.conname
       from pg_constraint c
       where c.conrelid = 'public.invoices'::regclass
         and c.contype = 'c'
-        and pg_get_constraintdef(c.oid) ilike '%status%'
+        and c.conkey = array[v_attnum]
     loop
       execute format('alter table public.invoices drop constraint %I', r.conname);
+      v_had_check := true;
     end loop;
 
-    alter table public.invoices
-      add constraint invoices_status_check
-      check (status in ('processing', 'review', 'approved', 'exported', 'error', 'rejected', 'returned'))
-      not valid;
+    -- Only re-add a constraint if the column had one (a plain text column stays unconstrained).
+    if v_had_check then
+      alter table public.invoices
+        add constraint invoices_status_check
+        check (status in ('processing', 'review', 'approved', 'exported', 'error', 'rejected', 'returned'))
+        not valid;
+    end if;
   end if;
 end;
 $$;
@@ -104,9 +113,11 @@ alter table public.invoices
   -- On the corrected document: the returned invoice it replaces.
   add column if not exists resubmission_of uuid references public.invoices(id) on delete set null;
 
+-- Partial on returned_at (not status = 'returned'): a newly added enum value can't be used in
+-- the same transaction that adds it.
 create index if not exists invoices_returned_idx
   on public.invoices (client_id, returned_at desc)
-  where status = 'returned';
+  where returned_at is not null;
 
 -- Both resubmission links must point at an invoice of the same client (the invoices RLS policy
 -- only checks client_id of the row itself, so enforce this for every writer).

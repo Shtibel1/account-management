@@ -6,6 +6,7 @@ import { Invoice } from '@/shared/types';
 import { InvoiceTable } from '@/components/InvoiceTable/InvoiceTable';
 import { useToast } from '@/components/ui/Toast';
 import { useFeatureFlag } from '@/components/FeatureFlags/useFeatureFlags';
+import { useSession } from '@/components/Auth/SessionContext';
 import { Loader2, RefreshCw } from 'lucide-react';
 
 const STATUS_LABELS: Record<string, string> = {
@@ -24,7 +25,9 @@ export default function ReviewPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [clients, setClients] = useState<Record<string, string>>({});
   const prevStatuses = useRef<Record<string, string>>({});
-  const reviewLoop = useFeatureFlag('accountant_review_loop');
+  // The office the user is working in (sidebar), not just the oldest membership.
+  const { currentOrgId } = useSession();
+  const reviewLoop = useFeatureFlag('accountant_review_loop', { orgId: currentOrgId });
 
   const load = async (silent = false) => {
     if (!silent) setRefreshing(true);

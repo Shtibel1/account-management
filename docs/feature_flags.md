@@ -76,3 +76,8 @@ the value to an enum, whichever the live column uses); new columns on `invoices`
 After applying, run `npm run db:pull-types`.
 
 No per-client secrets are stored by this feature (provider credentials stay in server env).
+
+### Guards added in review
+- An `approved` invoice that is matched to a bank statement line can't be returned (409): unmatch it in "התאמות בנק" first, so no bank line points at a returned document.
+- The generic `PATCH /api/invoices/[id]` refuses `status: 'returned'` (only the flagged return route sets it, with a reason and a client notification) and ignores the review-loop audit columns (`return_reason*`, `returned_at`, `returned_by`, `resubmitted_invoice_id`, `resubmission_of`).
+- Migration: only CHECK constraints on the `status` column itself are replaced (and only re-added if one existed); the partial index uses `returned_at is not null`, because a newly added enum value can't be used in the same transaction.
