@@ -61,18 +61,34 @@ export function diffCorrections(
  * supplier-rule default is not counted as a correction.
  * Never throws: logging corrections must not block an approval.
  */
+export interface CorrectionsBase {
+  client_id: string;
+  extracted_data: ExtractedData | null;
+  validated_data: ExtractedData | null;
+}
+
 export async function recordCorrections(
   db: SupabaseClient,
   invoiceId: string,
-  approvedData: Partial<ExtractedData>
+  approvedData: Partial<ExtractedData>,
+  options: {
+    /** The invoice as it was BEFORE the approval wrote validated_data (diff base). Loaded when omitted. */
+    before?: CorrectionsBase;
+    /** Stamp reviewed_at (default true). The approve route sets it in its own atomic update. */
+    markReviewed?: boolean;
+  } = {}
 ): Promise<FieldCorrection[]> {
   try {
-    const { data: invoice, error } = await db
-      .from('invoices')
-      .select('client_id, extracted_data, validated_data')
-      .eq('id', invoiceId)
-      .single();
-    if (error || !invoice) throw error ?? new Error('Invoice not found');
+    let invoice: CorrectionsBase | null = options.before ?? null;
+    if (!invoice) {
+      const { data, error } = await db
+        .from('invoices')
+        .select('client_id, extracted_data, validated_data')
+        .eq('id', invoiceId)
+        .single();
+      if (error || !data) throw error ?? new Error('Invoice not found');
+      invoice = data as CorrectionsBase;
+    }
 
     const corrections = diffCorrections(systemProposal(invoice.extracted_data, invoice.validated_data), approvedData);
     const supplierVatId = normalize(approvedData.supplier_vat_id ?? invoice.extracted_data?.supplier_vat_id);
@@ -89,7 +105,9 @@ export async function recordCorrections(
       );
       if (insertError) throw insertError;
     }
-    await db.from('invoices').update({ reviewed_at: new Date().toISOString() }).eq('id', invoiceId);
+    if (options.markReviewed !== false) {
+      await db.from('invoices').update({ reviewed_at: new Date().toISOString() }).eq('id', invoiceId);
+    }
     return corrections;
   } catch (err) {
     console.error(`[corrections] Failed to record corrections for invoice ${invoiceId}:`, err);

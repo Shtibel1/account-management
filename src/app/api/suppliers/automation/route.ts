@@ -2,9 +2,11 @@ import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import {
   fetchSupplierAutomationStatus,
+  InvalidSupplierVatIdError,
   setSupplierAutoApprove,
   SupplierNotEligibleError,
 } from '@/lib/supplierAutomation';
+import { readJsonObject } from '@/lib/invoiceTransitions';
 import { AUTO_APPROVE_HISTORY_SIZE } from '@/shared/autoApprove';
 import { requireClientAccess } from '@/lib/auth';
 
@@ -33,10 +35,12 @@ export async function GET(request: Request) {
 
 /** Body: { clientId, supplierVatId, autoApprove }. Turning it on requires an eligible supplier. */
 export async function PUT(request: Request) {
+  const parsed = await readJsonObject<{ clientId?: unknown; supplierVatId?: unknown; autoApprove?: unknown }>(request);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.body;
   try {
-    const body = (await request.json()) as { clientId?: unknown; supplierVatId?: unknown; autoApprove?: unknown };
     if (typeof body.clientId !== 'string' || typeof body.supplierVatId !== 'string' || typeof body.autoApprove !== 'boolean') {
-      return NextResponse.json({ error: 'Expected { clientId, supplierVatId, autoApprove }' }, { status: 400 });
+      return NextResponse.json({ error: 'נדרשים לקוח, ח.פ. ספק והגדרת אישור אוטומטי' }, { status: 400 });
     }
 
     const access = await requireClientAccess(body.clientId);
@@ -48,10 +52,10 @@ export async function PUT(request: Request) {
     if (err instanceof SupplierNotEligibleError) {
       return NextResponse.json({ error: err.message, eligibility: err.eligibility }, { status: 409 });
     }
+    if (err instanceof InvalidSupplierVatIdError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
     console.error('[suppliers/automation] Failed to update auto-approve opt-in:', err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'שגיאה בעדכון האישור האוטומטי' }, { status: 500 });
   }
 }

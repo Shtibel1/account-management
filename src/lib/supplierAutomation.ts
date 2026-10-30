@@ -7,6 +7,7 @@ import type {
   SupplierEligibility,
 } from '@/shared/types';
 import { applySupplierRule, findSupplierRule, normalizeVatId } from '@/shared/supplierRules';
+import { isValidVatIdChecksum } from '@/shared/vatId';
 import { computeSupplierEligibility, type ReviewedInvoiceRef } from '@/shared/autoApprove';
 import type { FieldCorrection } from '@/lib/corrections';
 
@@ -14,6 +15,14 @@ import type { FieldCorrection } from '@/lib/corrections';
 // (like corrections.ts) and only uses query-builder calls the local mock DB also supports
 // (eq / in / order / select / insert / update), so it degrades to "no rules / not opted in"
 // when the tables are missing.
+
+/** The supplier VAT ID of an opt-in request isn't a valid Israeli VAT / company id (→ 400). */
+export class InvalidSupplierVatIdError extends Error {
+  constructor() {
+    super('ח.פ. ספק אינו תקין - נדרש מספר עוסק / ח.פ. בן 9 ספרות עם ספרת ביקורת תקינה');
+    this.name = 'InvalidSupplierVatIdError';
+  }
+}
 
 export class SupplierNotEligibleError extends Error {
   constructor(public readonly eligibility: SupplierEligibility | null) {
@@ -71,6 +80,7 @@ interface ReviewedInvoiceRow {
   // PostgREST JSON-path aliases (see select below)...
   vat_id?: string | null;
   ai_vat_id?: string | null;
+  auto_approved?: string | boolean | null;
   // ...the mock DB ignores the column list and returns whole rows.
   validated_data?: ExtractedData | null;
   extracted_data?: ExtractedData | null;
@@ -83,15 +93,21 @@ export async function computeClientEligibility(
 ): Promise<Map<string, SupplierEligibility>> {
   const { data: invoices, error } = await db
     .from('invoices')
-    .select('id, reviewed_at, vat_id:validated_data->>supplier_vat_id, ai_vat_id:extracted_data->>supplier_vat_id')
+    .select(
+      'id, reviewed_at, vat_id:validated_data->>supplier_vat_id, ai_vat_id:extracted_data->>supplier_vat_id, auto_approved:validated_data->validation_flags->>auto_approved'
+    )
     .eq('client_id', clientId)
     .in('status', ['approved', 'exported']);
   if (error) throw new Error(`Failed to load reviewed invoices: ${error.message}`);
 
   const reviewed: ReviewedInvoiceRef[] = [];
   for (const row of (invoices as ReviewedInvoiceRow[] | null) ?? []) {
-    // Auto-approved invoices have no reviewed_at and don't count.
+    // Only human-reviewed invoices count. Auto-approved ones have no reviewed_at; a human approval
+    // clears validation_flags.auto_approved, so a row still flagged auto-approved (older data: a
+    // re-approval that kept the flag) was never actually reviewed by a person.
     if (!row.reviewed_at) continue;
+    const autoApproved = row.auto_approved ?? row.validated_data?.validation_flags?.auto_approved ?? null;
+    if (autoApproved === true || autoApproved === 'true') continue;
     const vatId = normalizeVatId(
       row.vat_id ?? row.validated_data?.supplier_vat_id ?? row.ai_vat_id ?? row.extracted_data?.supplier_vat_id
     );
@@ -159,7 +175,11 @@ export async function setSupplierAutoApprove(
   enabled: boolean
 ): Promise<SupplierAutomation> {
   const supplierVatId = normalizeVatId(rawSupplierVatId);
-  if (!supplierVatId) throw new Error('ח.פ. ספק אינו תקין');
+  if (!supplierVatId) throw new InvalidSupplierVatIdError();
+  const validVatId = isValidVatIdChecksum(supplierVatId);
+  // Turning on (or creating a row) needs a real VAT id; turning off an existing row is always allowed.
+  const existing = await getSupplierAutomation(db, clientId, supplierVatId);
+  if (!validVatId && (enabled || !existing)) throw new InvalidSupplierVatIdError();
 
   if (enabled) {
     const eligibility = (await computeClientEligibility(db, clientId)).get(supplierVatId) ?? null;
@@ -171,7 +191,6 @@ export async function setSupplierAutoApprove(
     ? { auto_approve: true, enabled_at: now, disabled_at: null, disabled_reason: null, disabled_by_invoice_id: null, updated_at: now }
     : { auto_approve: false, disabled_at: now, disabled_reason: 'manual', disabled_by_invoice_id: null, updated_at: now };
 
-  const existing = await getSupplierAutomation(db, clientId, supplierVatId);
   const { data, error } = existing
     ? await db.from('supplier_automation').update(changes).eq('id', existing.id).select().single()
     : await db
