@@ -29,10 +29,15 @@ UI `src/app/(dashboard)/integrations` ("חיבור להנהלת חשבונות")
   the OCR text says "חשבונית מס / קבלה", 305 for "חשבונית מס", otherwise the configured default. `amount` = total incl.
   VAT, `vat` = VAT part (absolute values; missing values derived), `reportingDate` = first of the invoice month,
   `supplier { name, taxId, accountingKey (only a mapped supplier code), add: true }`,
-  `accountingClassification { key: <expense account code> }`, `allocationNumber`, `currency: ILS`,
-  `remarks: invoice-scan:<invoice id>`. Missing number / date / supplier / amount / mapped category block the export.
-- Idempotency: before every create, `POST /expenses/search` (number, invoice date ± 7 days, up to 3 pages) and a
-  match on number + supplier (tax id, else name) + document type, ignoring deleted (status 100) expenses; a match
+  `accountingClassification` = `{ id }` when the mapped expense account is a Morning classification UUID, else
+  `{ key: <expense account code> }` (the spec documents `id` or inline details; whether `key` alone is accepted is
+  unverified against the live API, so map Morning classification ids when in doubt), `allocationNumber`,
+  `currency: ILS`, `remarks: invoice-scan:<invoice id>`. Missing number / date / supplier / amount / mapped category,
+  a date before 2010-01-01 or a future date (Morning rejects both) block the export.
+- Idempotency: before every create, `POST /expenses/search` (number + reporting-month range: Morning filters
+  `fromDate` / `toDate` on `reportingDate` and accepts only `YYYY-MM-01`, so the invoice month -2 .. +6 months; up to
+  3 pages) and a match on number + supplier (tax id, else name) + document family (305 / 320 alike, 330 separate),
+  ignoring deleted (status 100) expenses; a match
   is adopted. `POST /expenses` is non-idempotent (no retry on 5xx / timeout; the run marks it uncertain).
 - PDF: `GET /file-upload/v1/url?context=expense&data={"id":<expense>,"source":5,"state":"expense"}` -> presigned S3
   POST (`url` must be `*.amazonaws.com`, 60 s), multipart with `file` last. The file is read server-side from the

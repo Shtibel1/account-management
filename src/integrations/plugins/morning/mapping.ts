@@ -42,12 +42,14 @@ export interface MorningExpenseRequest {
   remarks: string;
   allocationNumber?: string;
   supplier: MorningSupplier;
-  accountingClassification: { key: string };
+  /** An existing Morning classification id (UUID), else our account code as its key (see classificationOf). */
+  accountingClassification: { id: string } | { key: string };
   active: true;
 }
 
 export interface MorningSearchRequest {
   number: string;
+  /** Reporting-date range (Morning filters on reportingDate, NOT the document date): YYYY-MM-01. */
   fromDate: string;
   toDate: string;
   page: number;
@@ -84,8 +86,32 @@ export function morningRemarks(invoiceId: string): string {
 /** First day of the invoice's month (Morning reportingDate), or null for an invalid date. */
 export function reportingDateOf(date: string | null | undefined): string | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date ?? '');
-  if (!m || Number(m[2]) < 1 || Number(m[2]) > 12) return null;
+  if (!m || Number(m[2]) < 1 || Number(m[2]) > 12 || Number(m[3]) < 1 || Number(m[3]) > 31) return null;
   return `${m[1]}-${m[2]}-01`;
+}
+
+/** Shifts a YYYY-MM-01 month by `months` (UTC), returning YYYY-MM-01. */
+export function shiftMonth(firstOfMonth: string, months: number): string {
+  const d = new Date(`${firstOfMonth}T00:00:00Z`);
+  d.setUTCMonth(d.getUTCMonth() + months, 1);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Today's date (YYYY-MM-DD) in Israel, for Morning's "date may not be in the future" rule. */
+export function todayInIsrael(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jerusalem', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * accountingClassification for the request. The spec accepts an existing classification's `id`
+ * (UUID from Morning) or inline details; a mapped value that is a UUID is sent as the id, anything
+ * else (our account code) as the classification key.
+ */
+export function classificationOf(expenseAccount: string): { id: string } | { key: string } {
+  const value = expenseAccount.trim();
+  return UUID_RE.test(value) ? { id: value.toLowerCase() } : { key: value };
 }
 
 /** Shifts a YYYY-MM-DD date by `days` (UTC). */
@@ -141,6 +167,8 @@ export function morningValidationProblems(invoice: ExportInvoice, mapping: Invoi
   const problems: string[] = [];
   if (!clean(d.invoice_number, 50)) problems.push('מספר חשבונית חסר');
   if (!reportingDateOf(d.invoice_date)) problems.push('תאריך חשבונית חסר או לא תקין');
+  else if ((d.invoice_date as string) < '2010-01-01') problems.push('מורנינג אינה מקבלת הוצאות לפני 2010');
+  else if ((d.invoice_date as string) > todayInIsrael()) problems.push('תאריך החשבונית עתידי');
   if (!clean(d.supplier_name, 100)) problems.push('שם ספק חסר');
   const split = vatSplit(d);
   if (!split) problems.push('סכום חסר');
@@ -177,25 +205,31 @@ export function toMorningExpense(invoice: ExportInvoice, mapping: InvoiceMapping
     remarks: morningRemarks(invoice.id),
     ...(allocation ? { allocationNumber: allocation } : {}),
     supplier,
-    accountingClassification: { key: mapping.expenseAccount ?? '' },
+    accountingClassification: classificationOf(mapping.expenseAccount ?? ''),
     active: true,
   };
 }
 
-/** Search window around the invoice date (Morning's own date may differ by a few days). */
-export const SEARCH_WINDOW_DAYS = 7;
+/**
+ * Reporting-month window searched around the invoice month. Morning filters search by reportingDate
+ * (YYYY-MM-01 only), and an expense entered by hand may be reported in a later month (input VAT can
+ * be claimed up to 6 months later) or an earlier one, so the window is wide; the number filter and
+ * isSameExpense keep it precise.
+ */
+export const SEARCH_MONTHS_BEFORE = 2;
+export const SEARCH_MONTHS_AFTER = 6;
 
 export function toMorningSearch(invoice: ExportInvoice, page = 1, pageSize = 50): MorningSearchRequest | null {
   const d = invoice.data;
   const number = clean(d.invoice_number, 50);
   if (!number || !reportingDateOf(d.invoice_date)) return null;
-  const date = d.invoice_date as string;
+  const month = reportingDateOf(d.invoice_date) as string;
   // No supplierName filter: Morning may hold the supplier under a slightly different name; the
   // supplier is matched client-side (tax id first) in isSameExpense.
   return {
     number,
-    fromDate: shiftDate(date, -SEARCH_WINDOW_DAYS),
-    toDate: shiftDate(date, SEARCH_WINDOW_DAYS),
+    fromDate: shiftMonth(month, -SEARCH_MONTHS_BEFORE),
+    toDate: shiftMonth(month, SEARCH_MONTHS_AFTER),
     page,
     pageSize,
   };
@@ -205,16 +239,24 @@ function normName(name: string | null | undefined): string {
   return (name ?? '').replace(/["'״׳.,\-]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+/** 305 and 320 are both a (tax) invoice of the same supplier numbering; only a credit note differs. */
+function documentFamily(type: number): 'credit' | 'invoice' | 'other' {
+  if (type === 330) return 'credit';
+  if (type === 305 || type === 320) return 'invoice';
+  return 'other';
+}
+
 /**
  * Whether a Morning expense is this invoice: same number, same supplier (tax id when both have
- * one, else name), same document type when Morning reports one, and not deleted (status 100).
+ * one, else name), same document family when Morning reports a type (305 / 320 are treated alike:
+ * our type comes from OCR text and may differ from what was entered by hand), not deleted (100).
  */
 export function isSameExpense(item: MorningExpense, invoice: ExportInvoice, documentType: MorningDocumentType): boolean {
   if (!item || typeof item.id !== 'string' || !item.id) return false;
   if (item.status === 100) return false;
   const d = invoice.data;
   if (String(item.number ?? '').trim() !== clean(d.invoice_number, 50)) return false;
-  if (typeof item.documentType === 'number' && item.documentType !== documentType) return false;
+  if (typeof item.documentType === 'number' && documentFamily(item.documentType) !== documentFamily(documentType)) return false;
   const ourTax = digits(d.supplier_vat_id);
   const theirTax = digits(item.supplier?.taxId === undefined ? null : String(item.supplier.taxId));
   if (ourTax && theirTax) return ourTax === theirTax;
