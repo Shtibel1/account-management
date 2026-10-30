@@ -4,7 +4,7 @@ import { useState } from 'react';
 import clsx from 'clsx';
 import { ChevronDown, ListOrdered, Plus, Trash2, CheckCircle2, AlertTriangle } from 'lucide-react';
 import type { LineItem } from '@/shared/types';
-import { MAX_LINE_ITEMS, checkLineItemsSum, hasMixedVat } from '@/shared/lineItems';
+import { MAX_LINE_ITEMS, checkLineItemsSum, expectedLineTotal, hasMixedVat, isLineTotalMismatch, lineTotalMismatches, updateLineItem } from '@/shared/lineItems';
 
 interface Props {
   items: LineItem[];
@@ -14,7 +14,7 @@ interface Props {
   onChange?: (items: LineItem[]) => void;
 }
 
-const BASIS_LABEL = { amount_before_vat: 'לפני מע״מ', total_amount: 'סה״כ לתשלום' } as const;
+const BASIS_LABEL = { amount_before_vat: 'לסכום לפני מע״מ', total_amount: 'לסה״כ לתשלום' } as const;
 
 const fmt = (n: number | null | undefined) =>
   n == null ? '—' : n.toLocaleString('he-IL', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -35,9 +35,11 @@ export function LineItemsTable({ items, amountBeforeVat, totalAmount, onChange }
     total_amount: totalAmount ?? null,
   });
   const mixedVat = hasMixedVat(items);
+  const rowMismatches = lineTotalMismatches(items);
 
+  // Quantity / unit price edits recompute the line total when it followed them (see updateLineItem)
   const update = (index: number, patch: Partial<LineItem>) =>
-    onChange?.(items.map((item, i) => (i === index ? { ...item, ...patch } : item)));
+    onChange?.(items.map((item, i) => (i === index ? updateLineItem(item, patch) : item)));
   const remove = (index: number) => onChange?.(items.filter((_, i) => i !== index));
   const add = () =>
     onChange?.([...items, { description: null, quantity: null, unit_price: null, line_total: null }]);
@@ -61,6 +63,11 @@ export function LineItemsTable({ items, amountBeforeVat, totalAmount, onChange }
         {sumCheck.ok === false && (
           <span className="flex items-center gap-1 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full">
             <AlertTriangle className="h-3 w-3" /> לא תואם
+          </span>
+        )}
+        {rowMismatches.length > 0 && (
+          <span className="flex items-center gap-1 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full">
+            <AlertTriangle className="h-3 w-3" /> {rowMismatches.length === 1 ? 'שורה אחת' : `${rowMismatches.length} שורות`} לא תואמות לכמות × מחיר
           </span>
         )}
         {mixedVat && (
@@ -87,12 +94,17 @@ export function LineItemsTable({ items, amountBeforeVat, totalAmount, onChange }
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {items.map((item, i) => (
-                  <tr key={i} className={clsx(item.vat_exempt && 'bg-indigo-50/40')}>
+                  <tr
+                    key={i}
+                    className={clsx(item.vat_exempt && 'bg-indigo-50/40', isLineTotalMismatch(item) && 'bg-amber-50/70')}
+                    title={isLineTotalMismatch(item) ? `כמות × מחיר ליחידה = ${fmt(expectedLineTotal(item))}, אך סה״כ השורה ${fmt(item.line_total)}` : undefined}
+                  >
                     {editable ? (
                       <>
                         <td className="px-1 py-1">
                           <input
                             className="input-base py-1 px-1.5 text-xs"
+                            aria-label={`תיאור שורה ${i + 1}`}
                             value={item.description ?? ''}
                             onChange={(e) => update(i, { description: e.target.value || null })}
                           />
@@ -101,6 +113,7 @@ export function LineItemsTable({ items, amountBeforeVat, totalAmount, onChange }
                           <input
                             type="number" step="any"
                             className="input-base py-1 px-1.5 text-xs font-mono"
+                            aria-label={`כמות שורה ${i + 1}`}
                             value={item.quantity ?? ''}
                             onChange={(e) => update(i, { quantity: parseNum(e.target.value) })}
                           />
@@ -109,6 +122,7 @@ export function LineItemsTable({ items, amountBeforeVat, totalAmount, onChange }
                           <input
                             type="number" step="0.01"
                             className="input-base py-1 px-1.5 text-xs font-mono"
+                            aria-label={`מחיר ליחידה שורה ${i + 1}`}
                             value={item.unit_price ?? ''}
                             onChange={(e) => update(i, { unit_price: parseNum(e.target.value) })}
                           />
@@ -116,7 +130,9 @@ export function LineItemsTable({ items, amountBeforeVat, totalAmount, onChange }
                         <td className="px-1 py-1">
                           <input
                             type="number" step="0.01"
-                            className="input-base py-1 px-1.5 text-xs font-mono"
+                            className={clsx('input-base py-1 px-1.5 text-xs font-mono', isLineTotalMismatch(item) && 'border-amber-400 bg-amber-50')}
+                            aria-invalid={isLineTotalMismatch(item) || undefined}
+                            aria-label={`סה״כ שורה ${i + 1}`}
                             value={item.line_total ?? ''}
                             onChange={(e) => update(i, { line_total: parseNum(e.target.value) })}
                           />
@@ -146,7 +162,7 @@ export function LineItemsTable({ items, amountBeforeVat, totalAmount, onChange }
                         <td className="px-2 py-1.5 text-slate-800">{item.description ?? '—'}</td>
                         <td className="px-2 py-1.5 font-mono text-slate-600">{item.quantity ?? '—'}</td>
                         <td className="px-2 py-1.5 font-mono text-slate-600">{fmt(item.unit_price)}</td>
-                        <td className="px-2 py-1.5 font-mono text-slate-800">{fmt(item.line_total)}</td>
+                        <td className={clsx('px-2 py-1.5 font-mono', isLineTotalMismatch(item) ? 'text-amber-700 font-semibold' : 'text-slate-800')}>{fmt(item.line_total)}</td>
                         <td className="px-2 py-1.5 text-center text-indigo-700">{item.vat_exempt ? '✓' : ''}</td>
                       </>
                     )}
@@ -165,7 +181,7 @@ export function LineItemsTable({ items, amountBeforeVat, totalAmount, onChange }
             )}
             {sumCheck.ok === false && (
               <span className="text-amber-700">
-                לא תואם ללפני מע״מ (₪{fmt(amountBeforeVat)}) או לסה״כ (₪{fmt(totalAmount)})
+                לא תואם לסכום לפני מע״מ (₪{fmt(amountBeforeVat)}) או לסה״כ לתשלום (₪{fmt(totalAmount)})
               </span>
             )}
           </div>

@@ -69,7 +69,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ orgId, members, invitations: invites ?? [] });
   } catch (err) {
     console.error('[org/members] GET failed:', err);
-    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+    return NextResponse.json({ error: 'טעינת משתמשי המשרד נכשלה, נסו שוב' }, { status: 500 });
   }
 }
 
@@ -119,14 +119,14 @@ export async function POST(request: Request) {
       if (inviteErr) {
         await supabase.from('org_invitations').delete().eq('org_id', orgId).eq('email', email);
         console.error('[org/members] Invite email failed:', inviteErr.message);
-        return NextResponse.json({ error: 'שליחת ההזמנה נכשלה. נסו שוב מאוחר יותר.' }, { status: 502 });
+        return NextResponse.json({ error: 'שליחת מייל ההזמנה נכשלה, נסו שוב מאוחר יותר' }, { status: 502 });
       }
     }
     // An existing but unconfirmed account joins once it confirms its email.
     return NextResponse.json({ status: 'invited', email, role }, { status: 201 });
   } catch (err) {
     console.error('[org/members] POST failed:', err);
-    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+    return NextResponse.json({ error: 'הוספת המשתמש נכשלה, נסו שוב' }, { status: 500 });
   }
 }
 
@@ -166,6 +166,6 @@ export async function DELETE(request: Request) {
     return NextResponse.json({ success: true });
   } catch (err) {
     console.error('[org/members] DELETE failed:', err);
-    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+    return NextResponse.json({ error: 'ההסרה נכשלה, נסו שוב' }, { status: 500 });
   }
 }

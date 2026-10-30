@@ -8,6 +8,7 @@ import { Plus, Building2, ChevronLeft, Users, Loader2, Plug } from 'lucide-react
 import { useSession } from '@/components/Auth/SessionContext';
 import { useToast } from '@/components/ui/Toast';
 import { ClientChannelsDialog, ClientChannelsSummary, useClientChannels } from '@/components/ClientChannels/ClientChannels';
+import { vatAccountError } from '@/shared/mappingValidation';
 
 export default function ClientsPage() {
   const supabase = createClient();
@@ -43,8 +44,16 @@ export default function ClientsPage() {
     { key: 'אחר', account_code: '4099' },
   ];
 
-  const handleAdd = async () => {
-    if (!name.trim()) return;
+  // Goes into the export's account column: digits only (see src/shared/mappingValidation.ts)
+  const vatAccountErr = vatAccountError(vatAccount);
+
+  const handleAdd = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!name.trim() || saving) return;
+    if (vatAccountErr) {
+      toast(vatAccountErr, 'error');
+      return;
+    }
     setSaving(true);
     const { data: newClient, error: insertErr } = await supabase
       .from('clients')
@@ -74,7 +83,7 @@ export default function ClientsPage() {
   return (
     <div className="space-y-6 max-w-5xl">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">לקוחות המשרד</h2>
           <p className="text-sm text-slate-500 mt-1">
@@ -91,12 +100,14 @@ export default function ClientsPage() {
 
       {/* Add form */}
       {showForm && (
-        <div className="card p-6 space-y-4">
+        <form className="card p-4 sm:p-6 space-y-4" onSubmit={handleAdd} noValidate>
           <h3 className="font-semibold text-slate-900">הוספת לקוח חדש</h3>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">שם הלקוח *</label>
+              <label htmlFor="new-client-name" className="block text-sm font-medium text-slate-700 mb-1.5">שם הלקוח *</label>
               <input
+                id="new-client-name"
+                required
                 value={name} onChange={(e) => setName(e.target.value)}
                 placeholder='חברת ABC בע"מ'
                 className="input-base"
@@ -104,26 +115,34 @@ export default function ClientsPage() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">קוד חשבון מע"מ תשומות</label>
+              <label htmlFor="new-client-vat-account" className="block text-sm font-medium text-slate-700 mb-1.5">קוד חשבון מע"מ תשומות</label>
               <input
+                id="new-client-vat-account"
                 value={vatAccount} onChange={(e) => setVatAccount(e.target.value)}
                 placeholder="1310"
-                className="input-base"
+                inputMode="numeric"
+                dir="ltr"
+                aria-invalid={!!vatAccountErr || undefined}
+                aria-describedby={vatAccountErr ? 'new-client-vat-account-error' : undefined}
+                className={vatAccountErr ? 'input-base input-error text-right' : 'input-base text-right'}
               />
+              {vatAccountErr && (
+                <p id="new-client-vat-account-error" className="text-xs text-red-600 mt-1">{vatAccountErr}</p>
+              )}
             </div>
           </div>
           <div className="flex gap-2 pt-1">
             <button
-              onClick={handleAdd} disabled={saving || !name.trim()}
+              type="submit" disabled={saving || !name.trim() || !!vatAccountErr}
               className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-5 py-2 rounded-xl text-sm font-semibold transition-colors"
             >
               {saving ? 'שומר...' : 'שמור לקוח'}
             </button>
-            <button onClick={() => setShowForm(false)} className="px-5 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors">
+            <button type="button" onClick={() => setShowForm(false)} className="px-5 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors">
               ביטול
             </button>
           </div>
-        </div>
+        </form>
       )}
 
       {/* Client grid */}
@@ -152,12 +171,12 @@ export default function ClientsPage() {
             <div key={c.id} className="card hover:shadow-card-md hover:border-blue-200 transition-all group overflow-hidden">
               <Link href={`/upload?clientId=${c.id}`} className="block p-5 cursor-pointer">
                 <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
                     <div className="bg-gradient-to-br from-blue-500 to-blue-700 rounded-xl p-2.5 shadow-sm">
                       <Building2 className="h-5 w-5 text-white" />
                     </div>
-                    <div>
-                      <p className="font-semibold text-slate-900 group-hover:text-blue-700 transition-colors">{c.name}</p>
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-900 group-hover:text-blue-700 transition-colors break-words">{c.name}</p>
                       <p className="text-xs text-slate-500 mt-0.5">
                         {c.vat_account ? `מע"מ: ${c.vat_account}` : 'קוד מע"מ לא הוגדר'}
                       </p>

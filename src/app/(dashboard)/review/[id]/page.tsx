@@ -15,6 +15,8 @@ import { ReturnToClientDialog } from '@/components/ReviewLoop/ReturnToClientDial
 import { ReturnedNotice } from '@/components/ReviewLoop/ReturnedNotice';
 import { canReturnInvoice } from '@/shared/returns';
 import { ProcessingBanner } from '@/components/Processing/ProcessingStatus';
+import { displayBboxes, fieldLabel } from '@/shared/reviewFields';
+import { useEscapeKey } from '@/components/ui/useEscapeKey';
 
 const ImageViewer = dynamic(() => import('@/components/SplitPane/ImageViewer').then((m) => m.ImageViewer), {
   ssr: false,
@@ -135,6 +137,9 @@ export default function ReviewDetailPage() {
 
   useEffect(() => { load(); }, [id]);
 
+  // Esc closes the split dialog (unless a split is running)
+  useEscapeKey(() => setShowSplitModal(false), showSplitModal && !splitLoading);
+
   // invoices.file_url is a storage reference, not a link: the viewer gets a short-lived signed URL.
   const [fileViewUrl, setFileViewUrl] = useState<string | null>(null);
   const [fileViewError, setFileViewError] = useState<string | null>(null);
@@ -225,7 +230,8 @@ export default function ReviewDetailPage() {
     }
   };
 
-  const bboxes = invoice?.validated_data?.bboxes ?? invoice?.extracted_data?.bboxes;
+  // Unsnapped model guesses (e.g. the allocation number's) are not drawn: no box beats a wrong box
+  const bboxes = displayBboxes(invoice?.validated_data?.bboxes ?? invoice?.extracted_data?.bboxes);
   const hasBboxes = bboxes && Object.values(bboxes).some(Boolean);
 
   if (loading) {
@@ -245,7 +251,7 @@ export default function ReviewDetailPage() {
   }
 
   return (
-    <div className="flex flex-col h-[calc(100vh-80px)]">
+    <div className="flex flex-col lg:h-[calc(100vh-80px)]">
       {/* Page header */}
       <div className="flex items-center gap-3 mb-4 flex-wrap">
         <button
@@ -256,7 +262,7 @@ export default function ReviewDetailPage() {
         </button>
 
         <span className="text-slate-300">·</span>
-        <h1 className="text-base font-semibold text-slate-900 truncate max-w-xs">{invoice.file_name}</h1>
+        <h1 className="text-base font-semibold text-slate-900 truncate min-w-0 max-w-[60vw] sm:max-w-xs">{invoice.file_name}</h1>
 
         {hasBboxes && (
           <div className="mr-auto flex items-center gap-3 flex-wrap">
@@ -337,9 +343,10 @@ export default function ReviewDetailPage() {
       )}
 
       {/* Split pane */}
-      <div className="flex-1 grid grid-cols-2 gap-4 min-h-0">
+      {/* Stacked on small screens (form first, then the document); side by side from lg */}
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-4 min-h-0">
         {/* Right — validation form (places it on the right side in RTL) */}
-        <div className="card overflow-hidden">
+        <div className="card overflow-hidden h-[75vh] lg:h-auto">
           <ValidationForm
             invoice={invoice}
             onApproved={load}
@@ -349,8 +356,8 @@ export default function ReviewDetailPage() {
         </div>
 
         {/* Left — document viewer (places it on the left side in RTL) */}
-        <div className="card overflow-hidden flex flex-col">
-          <div className="px-4 py-3 border-b border-slate-100 bg-slate-50 text-sm font-medium text-slate-700 flex items-center justify-between">
+        <div className="card overflow-hidden flex flex-col h-[70vh] lg:h-auto">
+          <div className="px-4 py-3 border-b border-slate-100 bg-slate-50 text-sm font-medium text-slate-700 flex items-center justify-between gap-2 flex-wrap">
             <span>מסמך מקורי</span>
             {pageCount && pageCount > 1 && (
               <button
@@ -362,7 +369,7 @@ export default function ReviewDetailPage() {
             )}
             {hasBboxes && activeField && (
               <span className="text-xs text-blue-600 font-normal">
-                {activeField.replace(/_/g, ' ')}
+                {fieldLabel(activeField)}
               </span>
             )}
           </div>
@@ -396,14 +403,18 @@ export default function ReviewDetailPage() {
       {/* Split Modal */}
       {showSplitModal && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" style={{ direction: 'rtl' }}>
-          <div className="bg-white rounded-2xl border border-slate-100 shadow-xl max-w-md w-full p-6 space-y-4 text-right">
+          <div
+            role="dialog" aria-modal="true" aria-labelledby="split-dialog-title"
+            className="bg-white rounded-2xl border border-slate-100 shadow-xl max-w-md w-full p-6 space-y-4 text-right max-h-[90vh] overflow-y-auto"
+          >
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <h3 id="split-dialog-title" className="text-lg font-bold text-slate-900 flex items-center gap-2">
                 <Scissors className="h-5 w-5 text-blue-600" />
                 פיצול מסמך PDF
               </h3>
               <button
                 onClick={() => setShowSplitModal(false)}
+                aria-label="סגור"
                 className="text-slate-400 hover:text-slate-600 transition-colors text-lg font-bold"
               >
                 ✕
@@ -454,10 +465,11 @@ export default function ReviewDetailPage() {
                     </span>
                   </p>
                 )}
-                <label className="block text-xs font-semibold text-slate-500">
+                <label htmlFor="split-ranges" className="block text-xs font-semibold text-slate-500">
                   הזן טווחים מופרדים בפסיקים (לדוגמה: 1-2, 3, 4-{pageCount}):
                 </label>
                 <input
+                  id="split-ranges"
                   type="text"
                   value={customRanges}
                   onChange={(e) => setCustomRanges(e.target.value)}

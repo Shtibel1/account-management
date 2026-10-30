@@ -15,6 +15,7 @@ import {
 } from '@/lib/integrationsApi';
 import { Button } from '@/components/ui/Button';
 import { useToast } from '@/components/ui/Toast';
+import { useEscapeKey } from '@/components/ui/useEscapeKey';
 
 const STATUS_STYLES: Record<InvoiceOutcomeStatus, { label: string; className: string }> = {
   success: { label: 'יוצאה', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
@@ -90,9 +91,11 @@ export function IntegrationExportDialog({
     }
   };
 
+  useEscapeKey(onClose);
+
   return (
     <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" style={{ direction: 'rtl' }} onClick={onClose}>
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto p-6 space-y-5 text-right" onClick={(e) => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-label="ייצוא להנהלת חשבונות" className="bg-white rounded-2xl border border-slate-100 shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto p-6 space-y-5 text-right" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-slate-100 pb-3">
           <h3 className="text-lg font-bold text-slate-900">
             ייצוא להנהלת חשבונות{clientName ? ` · ${clientName}` : ''} ({invoices.length} חשבוניות)

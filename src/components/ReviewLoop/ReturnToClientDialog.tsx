@@ -12,6 +12,7 @@ import {
   type NotificationOutcome,
   type ReturnReasonCode,
 } from '@/shared/returns';
+import { useEscapeKey } from '@/components/ui/useEscapeKey';
 
 const CHANNEL_LABEL: Record<NotificationOutcome['channel'], string> = { email: 'מייל', whatsapp: 'וואטסאפ' };
 
@@ -62,14 +63,16 @@ export function ReturnToClientDialog({
     }
   };
 
+  useEscapeKey(onClose);
+
   return (
     <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" style={{ direction: 'rtl' }} onClick={onClose}>
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-xl max-w-md w-full p-6 space-y-4 text-right" onClick={(e) => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-label="החזר ללקוח" className="bg-white rounded-2xl border border-slate-100 shadow-xl max-w-md w-full p-6 space-y-4 text-right max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-slate-100 pb-3">
           <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
             <Undo2 className="h-5 w-5 text-orange-600" /> החזר ללקוח
           </h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors text-lg font-bold">✕</button>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors text-lg font-bold" aria-label="סגור">✕</button>
         </div>
 
         <p className="text-sm text-slate-500">
@@ -98,10 +101,11 @@ export function ReturnToClientDialog({
         </div>
 
         <div className="space-y-1.5">
-          <label className="text-xs font-semibold text-slate-600">
+          <label htmlFor="return-note" className="text-xs font-semibold text-slate-600">
             {code === 'other' ? <>פירוט הסיבה <span className="text-red-500">*</span></> : 'הערה ללקוח (רשות)'}
           </label>
           <textarea
+            id="return-note"
             value={note}
             onChange={(e) => { setNote(e.target.value); setError(null); }}
             maxLength={RETURN_NOTE_MAX_LENGTH}

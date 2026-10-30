@@ -193,8 +193,9 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
         
         {/* Client filter */}
         <div className="flex items-center gap-2">
-          <label className="text-xs font-semibold text-slate-600">לקוח:</label>
+          <label htmlFor="invoice-filter-client" className="text-xs font-semibold text-slate-600">לקוח:</label>
           <select
+            id="invoice-filter-client"
             value={clientFilter}
             onChange={(e) => setClientFilter(e.target.value)}
             className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-w-[140px] text-right font-medium"
@@ -210,8 +211,9 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
 
         {/* Status filter */}
         <div className="flex items-center gap-2">
-          <label className="text-xs font-semibold text-slate-600">סטטוס:</label>
+          <label htmlFor="invoice-filter-status" className="text-xs font-semibold text-slate-600">סטטוס:</label>
           <select
+            id="invoice-filter-status"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
             className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-w-[140px] text-right font-medium"
@@ -244,7 +246,8 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
 
       {/* Table */}
       <div className="card overflow-hidden">
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[760px] text-sm">
           <thead>
             <tr className="bg-slate-50 border-b border-slate-200">
               <th className="p-4 w-10">
@@ -352,6 +355,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
             }))}
           </tbody>
         </table>
+        </div>
         {/* Pagination controls */}
         {totalPages > 1 && (
           <div className="flex items-center justify-between border-t border-slate-200 bg-white px-4 py-3 sm:px-6" style={{ direction: 'rtl' }}>
