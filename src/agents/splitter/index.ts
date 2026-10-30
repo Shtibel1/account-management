@@ -18,8 +18,26 @@ const MAX_PAGES_FOR_LLM = 60;
 const TOTAL_CHAR_BUDGET = 60_000;
 const MAX_CHARS_PER_PAGE = 2_500;
 
+// Output budget: each document costs ~60-80 tokens (pages, confidence, a short Hebrew reason),
+// so 1024 tokens covered only ~12 documents and a 20-invoice batch came back truncated.
+const TOKENS_PER_DOCUMENT = 120;
+const BASE_OUTPUT_TOKENS = 1024;
+const MAX_OUTPUT_TOKENS = 16_000;
+
+/** Output budget for a file of `pageCount` pages (worst case: one document per page). */
+export function splitterMaxTokens(pageCount: number): number {
+  return Math.min(MAX_OUTPUT_TOKENS, Math.max(2048, BASE_OUTPUT_TOKENS + pageCount * TOKENS_PER_DOCUMENT));
+}
+
+/** The subset of the Anthropic client the splitter uses (injectable for tests). */
+export interface SplitterLlm {
+  messages: {
+    create(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message>;
+  };
+}
+
 let client: Anthropic | null = null;
-function getAnthropicClient(): Anthropic | null {
+function getAnthropicClient(): SplitterLlm | null {
   if (!apiKey) return null;
   if (!client) client = new Anthropic({ apiKey });
   return client;
@@ -45,7 +63,7 @@ const TOOL_DEFINITION: Anthropic.Tool = {
             start_page: { type: 'integer', minimum: 1, description: 'עמוד ראשון של המסמך (מתחיל מ-1)' },
             end_page: { type: 'integer', minimum: 1, description: 'עמוד אחרון של המסמך (כולל)' },
             confidence: { type: 'number', minimum: 0, maximum: 1, description: 'ביטחון שהטווח הזה הוא מסמך שלם ונפרד' },
-            reason: { type: 'string', description: 'הסבר קצר: ספק / מספר חשבונית / סוג מסמך' },
+            reason: { type: 'string', description: 'הסבר קצר מאוד (עד 6 מילים): ספק / מספר חשבונית' },
           },
           required: ['start_page', 'end_page', 'confidence', 'reason'],
         },
@@ -82,15 +100,25 @@ export interface BoundaryDetectionResult {
   suggestion: SplitSuggestion | null;
   inputTokens: number;
   outputTokens: number;
+  /**
+   * True when detection was needed but could not give an answer (LLM error, truncated or invalid
+   * ranges, too many pages). The pipeline then warns the reviewer and blocks auto-approve, instead
+   * of silently treating a possibly multi-invoice file as one invoice.
+   */
+  failed?: boolean;
 }
 
 /**
  * Detects document boundaries in a multi-page PDF from its per-page OCR text.
  * Runs the cheap heuristic pre-check first and only calls the LLM when it can't decide.
- * Never throws: a failed detection just means no suggestion.
+ * Never throws: a failed detection means no suggestion, with `failed` set so the reviewer is warned.
  */
-export async function detectDocumentBoundaries(pageTexts: string[]): Promise<BoundaryDetectionResult> {
+export async function detectDocumentBoundaries(
+  pageTexts: string[],
+  llm: SplitterLlm | null = getAnthropicClient()
+): Promise<BoundaryDetectionResult> {
   const none: BoundaryDetectionResult = { suggestion: null, inputTokens: 0, outputTokens: 0 };
+  const failed: BoundaryDetectionResult = { ...none, failed: true };
   const pageCount = pageTexts.length;
 
   const precheck = precheckSplit(pageTexts);
@@ -108,13 +136,13 @@ export async function detectDocumentBoundaries(pageTexts: string[]): Promise<Bou
 
   if (pageCount > MAX_PAGES_FOR_LLM) {
     console.warn(`[Splitter] ${pageCount} pages exceeds the LLM limit (${MAX_PAGES_FOR_LLM}); leaving split to the reviewer.`);
-    return none;
+    return failed;
   }
 
-  const anthropic = getAnthropicClient();
+  const anthropic = llm;
   if (!anthropic) {
     console.warn('[Splitter] Missing ANTHROPIC_API_KEY, skipping boundary detection.');
-    return none;
+    return failed;
   }
 
   const perPage = Math.min(MAX_CHARS_PER_PAGE, Math.floor(TOTAL_CHAR_BUDGET / pageCount));
@@ -134,10 +162,10 @@ ${describeHints(precheck.hints)}
 
 ${formattedPages}`;
 
-  try {
-    const response = await anthropic.messages.create({
+  const callModel = (maxTokens: number) =>
+    anthropic.messages.create({
       model: MODEL,
-      max_tokens: 1024,
+      max_tokens: maxTokens,
       temperature: 0,
       system: SYSTEM_PROMPT,
       tools: [TOOL_DEFINITION],
@@ -145,23 +173,38 @@ ${formattedPages}`;
       messages: [{ role: 'user', content: userText }],
     });
 
+  try {
+    const firstBudget = splitterMaxTokens(pageCount);
+    let response = await callModel(firstBudget);
     const usage = {
       inputTokens: response.usage?.input_tokens ?? 0,
       outputTokens: response.usage?.output_tokens ?? 0,
     };
+    // A tool call cut at max_tokens has incomplete `documents` (pages not covered) - retry once
+    // with the largest budget before giving up.
+    if (response.stop_reason === 'max_tokens' && firstBudget < MAX_OUTPUT_TOKENS) {
+      console.warn(`[Splitter] Boundary response hit max_tokens (${firstBudget}) - retrying with ${MAX_OUTPUT_TOKENS}`);
+      response = await callModel(MAX_OUTPUT_TOKENS);
+      usage.inputTokens += response.usage?.input_tokens ?? 0;
+      usage.outputTokens += response.usage?.output_tokens ?? 0;
+    }
+    if (response.stop_reason === 'max_tokens') {
+      console.error('[Splitter] Boundary response still truncated at max_tokens; leaving the split to the reviewer.');
+      return { ...failed, ...usage };
+    }
 
     const toolUse = response.content.find(
       (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === TOOL_NAME
     );
     if (!toolUse) {
       console.error('[Splitter] Model did not call the boundary tool; no suggestion stored.');
-      return { suggestion: null, ...usage };
+      return { ...failed, ...usage };
     }
 
     const parsed = parseLlmSplitResult(toolUse.input, pageCount);
     if (!parsed.ok) {
       console.error(`[Splitter] Rejected invalid page ranges from model: ${parsed.error}`, JSON.stringify(toolUse.input));
-      return { suggestion: null, ...usage };
+      return { ...failed, ...usage };
     }
 
     const { suggestion } = parsed;
@@ -177,6 +220,6 @@ ${formattedPages}`;
     return { suggestion, ...usage };
   } catch (err) {
     console.error('[Splitter] Boundary detection request failed, continuing without a suggestion:', err);
-    return none;
+    return failed;
   }
 }

@@ -5,13 +5,51 @@ function, `ingestDocument()` in [`src/lib/ingest.ts`](../src/lib/ingest.ts), whi
 
 1. stores the file in the `raw-invoices` bucket (`<clientId>/<timestamp>_<safe name>`),
 2. creates the `invoices` row (`status = 'processing'`, `source = 'upload' | 'email' | 'whatsapp'`),
-3. starts the LangGraph pipeline (via `next/server` `after()`, so webhooks answer immediately).
+3. queues the pipeline (see **Processing queue** below) and gives it a head start via `next/server` `after()`, so webhooks answer immediately.
 
 The browser upload keeps its existing two-step flow (signed upload URL → `/api/invoices/upload` →
 `/api/invoices/[id]/process`); `/api/invoices/upload` now uses `registerStoredDocument()` from the same module.
 
 Every channel is **off until its environment variables are set** - the endpoints answer `503` otherwise.
 No provider is configured in this repository.
+
+## Upload checks
+
+The browser uploads straight to Storage, so the server checks twice: `/api/invoices/upload-url` refuses
+unsupported names / declared types and sizes over 20 MB (`checkUploadDeclaration`), and
+`registerStoredDocument()` reads the stored bytes and refuses empty files, files over 20 MB and anything that
+is not a real PDF / JPG / PNG / WEBP by magic bytes (`checkStoredBytes`, [`src/shared/uploadValidation.ts`](../src/shared/uploadValidation.ts)).
+A refused file gets no invoice row, its object is removed, and the upload screen shows the Hebrew reason per file.
+The migration `20261030161000_qa_pipeline.sql` also sets the `raw-invoices` bucket limits (20 MB, those four types).
+
+## Processing queue
+
+Amplify cuts every HTTP response at ~28 s, so no request runs the whole pipeline
+([`src/lib/processingQueue.ts`](../src/lib/processingQueue.ts)):
+
+- `POST /api/invoices/[id]/process` only **enqueues** (status guard, new `processing_run_id`,
+  `processing_started_at`, `processing_attempts`, a `processing_jobs` row) and answers `202`.
+  Approved invoices need `{ "reopen": true }` (their reviewed values are kept); exported / rejected /
+  returned invoices and invoices with a live run get `409`.
+- The work runs in short resumable **ticks**: OCR of a few pages per tick (only those pages are sent to
+  Vision), then boundary detection, then extraction + validation + save. State lives in `processing_jobs`;
+  a killed tick loses only its own step (the job lock expires and the next tick retries, 3 attempts per stage).
+- Ticks are driven by `after()` right after enqueueing (best-effort), by the review screens
+  (`POST /api/invoices/[id]/process/tick` every few seconds while an invoice shows as processing) and by
+  the **scheduled worker** `GET|POST /api/invoices/worker` (header `X-Ingest-Secret` or
+  `Authorization: Bearer` = `PROCESSING_WORKER_SECRET`; 503 when unset). Schedule it every minute,
+  e.g. with EventBridge Scheduler (API destination) or any external cron.
+- Stuck runs (no progress for 10 minutes, or older than 45 minutes) become `error` with a Hebrew reason;
+  the user can retry ("עבד מחדש" on the review screen).
+- Every pipeline write is conditioned on `processing_run_id`, so a superseded run (re-process, manual split,
+  sweeper) can't overwrite the row. The UI shows `processing_stage` / `processing_progress`.
+- Manual split (`/api/invoices/[id]/split`): only from `review` / `error`, claimed atomically, parts keep
+  `original_file_url` / `original_file_hash` / `split_parent_id` / page range, part `file_hash` =
+  hash(source hash + page range), and the parts are queued on the server.
+
+| Variable | Description |
+|----------|-------------|
+| `PROCESSING_WORKER_SECRET` | Secret of the scheduled worker (`openssl rand -hex 32`). Without it the worker answers 503 and runs move only while a review screen is open |
 
 ---
 

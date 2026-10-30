@@ -14,6 +14,7 @@ import clsx from 'clsx';
 import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark, Zap, Undo2 } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
 import { DuplicateAlert } from './DuplicateAlert';
+import { toUserErrorMessage } from '@/shared/processing';
 
 interface Props {
   invoice: Invoice;
@@ -977,7 +978,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
             )}
             {isError && (
               <span className="text-red-700 bg-red-50 border-red-200 flex items-center gap-2 px-3 py-1 rounded-full border">
-                <XCircle className="h-4 w-4 shrink-0" /> {invoice.error_message || 'המסמך לא זוהה כחשבונית'}
+                <XCircle className="h-4 w-4 shrink-0" /> {invoice.error_message ? toUserErrorMessage(invoice.error_message) : 'המסמך לא זוהה כחשבונית'}
               </span>
             )}
             {isReturned && (

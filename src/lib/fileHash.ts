@@ -48,3 +48,12 @@ export async function saveInvoiceFileHash(
     console.error(`[fileHash] Failed to save file_hash for invoice ${invoiceId}:`, err);
   }
 }
+
+/**
+ * Fingerprint of a split part: derived from the source file's hash and the page range, so the same
+ * pages of the same file always get the same file_hash (pdf-lib output itself embeds timestamps),
+ * and same-file duplicate detection also works for parts of a file that was split twice.
+ */
+export function splitPartHash(sourceHash: string, startPage: number, endPage: number): string {
+  return createHash('sha256').update(`split-part:${sourceHash}:${startPage}-${endPage}`).digest('hex');
+}

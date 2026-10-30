@@ -1,9 +1,10 @@
 import { after } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { runOrchestrationPipeline } from '@/agents/supervisor';
+import { driveProcessing, enqueueProcessing } from '@/lib/processingQueue';
 import { buildStoragePath, MAX_DOCUMENT_BYTES } from '@/lib/ingestHelpers';
 import { hashStoredFile, saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
 import type { InvoiceSource } from '@/shared/types';
+import { checkStoredBytes } from '@/shared/uploadValidation';
 
 /**
  * Single server-side entry point for every ingestion channel (upload, email, WhatsApp):
@@ -68,12 +69,53 @@ async function insertInvoiceRow(
   return { data: retry.data, error: retry.error };
 }
 
+/** The stored object's bytes, or null when they can't be read (the local mock storage has no download). */
+async function downloadStoredFile(filePath: string): Promise<Buffer | null> {
+  try {
+    const storage = supabase.storage.from(RAW_BUCKET);
+    if (typeof storage.download !== 'function') return null;
+    const { data, error } = await storage.download(filePath);
+    if (error || !data) throw error ?? new Error('Empty download');
+    return Buffer.from(await data.arrayBuffer());
+  } catch (err) {
+    console.error(`[Ingest] Could not read stored upload ${filePath}:`, err);
+    return null;
+  }
+}
+
+async function removeStoredFile(filePath: string): Promise<void> {
+  try {
+    await supabase.storage.from(RAW_BUCKET).remove([filePath]);
+  } catch (err) {
+    console.warn(`[Ingest] Could not remove rejected upload ${filePath}:`, err);
+  }
+}
+
 /**
  * Creates the invoice row for a file already in the raw-invoices bucket (signs a read URL first).
  * Does NOT start the pipeline - the browser upload flow triggers /api/invoices/[id]/process itself.
  */
 export async function registerStoredDocument(doc: StoredDocument): Promise<RegisterResult> {
   const { clientId, filePath, fileName } = doc;
+
+  // Browser uploads go straight to Storage, so the server checks the stored bytes here:
+  // size (20 MB), not empty, and a real PDF / JPG / PNG / WEBP by magic bytes. Rejected files
+  // get no invoice row and never reach OCR. (Email / WhatsApp bytes are checked before storing.)
+  let precomputedHash: string | null | undefined = doc.fileHash;
+  if (doc.fileHash === undefined) {
+    const stored = await downloadStoredFile(filePath);
+    if (stored) {
+      const check = checkStoredBytes(stored);
+      if (!check.ok) {
+        console.warn(`[Ingest] Rejected stored upload ${filePath}: ${check.error}`);
+        await removeStoredFile(filePath);
+        return { fileName, status: 'error', error: check.error };
+      }
+      precomputedHash = sha256Hex(stored);
+    } else {
+      precomputedHash = undefined;
+    }
+  }
 
   // 1. Generate signed URL valid for 1 year
   const { data: signedData, error: signErr } = await supabase.storage
@@ -82,7 +124,7 @@ export async function registerStoredDocument(doc: StoredDocument): Promise<Regis
 
   if (signErr || !signedData?.signedUrl) {
     console.error('Signed URL generation failed:', signErr);
-    const errMsg = `Signed URL generation failed: ${signErr?.message || 'Unknown error'}`;
+    const errMsg = 'שמירת הקובץ נכשלה - יש להעלות אותו שוב';
 
     // Record failure in database
     const { data: invoice, error: dbErr } = await insertInvoiceRow(
@@ -95,7 +137,7 @@ export async function registerStoredDocument(doc: StoredDocument): Promise<Regis
       fileName,
       status: 'error',
       id: invoice?.id,
-      error: errMsg + (dbErr ? `. Also DB insert failed: ${dbErr.message}` : ''),
+      error: errMsg,
     };
   }
 
@@ -120,28 +162,34 @@ export async function registerStoredDocument(doc: StoredDocument): Promise<Regis
 
   if (dbErr || !invoice) {
     console.error('Database insertion failed:', dbErr);
-    return { fileName, status: 'error', error: `Database insertion failed: ${dbErr?.message ?? 'no row returned'}` };
+    return { fileName, status: 'error', error: 'רישום החשבונית נכשל - יש לנסות שוב' };
   }
 
   // 3. Fingerprint the stored bytes for exact-duplicate detection (every channel goes through here).
   // Awaited so the hash is in place before the pipeline runs; failures only skip the same-file check.
-  const fileHash = doc.fileHash !== undefined ? doc.fileHash : await hashStoredFile(supabase, RAW_BUCKET, filePath);
+  const fileHash = precomputedHash !== undefined ? precomputedHash : await hashStoredFile(supabase, RAW_BUCKET, filePath);
   if (fileHash) await saveInvoiceFileHash(supabase, invoice.id, fileHash);
 
   return { fileName, status: 'success', id: invoice.id, fileUrl };
 }
 
 /**
- * Runs the pipeline after the HTTP response is sent (next/server `after`), so webhooks answer
- * within the provider's timeout. Outside a request scope it falls back to fire-and-forget.
+ * Queues the pipeline (src/lib/processingQueue.ts) and gives it a head start after the HTTP
+ * response is sent (next/server `after`), so webhooks answer within the provider's timeout.
+ * If the platform stops the function early, the scheduled worker / review screen continue the run.
  */
-export function schedulePipeline(invoiceId: string, fileUrl: string, mimeType: string, clientId: string): void {
+export async function schedulePipeline(invoiceId: string, mimeType: string): Promise<void> {
+  // Enqueued before answering, so the job exists even if the background head start never runs
+  const queued = await enqueueProcessing(invoiceId, { mimeType });
+  if (!queued.ok) {
+    console.error(`[Ingest] Could not queue invoice ${invoiceId}: ${queued.error}`);
+    return;
+  }
   const task = async () => {
     try {
-      await runOrchestrationPipeline(invoiceId, fileUrl, mimeType, clientId);
+      await driveProcessing(invoiceId, 20_000);
     } catch (err) {
-      // runOrchestrationPipeline already marks the invoice as 'error'.
-      console.error(`[Ingest] Pipeline failed for invoice ${invoiceId}:`, err);
+      console.error(`[Ingest] Pipeline tick failed for invoice ${invoiceId}:`, err);
     }
   };
 
@@ -168,10 +216,10 @@ export async function ingestDocument(input: IngestDocumentInput): Promise<Regist
   const { clientId, fileName, mimeType, bytes } = input;
 
   if (bytes.byteLength === 0) {
-    return { fileName, status: 'error', error: 'Empty file' };
+    return { fileName, status: 'error', error: 'הקובץ ריק' };
   }
   if (bytes.byteLength > MAX_DOCUMENT_BYTES) {
-    return { fileName, status: 'error', error: `File exceeds ${MAX_DOCUMENT_BYTES / 1024 / 1024}MB limit` };
+    return { fileName, status: 'error', error: `הקובץ גדול מ-${MAX_DOCUMENT_BYTES / 1024 / 1024}MB` };
   }
 
   const filePath = buildStoragePath(clientId, fileName);
@@ -181,7 +229,7 @@ export async function ingestDocument(input: IngestDocumentInput): Promise<Regist
 
   if (uploadErr) {
     console.error(`[Ingest] Storage upload failed for ${fileName}:`, uploadErr);
-    return { fileName, status: 'error', error: `Storage upload failed: ${uploadErr.message}` };
+    return { fileName, status: 'error', error: 'שמירת הקובץ נכשלה - יש לשלוח אותו שוב' };
   }
 
   const result = await registerStoredDocument({
@@ -195,7 +243,7 @@ export async function ingestDocument(input: IngestDocumentInput): Promise<Regist
   });
 
   if (result.status === 'success') {
-    schedulePipeline(result.id, result.fileUrl, mimeType, clientId);
+    await schedulePipeline(result.id, mimeType);
   }
   return result;
 }

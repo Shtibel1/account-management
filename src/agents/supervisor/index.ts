@@ -1,5 +1,5 @@
 import { StateGraph, END, MemorySaver } from '@langchain/langgraph';
-import type { PipelineState, TenantRules, ExtractedData, OcrWord, BboxMap, FieldBbox } from '@/shared/types';
+import type { PipelineState, TenantRules, ExtractedData, OcrWord, OcrMetadata, BboxMap, FieldBbox } from '@/shared/types';
 import { preprocessInvoice } from '../preprocessor';
 import { extractInvoiceData } from '../extraction';
 import { validateInvoice } from '../validation';
@@ -13,6 +13,7 @@ import { saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
 import { linkResubmission } from '@/lib/returns';
 import { computeConfidence } from '@/shared/confidence';
 import { PDFDocument } from 'pdf-lib';
+import { toUserErrorMessage } from '@/shared/processing';
 
 function parseNumber(text: string): number | null {
   const clean = text.replace(/[^0-9.]/g, '');
@@ -264,6 +265,78 @@ export function calculateEstimatedCost(metrics: {
   return Math.round((ocrCost + inputCost + outputCost) * 10000) / 10000;
 }
 
+/** OCR + boundary detection done earlier by the processing queue (src/lib/processingQueue.ts). */
+export interface PrecomputedOcr {
+  rawOcrText: string;
+  ocrMetadata: OcrMetadata;
+  ocrOpCount: number;
+  pageTexts: string[];
+  ocrWords: OcrWord[];
+  splitSuggestion: SplitSuggestion | null;
+  splitDetectionFailed: boolean;
+  splitInputTokens: number;
+  splitOutputTokens: number;
+}
+
+export interface PipelineRunOptions {
+  /** invoices.processing_run_id of this run: writes are skipped once another run took over. */
+  runId?: string | null;
+  /** Skip OCR / detection and use these results (queue ticks did them already). */
+  preOcr?: PrecomputedOcr | null;
+}
+
+export type PipelineRunState = PipelineState & { runId?: string | null; splitDetectionFailed?: boolean };
+
+export const SPLIT_DETECTION_FAILED_WARNING = 'לא ניתן היה לבדוק אוטומטית אם הקובץ מכיל כמה מסמכים - יש לבדוק ידנית ולפצל במידת הצורך';
+
+/**
+ * Writes a run's result to its invoice, but only while this run still owns the row
+ * (processing_run_id unchanged: no re-process, manual split or sweeper since it started).
+ * An invoice a human already reviewed (reviewed_at) keeps its validated_data and goes back to
+ * 'review' - the new AI output never replaces approved values or auto-approves it.
+ * Returns false when the write was skipped.
+ */
+export async function writeRunResult(
+  state: PipelineRunState,
+  update: Record<string, unknown>
+): Promise<boolean> {
+  const runId = state.runId ?? null;
+  const { data: row, error: readErr } = await supabase
+    .from('invoices')
+    .select('id, reviewed_at, processing_run_id')
+    .eq('id', state.invoiceId)
+    .single();
+  if (readErr || !row) {
+    console.error(`[Supervisor] Could not read invoice ${state.invoiceId} before saving:`, readErr);
+    return false;
+  }
+  const current = row as { reviewed_at?: string | null; processing_run_id?: string | null };
+  if (runId && current.processing_run_id !== runId) {
+    console.warn(`[Supervisor] Run ${runId} of invoice ${state.invoiceId} was superseded (now ${current.processing_run_id ?? 'none'}); result discarded.`);
+    return false;
+  }
+
+  const payload: Record<string, unknown> = {
+    ...update,
+    processing_stage: null,
+    processing_progress: null,
+    updated_at: new Date().toISOString(),
+  };
+  if (current.reviewed_at) {
+    delete payload.validated_data;
+    if (payload.status === 'approved') payload.status = 'review';
+  }
+
+  let query = supabase.from('invoices').update(payload).eq('id', state.invoiceId);
+  if (runId) query = query.eq('processing_run_id', runId);
+  const { error } = await query;
+  if (error) {
+    console.error(`[Supervisor] Failed to save result of invoice ${state.invoiceId}:`, error);
+    return false;
+  }
+  return true;
+}
+
 // Persist the OCR text (future few-shot input) and which examples were used, best-effort
 async function saveRunContext(state: PipelineState): Promise<void> {
   await saveExtractionContext(supabase, state.invoiceId, {
@@ -298,6 +371,9 @@ const graph = new StateGraph<any>({
     fewShotExampleIds: { value: (a: any, b: any) => b ?? a, default: () => null },
     // null must overwrite: a re-run on the same thread (e.g. after a manual split) must not keep the old suggestion
     splitSuggestion:  { value: (a: any, b: any) => (b === undefined ? a : b), default: () => null },
+    splitDetectionFailed: { value: (a: boolean, b: boolean) => (b === undefined ? a : b), default: () => false },
+    runId:            { value: (a: any, b: any) => (b === undefined ? a : b), default: () => null },
+    preOcr:           { value: (a: any, b: any) => (b === undefined ? a : b), default: () => null },
   },
 })
   // 1. Initialize Rules node
@@ -307,18 +383,34 @@ const graph = new StateGraph<any>({
   })
 
   // 2. Preprocess node (Deterministic OCR Extraction)
-  .addNode('preprocess', async (state: PipelineState) => {
-    const { rawOcrText, ocrMetadata, ocrOpCount, pageTexts, ocrWords } = await preprocessInvoice(state.fileUrl, state.mimeType);
-
+  .addNode('preprocess', async (state: PipelineState & { preOcr?: PrecomputedOcr | null }) => {
+    let rawOcrText: string;
+    let ocrMetadata: OcrMetadata;
+    let ocrOpCount: number;
+    let pageTexts: string[] | undefined;
+    let ocrWords: OcrWord[] | undefined;
     // Multi-invoice detection (heuristic pre-check first, LLM only when it can't decide)
     let splitSuggestion: SplitSuggestion | null = null;
+    let splitDetectionFailed = false;
     let splitInputTokens = 0;
     let splitOutputTokens = 0;
-    if (pageTexts && pageTexts.length > 1) {
-      const detection = await detectDocumentBoundaries(pageTexts);
-      splitSuggestion = detection.suggestion;
-      splitInputTokens = detection.inputTokens;
-      splitOutputTokens = detection.outputTokens;
+
+    if (state.preOcr) {
+      // The processing queue already ran OCR (page-batched over several ticks) and detection
+      ({ rawOcrText, ocrMetadata, ocrOpCount, pageTexts, ocrWords } = state.preOcr);
+      splitSuggestion = state.preOcr.splitSuggestion;
+      splitDetectionFailed = state.preOcr.splitDetectionFailed;
+      splitInputTokens = state.preOcr.splitInputTokens;
+      splitOutputTokens = state.preOcr.splitOutputTokens;
+    } else {
+      ({ rawOcrText, ocrMetadata, ocrOpCount, pageTexts, ocrWords } = await preprocessInvoice(state.fileUrl, state.mimeType));
+      if (pageTexts && pageTexts.length > 1) {
+        const detection = await detectDocumentBoundaries(pageTexts);
+        splitSuggestion = detection.suggestion;
+        splitDetectionFailed = detection.failed === true;
+        splitInputTokens = detection.inputTokens;
+        splitOutputTokens = detection.outputTokens;
+      }
     }
 
     const updatedMetrics = {
@@ -368,7 +460,7 @@ const graph = new StateGraph<any>({
         let primaryOcrMetadata = ocrMetadata;
         let primaryOcrWords = ocrWords;
 
-        const childPromises: Promise<any>[] = [];
+        const childIds: string[] = [];
 
         for (let idx = 0; idx < splits.length; idx++) {
           const split = splits[idx];
@@ -451,19 +543,18 @@ const graph = new StateGraph<any>({
             }
             await saveInvoiceFileHash(supabase, newInvoice.id, splitFileHash);
 
-            console.log(`[Supervisor]   - Triggered child pipeline for part ${idx + 1}: ${newInvoice.id}`);
-            childPromises.push(
-              runOrchestrationPipeline(newInvoice.id, splitFileUrl, 'application/pdf', state.tenantId).catch((err) => {
-                console.error(`LangGraph Pipeline failed for split invoice ${newInvoice.id}:`, err);
-              })
-            );
+            childIds.push(newInvoice.id);
           }
         }
 
-        if (childPromises.length > 0) {
-          console.log(`[Supervisor] Awaiting ${childPromises.length} child pipelines to finish/pause...`);
-          await Promise.all(childPromises);
-          console.log(`[Supervisor] All child pipelines finished/paused.`);
+        if (childIds.length > 0) {
+          // Queued, not run inline: each part gets its own short ticks (src/lib/processingQueue.ts)
+          const { enqueueProcessing } = await import('@/lib/processingQueue');
+          for (const childId of childIds) {
+            const queued = await enqueueProcessing(childId, { mimeType: 'application/pdf' });
+            if (!queued.ok) console.error(`[Supervisor] Could not queue split part ${childId}: ${queued.error}`);
+          }
+          console.log(`[Supervisor] Queued ${childIds.length} split parts for processing.`);
         }
 
         return {
@@ -486,6 +577,7 @@ const graph = new StateGraph<any>({
       costMetrics: updatedMetrics,
       // Falls back to a review suggestion when an auto-split failed
       splitSuggestion,
+      splitDetectionFailed,
     };
   })
 
@@ -575,6 +667,22 @@ const graph = new StateGraph<any>({
       validated.validation_flags = validationResult;
     }
     validated.split_suggestion = splitSuggestion;
+    // Detection was needed but failed (e.g. the model's answer was cut off): the file may hold
+    // several invoices, so a reviewer has to look before it can be approved.
+    if (!splitSuggestion && (state as PipelineRunState).splitDetectionFailed) {
+      if (!validationResult.warnings.includes(SPLIT_DETECTION_FAILED_WARNING)) {
+        validationResult.warnings.push(SPLIT_DETECTION_FAILED_WARNING);
+      }
+      validationResult.requires_manual_review = true;
+      if (validationResult.auto_approved) {
+        validationResult.auto_approved = false;
+        validationResult.auto_approve_blockers = [
+          ...(validationResult.auto_approve_blockers ?? []),
+          'לא ניתן היה לוודא שהקובץ מכיל מסמך אחד בלבד',
+        ];
+      }
+      validated.validation_flags = validationResult;
+    }
 
     const errorMsg = validationResult.not_an_invoice ? 'המסמך לא זוהה כחשבונית' : null;
     return { extractedData: validated, validationResult, supplierRule, error: errorMsg };
@@ -590,13 +698,14 @@ const graph = new StateGraph<any>({
     console.log(`[Supervisor] 💾 Saving state: REQUIRES MANUAL REVIEW (Total Cost: $${state.costMetrics.estimatedCostUsd})`);
 
     // extracted_data stays the AI output; supplier-rule defaults go into validated_data only
-    await supabase.from('invoices').update({
+    const saved = await writeRunResult(state, {
       extracted_data: data,
       validated_data: validatedData,
       status: 'review',
       ai_confidence: confidence,
-      updated_at: new Date().toISOString(),
-    }).eq('id', state.invoiceId);
+      error_message: null,
+    });
+    if (!saved) return { status: 'review' };
     await saveRunContext(state);
     // A corrected document for an invoice the accountant returned to the client (review loop flag)
     await linkResubmission(state.invoiceId);
@@ -616,14 +725,16 @@ const graph = new StateGraph<any>({
 
     console.log(`[Supervisor] ✅ Saving state: AUTO-APPROVED (Total Cost: $${state.costMetrics.estimatedCostUsd})`);
 
-    // No reviewed_at: auto-approved invoices don't count toward accuracy / auto-approve eligibility
-    await supabase.from('invoices').update({
+    // No reviewed_at: auto-approved invoices don't count toward accuracy / auto-approve eligibility.
+    // (An invoice a human already reviewed is never auto-approved by a re-run: see writeRunResult.)
+    const saved = await writeRunResult(state, {
       extracted_data: data,
       validated_data: validatedData,
       status: 'approved',
       ai_confidence: confidence,
-      updated_at: new Date().toISOString(),
-    }).eq('id', state.invoiceId);
+      error_message: null,
+    });
+    if (!saved) return { status: 'approved' };
     await saveRunContext(state);
     await linkResubmission(state.invoiceId);
 
@@ -634,10 +745,9 @@ const graph = new StateGraph<any>({
   .addNode('save_error', async (state: PipelineState) => {
     console.error(`[Supervisor] ❌ Saving state: ERROR (Total Cost: $${state.costMetrics.estimatedCostUsd}). Details: ${state.error}`);
     
-    const updateData: any = {
+    const updateData: Record<string, unknown> = {
       status: 'error',
-      error_message: state.error || 'Unknown error occurred in pipeline',
-      updated_at: new Date().toISOString(),
+      error_message: state.error ? toUserErrorMessage(state.error) : 'העיבוד נכשל. ניתן לנסות שוב ("עבד מחדש")',
     };
 
     if (state.extractedData) {
@@ -645,7 +755,8 @@ const graph = new StateGraph<any>({
       updateData.validated_data = state.extractedData;
     }
 
-    await supabase.from('invoices').update(updateData).eq('id', state.invoiceId);
+    const saved = await writeRunResult(state, updateData);
+    if (!saved) return { status: 'error' };
     await saveRunContext(state);
 
     return { status: 'error' };
@@ -705,8 +816,10 @@ export async function runOrchestrationPipeline(
   invoiceId: string,
   fileUrl: string,
   mimeType: string,
-  tenantId: string
+  tenantId: string,
+  options: PipelineRunOptions = {}
 ): Promise<void> {
+  const runId = options.runId ?? null;
   try {
     await compiledGraph.invoke(
       {
@@ -714,6 +827,14 @@ export async function runOrchestrationPipeline(
         fileUrl,
         mimeType,
         tenantId,
+        runId,
+        preOcr: options.preOcr ?? null,
+        splitSuggestion: null,
+        splitDetectionFailed: false,
+        extractedData: null,
+        validationResult: null,
+        fewShot: null,
+        fewShotExampleIds: null,
         retryCount: 0,
         status: 'processing',
         rawOcrText: null,
@@ -725,11 +846,16 @@ export async function runOrchestrationPipeline(
     );
   } catch (err) {
     console.error(`Orchestration pipeline execution error for ${invoiceId}:`, err);
-    await supabase.from('invoices').update({
+    // Raw detail stays in the log; the user sees a Hebrew message (and only if this run still owns the row)
+    let query = supabase.from('invoices').update({
       status: 'error',
-      error_message: err instanceof Error ? err.message : String(err),
+      error_message: toUserErrorMessage(err),
+      processing_stage: null,
+      processing_progress: null,
       updated_at: new Date().toISOString(),
     }).eq('id', invoiceId);
+    if (runId) query = query.eq('processing_run_id', runId);
+    await query;
     throw err;
   }
 }

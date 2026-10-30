@@ -1,11 +1,19 @@
 'use client';
 
 import { useCallback, useState } from 'react';
-import { useDropzone } from 'react-dropzone';
+import { useDropzone, type FileRejection } from 'react-dropzone';
 import clsx from 'clsx';
 import { CloudUpload, FileText, CheckCircle2, XCircle, Loader2, FileImage } from 'lucide-react';
 import { uploadInvoices } from '@/lib/api';
 import { useToast } from '@/components/ui/Toast';
+import {
+  DROPZONE_ACCEPT,
+  MAX_UPLOAD_BYTES,
+  TOO_LARGE_MESSAGE,
+  UNSUPPORTED_TYPE_MESSAGE,
+  checkUploadDeclaration,
+  filesLabel,
+} from '@/shared/uploadValidation';
 
 interface FileState {
   file: File;
@@ -16,24 +24,42 @@ interface FileState {
 const formatSize = (bytes: number) =>
   bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(0)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
-export function UploadZone({ clientId }: { clientId: string }) {
+/** Hebrew reason for a file the dropzone refused (type / size). */
+function rejectionMessage(rejection: FileRejection): string {
+  const codes = rejection.errors.map((e) => e.code);
+  if (codes.includes('file-too-large')) return TOO_LARGE_MESSAGE;
+  if (codes.includes('file-invalid-type')) return UNSUPPORTED_TYPE_MESSAGE;
+  return 'לא ניתן להעלות את הקובץ';
+}
+
+export function UploadZone({ clientId, disabled = false }: { clientId: string; disabled?: boolean }) {
   const [files, setFiles] = useState<FileState[]>([]);
   const [uploading, setUploading] = useState(false);
   const [done, setDone] = useState(false);
   const { toast } = useToast();
 
-  const onDrop = useCallback((accepted: File[]) => {
+  // Rejected files are listed with their reason instead of disappearing silently
+  const onDrop = useCallback((accepted: File[], rejected: FileRejection[]) => {
     setDone(false);
     setFiles((prev) => [
       ...prev,
-      ...accepted.map((f) => ({ file: f, status: 'pending' as const })),
+      ...accepted.map((f): FileState => {
+        const check = checkUploadDeclaration({ fileName: f.name, mimeType: f.type, size: f.size });
+        return check.ok ? { file: f, status: 'pending' } : { file: f, status: 'error', error: check.error };
+      }),
+      ...rejected.map((r): FileState => ({ file: r.file, status: 'error', error: rejectionMessage(r) })),
     ]);
-  }, []);
+    if (rejected.length > 0) {
+      toast(rejected.length === 1 ? 'קובץ אחד לא נוסף' : `${rejected.length} קבצים לא נוספו`, 'error');
+    }
+  }, [toast]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: { 'application/pdf': ['.pdf'], 'image/*': ['.jpg', '.jpeg', '.png'] },
+    accept: DROPZONE_ACCEPT,
+    maxSize: MAX_UPLOAD_BYTES,
     multiple: true,
+    disabled,
   });
 
   const pendingFiles = files.filter((f) => f.status === 'pending');
@@ -57,7 +83,8 @@ export function UploadZone({ clientId }: { clientId: string }) {
               return { ...f, status: 'error', error: result.error || 'שגיאה בהעלאה' };
             }
           }
-          return { ...f, status: 'done' };
+          // No answer for this file: don't claim success
+          return { ...f, status: 'error', error: 'לא התקבלה תשובה עבור הקובץ - יש לבדוק במסך בדיקה ואישור' };
         })
       );
 
@@ -74,7 +101,7 @@ export function UploadZone({ clientId }: { clientId: string }) {
         toast('חלק מהקבצים נכשלו בהעלאה', 'info');
       }
     } catch (e: any) {
-      setFiles((prev) => prev.map((f) => f.status === 'uploading' ? { ...f, status: 'error', error: e.message } : f));
+      setFiles((prev) => prev.map((f) => f.status === 'uploading' ? { ...f, status: 'error', error: e?.message || 'העלאת הקובץ נכשלה' } : f));
       toast('שגיאה בתקשורת עם השרת', 'error');
     } finally {
       setUploading(false);
@@ -103,14 +130,14 @@ export function UploadZone({ clientId }: { clientId: string }) {
           {isDragActive ? 'שחרר כאן...' : 'גרור קבצים לכאן'}
         </p>
         <p className="text-sm text-slate-500 mt-1">או <span className="text-blue-600 font-medium">לחץ לבחירה</span></p>
-        <p className="text-xs text-slate-400 mt-3">PDF, JPG, PNG · עד 20MB לקובץ · מרובים בו-זמנית</p>
+        <p className="text-xs text-slate-400 mt-3">PDF, JPG, PNG, WEBP · עד 20MB לקובץ · מרובים בו-זמנית</p>
       </div>
 
       {/* File list */}
       {files.length > 0 && (
         <div className="card overflow-hidden">
           <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
-            <span className="text-sm font-medium text-slate-700">{files.length} קבצים</span>
+            <span className="text-sm font-medium text-slate-700">{filesLabel(files.length)}</span>
             {!uploading && files.some(f => f.status === 'pending') && (
               <button onClick={() => setFiles([])} className="text-xs text-slate-400 hover:text-slate-600">נקה הכל</button>
             )}
@@ -144,13 +171,13 @@ export function UploadZone({ clientId }: { clientId: string }) {
       {/* Upload button */}
       {pendingFiles.length > 0 && (
         <button
-          onClick={handleUpload} disabled={uploading}
+          onClick={handleUpload} disabled={uploading || disabled}
           className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-xl font-semibold text-sm transition-colors shadow-sm"
         >
           {uploading ? (
             <span className="flex items-center justify-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> מעלה...</span>
           ) : (
-            `העלה ${pendingFiles.length} קבצים לעיבוד AI`
+            `העלה ${filesLabel(pendingFiles.length)} לעיבוד AI`
           )}
         </button>
       )}
@@ -160,11 +187,13 @@ export function UploadZone({ clientId }: { clientId: string }) {
         <div className="flex items-center gap-3 p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800">
           <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
           <div>
-            <p className="font-semibold text-sm">ההעלאה הושלמה!</p>
+            <p className="font-semibold text-sm">
+              {files.some((f) => f.status === 'error') ? 'חלק מהקבצים הועלו' : 'ההעלאה הושלמה!'}
+            </p>
             <p className="text-xs mt-0.5">
-              החשבוניות נשלחות לניתוח AI. עבור ל
-              <a href="/review" className="underline mr-1">בדיקה ואישור</a>
-              כשהניתוח יסתיים תקבל התראה.
+              {'החשבוניות נשלחות לניתוח AI. עבור ל'}
+              <a href="/review" className="underline mx-1">בדיקה ואישור</a>
+              {' - כשהניתוח יסתיים תקבל התראה.'}
             </p>
           </div>
         </div>

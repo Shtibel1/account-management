@@ -9,6 +9,8 @@ import { useToast } from '@/components/ui/Toast';
 import { format } from 'date-fns';
 import { AlertTriangle, ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Loader2, Plug, X } from 'lucide-react';
 import { IntegrationExportDialog } from '@/components/Integrations/IntegrationExportDialog';
+import { processingLabel } from '@/components/Processing/ProcessingStatus';
+import { toUserErrorMessage } from '@/shared/processing';
 
 interface Props {
   invoices: Invoice[];
@@ -300,9 +302,15 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
                             {inv.return_reason}
                           </span>
                         )}
+                        {inv.status === 'processing' && (
+                          <span className="text-xs text-blue-600 font-normal max-w-[200px] truncate mt-0.5">
+                            {processingLabel(inv)}
+                          </span>
+                        )}
                         {inv.status === 'error' && inv.error_message && (
-                          <span className="text-xs text-red-500 font-normal max-w-[200px] truncate mt-0.5" title={inv.error_message}>
-                            {inv.error_message}
+                          <span className="text-xs text-red-500 font-normal max-w-[200px] truncate mt-0.5" title={toUserErrorMessage(inv.error_message)}>
+                            {/* older rows may still hold raw vendor errors: always show the Hebrew form */}
+                            {toUserErrorMessage(inv.error_message)}
                           </span>
                         )}
                       </div>
@@ -329,7 +337,8 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
                   </td>
                   <td className="p-4"><StatusBadge status={inv.status} /></td>
                   <td className="p-4">
-                    {(inv.status !== 'processing') && (
+                    {/* Also while processing: the review screen shows progress and lets the user wait or act */}
+                    {(
                       <Link
                         href={`/review/${inv.id}`}
                         className="flex items-center gap-1 text-blue-600 hover:text-blue-700 opacity-0 group-hover:opacity-100 transition-opacity text-xs font-medium"

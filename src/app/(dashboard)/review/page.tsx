@@ -8,6 +8,7 @@ import { useToast } from '@/components/ui/Toast';
 import { useFeatureFlag } from '@/components/FeatureFlags/useFeatureFlags';
 import { useSession } from '@/components/Auth/SessionContext';
 import { Loader2, RefreshCw } from 'lucide-react';
+import { useProcessingTicks } from '@/components/Processing/ProcessingStatus';
 
 const STATUS_LABELS: Record<string, string> = {
   review:   'לבדיקה',
@@ -86,6 +87,9 @@ export default function ReviewPage() {
 
     return () => { supabase.removeChannel(channel); };
   }, []);
+
+  // Keeps queued processing moving while invoices show as processing; reload when one finishes
+  useProcessingTicks(invoices, () => { void load(true); });
 
   useEffect(() => {
     invoices.forEach((inv) => {

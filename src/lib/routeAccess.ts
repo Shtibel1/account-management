@@ -17,7 +17,7 @@ const PUBLIC_PAGES = new Set(['/', '/order', '/privacy', '/login', '/signup']);
 const PUBLIC_PREFIXES = ['/auth'];
 
 /** API routes that authenticate on their own (or are intentionally public). */
-const PUBLIC_API = new Set(['/api/lead', '/api/ingest/email', '/api/ingest/whatsapp']);
+const PUBLIC_API = new Set(['/api/lead', '/api/ingest/email', '/api/ingest/whatsapp', '/api/invoices/worker']);
 
 /** Pages a signed-in user doesn't need (they're sent on to the dashboard). */
 export const AUTH_PAGES = new Set(['/login', '/signup']);

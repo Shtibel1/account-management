@@ -36,13 +36,44 @@ export type RangeValidation =
   | { ok: true; ranges: PageRange[] }
   | { ok: false; error: string };
 
-function readInt(obj: Record<string, unknown>, ...keys: string[]): number | null {
+type PageValue = { kind: 'missing' } | { kind: 'invalid' } | { kind: 'ok'; value: number };
+
+/** A page number field: missing, not a whole number (10.5, 'abc'), or a whole number. */
+function readPage(obj: Record<string, unknown>, ...keys: string[]): PageValue {
+  let present = false;
   for (const key of keys) {
     const v = obj[key];
-    if (typeof v === 'number' && Number.isInteger(v)) return v;
-    if (typeof v === 'string' && /^\d+$/.test(v.trim())) return parseInt(v.trim(), 10);
+    if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '')) continue;
+    present = true;
+    if (typeof v === 'number' && Number.isInteger(v)) return { kind: 'ok', value: v };
+    if (typeof v === 'string' && /^\d+$/.test(v.trim())) return { kind: 'ok', value: parseInt(v.trim(), 10) };
   }
-  return null;
+  return present ? { kind: 'invalid' } : { kind: 'missing' };
+}
+
+export const SINGLE_PAGE_SPLIT_ERROR = 'המסמך מכיל עמוד אחד בלבד (ייתכן שכבר פוצל) ולכן לא ניתן לפצל אותו';
+export const MAX_SPLIT_PARTS = 100;
+
+/**
+ * Shape check of a split request before the file is downloaded: an array of 2..MAX_SPLIT_PARTS
+ * objects whose start / end pages are whole numbers >= 1 with start <= end. Coverage of the real
+ * page count is checked afterwards by validateSplitRanges.
+ */
+export function checkSplitRequestShape(raw: unknown): { ok: true } | { ok: false; error: string } {
+  if (!Array.isArray(raw) || raw.length === 0) return { ok: false, error: 'לא התקבלו טווחי עמודים לפיצול' };
+  if (raw.length < 2) return { ok: false, error: 'נדרשים לפחות שני חלקים כדי לפצל את המסמך' };
+  if (raw.length > MAX_SPLIT_PARTS) return { ok: false, error: `ניתן לפצל לכל היותר ל-${MAX_SPLIT_PARTS} חלקים` };
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') return { ok: false, error: 'טווח עמודים לא תקין' };
+    const obj = item as Record<string, unknown>;
+    const start = readPage(obj, 'start_page', 'startPage');
+    const end = readPage(obj, 'end_page', 'endPage');
+    if (start.kind === 'missing' || end.kind === 'missing') return { ok: false, error: 'טווח עמודים חסר עמוד התחלה או סיום' };
+    if (start.kind === 'invalid' || end.kind === 'invalid') return { ok: false, error: 'מספר עמוד חייב להיות מספר שלם' };
+    if (start.value < 1 || end.value < 1) return { ok: false, error: 'מספרי עמודים מתחילים מ-1' };
+    if (start.value > end.value) return { ok: false, error: `עמוד התחלה (${start.value}) גדול מעמוד סיום (${end.value})` };
+  }
+  return { ok: true };
 }
 
 /**
@@ -57,6 +88,9 @@ export function validateSplitRanges(raw: unknown, pageCount: number): RangeValid
   if (!Array.isArray(raw) || raw.length === 0) {
     return { ok: false, error: 'לא התקבלו טווחי עמודים' };
   }
+  if (pageCount < 2 && raw.length > 1) {
+    return { ok: false, error: SINGLE_PAGE_SPLIT_ERROR };
+  }
 
   const ranges: PageRange[] = [];
   for (const item of raw) {
@@ -64,11 +98,16 @@ export function validateSplitRanges(raw: unknown, pageCount: number): RangeValid
       return { ok: false, error: 'טווח עמודים לא תקין' };
     }
     const obj = item as Record<string, unknown>;
-    const start = readInt(obj, 'start_page', 'startPage');
-    const end = readInt(obj, 'end_page', 'endPage');
-    if (start === null || end === null) {
+    const startValue = readPage(obj, 'start_page', 'startPage');
+    const endValue = readPage(obj, 'end_page', 'endPage');
+    if (startValue.kind === 'missing' || endValue.kind === 'missing') {
       return { ok: false, error: 'טווח עמודים חסר עמוד התחלה או סיום' };
     }
+    if (startValue.kind === 'invalid' || endValue.kind === 'invalid') {
+      return { ok: false, error: 'מספר עמוד חייב להיות מספר שלם' };
+    }
+    const start = startValue.value;
+    const end = endValue.value;
     if (start < 1 || end < 1 || start > pageCount || end > pageCount) {
       return { ok: false, error: `מספרי עמודים חייבים להיות בין 1 ל- ${pageCount}` };
     }
@@ -281,8 +320,8 @@ export function parseLlmSplitResult(
 
   const byStart = new Map<number, Record<string, unknown>>();
   for (const d of docs as Record<string, unknown>[]) {
-    const start = readInt(d, 'start_page', 'startPage');
-    if (start !== null) byStart.set(start, d);
+    const start = readPage(d, 'start_page', 'startPage');
+    if (start.kind === 'ok') byStart.set(start.value, d);
   }
 
   const documents: SplitDocument[] = validation.ranges.map((r) => {

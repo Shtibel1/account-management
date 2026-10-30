@@ -1,17 +1,18 @@
-import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
-import { runOrchestrationPipeline } from '@/agents/supervisor';
+import { after, NextResponse } from 'next/server';
 import { requireInvoiceAccess } from '@/lib/auth';
-import { isClientStorageFileUrl } from '@/lib/ingestHelpers';
-import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
+import { driveProcessing, enqueueProcessing } from '@/lib/processingQueue';
 
-const SUPPORTED_MIME = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/gif', 'image/tiff']);
+/** Background drive right after enqueueing; ticks are short, so this stays well under the limits. */
+const AFTER_BUDGET_MS = 20_000;
 
 /**
- * Runs the pipeline for an invoice the user may access. The file URL and the client (tenant) come
- * from the stored invoice row - body values are not trusted. `mimeType` from the body is only a
- * hint for the file type; `fileUrl` / `tenantId` in the body are ignored (kept for older clients)
- * and a tenantId that doesn't match the invoice's client is rejected.
+ * Queues (re)processing of an invoice the user may access and answers 202 at once. The pipeline
+ * never runs inside this request (Amplify cuts responses at ~28 s): it runs in short resumable ticks
+ * (src/lib/processingQueue.ts) driven by after(), the browser (/process/tick) and the scheduled worker.
+ *
+ * Body (all optional): `mimeType` - type hint; `reopen: true` - explicitly re-process an approved
+ * invoice (its reviewed values are kept). `fileUrl` / `tenantId` from older clients are ignored,
+ * except that a tenantId that doesn't match the invoice's client is rejected.
  */
 export async function POST(
   request: Request,
@@ -19,71 +20,37 @@ export async function POST(
 ) {
   const { id } = await params;
 
-  const access = await requireInvoiceAccess<{ id: string; client_id: string; file_url: string | null; file_name: string | null }>(
-    id,
-    'id, client_id, file_url, file_name'
-  );
+  const access = await requireInvoiceAccess(id);
   if (!access.ok) return access.response;
   const invoice = access.value.invoice;
 
+  const body = ((await request.json().catch(() => ({}))) ?? {}) as { mimeType?: unknown; tenantId?: unknown; reopen?: unknown };
+  if (typeof body !== 'object') {
+    return NextResponse.json({ error: 'בקשה לא תקינה' }, { status: 400 });
+  }
+  if (body.tenantId !== undefined && body.tenantId !== invoice.client_id) {
+    return NextResponse.json({ error: 'הלקוח שנשלח אינו תואם ללקוח של החשבונית' }, { status: 403 });
+  }
+
   try {
-    const body = ((await request.json().catch(() => ({}))) ?? {}) as { mimeType?: unknown; tenantId?: unknown };
-
-    if (body.tenantId !== undefined && body.tenantId !== invoice.client_id) {
-      return NextResponse.json({ error: 'tenantId does not match the invoice client' }, { status: 403 });
+    const queued = await enqueueProcessing(id, { mimeType: body.mimeType, reopen: body.reopen === true });
+    if (!queued.ok) {
+      return NextResponse.json({ error: queued.error }, { status: queued.httpStatus });
     }
 
-    const mimeType =
-      typeof body.mimeType === 'string' && SUPPORTED_MIME.has(body.mimeType)
-        ? body.mimeType
-        : (invoice.file_name ?? '').toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg';
+    // Best-effort head start; if the platform freezes the function after the response, the
+    // browser / scheduled worker ticks pick the job up from where it stopped.
+    after(async () => {
+      try {
+        await driveProcessing(id, AFTER_BUDGET_MS);
+      } catch (err) {
+        console.error(`[Process Route] Background tick failed for invoice ${id}:`, err);
+      }
+    });
 
-    if (!invoice.file_url) {
-      console.error(`[Process Route] ❌ Invoice ${id} has no stored file URL`);
-      await supabase.from('invoices').update({
-        status: 'error',
-        error_message: 'Invoice has no stored file to process',
-        updated_at: new Date().toISOString(),
-      }).eq('id', id);
-      return NextResponse.json({ error: 'Invoice has no stored file' }, { status: 400 });
-    }
-
-    // file_url is user-editable (PATCH / RLS): only fetch our own storage URLs for this client.
-    if (!isMockMode() && !isClientStorageFileUrl(invoice.file_url, invoice.client_id, process.env.SUPABASE_URL || supabaseUrl())) {
-      console.error(`[Process Route] Refusing to fetch untrusted file URL for invoice ${id}`);
-      // Mark it, or the review queue would show the invoice as processing forever (the browser
-      // fires this request without waiting for the answer).
-      await supabase.from('invoices').update({
-        status: 'error',
-        error_message: 'קובץ החשבונית אינו קובץ אחסון של הלקוח - יש להעלות אותו מחדש',
-        updated_at: new Date().toISOString(),
-      }).eq('id', id);
-      return NextResponse.json({ error: 'Invoice file URL is not a storage file of this client' }, { status: 400 });
-    }
-
-    console.log(`[Process Route] 🚀 Starting synchronous pipeline execution for invoice ${id}`);
-
-    // Await the pipeline run to completion (or pause at manual review)
-    await runOrchestrationPipeline(id, invoice.file_url, mimeType, invoice.client_id);
-
-    console.log(`[Process Route] ✅ Synchronous pipeline finished/paused for invoice ${id}`);
-    return NextResponse.json({ success: true, status: 'completed' });
+    return NextResponse.json({ success: true, status: 'queued', runId: queued.runId }, { status: 202 });
   } catch (err) {
-    console.error(`[Process Route] ❌ Pipeline execution failed for invoice ${id}:`, err);
-
-    try {
-      await supabase.from('invoices').update({
-        status: 'error',
-        error_message: err instanceof Error ? err.message : String(err),
-        updated_at: new Date().toISOString(),
-      }).eq('id', id);
-    } catch (dbErr) {
-      console.error(`[Process Route] ❌ Failed to update database status to error for invoice ${id}:`, dbErr);
-    }
-
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    console.error(`[Process Route] ❌ Could not queue invoice ${id}:`, err);
+    return NextResponse.json({ error: 'לא ניתן היה להתחיל את העיבוד. יש לנסות שוב' }, { status: 500 });
   }
 }
