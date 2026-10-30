@@ -119,6 +119,13 @@ export interface HttpRequestOptions {
   idempotent?: boolean;
   /** Overrides the context's invoice id for this call's log row. */
   invoiceId?: string | null;
+  /**
+   * Vendors that report errors inside an HTTP 200 body (iCount `{ status: false, reason }`, SUMIT
+   * `{ Status: 1|2, UserErrorMessage }`) return the error here, so the integration_logs row is
+   * recorded with outcome 'error' + error_code / error_message instead of 'ok' (QA N10). Called only
+   * for a 2xx response; must not throw. The response is still returned to the plugin unchanged.
+   */
+  bodyError?: (response: { status: number; body: unknown; text: string }) => { code: string; message: string } | null;
 }
 
 export interface HttpResponse<T = unknown> {

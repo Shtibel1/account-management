@@ -40,7 +40,18 @@ interface IcountEnvelope {
   [key: string]: unknown;
 }
 
+/** Hebrew text per iCount `reason`. The vendor's own (English) text stays in integration_logs only. */
 const REASON_MESSAGES: Record<string, string> = {
+  token_not_found: 'טוקן ה-API של iCount שגוי או שבוטל. צרו טוקן חדש ב-iCount ושמרו אותו בהגדרות החיבור',
+  bad_token: 'טוקן ה-API של iCount שגוי. בדקו את הטוקן בהגדרות החיבור',
+  invalid_token: 'טוקן ה-API של iCount שגוי. בדקו את הטוקן בהגדרות החיבור',
+  token_expired: 'פג תוקף טוקן ה-API של iCount. צרו טוקן חדש ושמרו אותו בהגדרות החיבור',
+  bad_cid: 'מזהה החברה ב-iCount שגוי',
+  bad_sid: 'החיבור ל-iCount פג. נסו שוב',
+  invalid_sid: 'החיבור ל-iCount פג. נסו שוב',
+  session_expired: 'החיבור ל-iCount פג. נסו שוב',
+  sid_expired: 'החיבור ל-iCount פג. נסו שוב',
+  no_sid: 'נדרשת הזדהות ל-iCount. בדקו את פרטי ההתחברות',
   bad_login: 'פרטי ההתחברות ל-iCount שגויים',
   bad_auth: 'ההרשאה ל-iCount נדחתה. בדקו את הטוקן',
   auth_required: 'נדרשת הזדהות ל-iCount. בדקו את הטוקן / פרטי ההתחברות',
@@ -52,10 +63,33 @@ const REASON_MESSAGES: Record<string, string> = {
   create_supplier_failed: 'iCount לא הצליח ליצור את הספק',
 };
 
-function describeError(method: string, reason: string, description: unknown): string {
+const HEBREW = /[֐-׿]/;
+
+/**
+ * User-facing Hebrew message for an iCount error (QA N18): no internal method name and no English
+ * vendor text. An unknown reason keeps its code (for support) and iCount's description only when
+ * that description is Hebrew; the full vendor answer is in the integration log row (bodyError).
+ */
+export function describeIcountError(reason: string, description: unknown): string {
   const known = REASON_MESSAGES[reason];
-  const desc = typeof description === 'string' && description.trim() ? description.trim().slice(0, 300) : '';
-  return `iCount ${method}: ${known ?? 'שגיאה'} (${reason})${desc ? ` - ${desc}` : ''}`;
+  if (known) return `iCount: ${known}`;
+  const desc = typeof description === 'string' ? description.trim().slice(0, 300) : '';
+  if (desc && HEBREW.test(desc)) return `iCount דחה את הבקשה: ${desc}`;
+  return `iCount דחה את הבקשה (קוד ${reason}). הפרטים המלאים ביומן האינטגרציות.`;
+}
+
+/** For ctx.http: an iCount { status: false } body (HTTP 200) is an error row in integration_logs (QA N10). */
+export function icountBodyError(response: { body: unknown; text: string }): { code: string; message: string } | null {
+  let body = response.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(response.text); } catch { return null; }
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const env = body as IcountEnvelope;
+  if (env.status === true || !('status' in env)) return null;
+  const reason = typeof env.reason === 'string' && env.reason ? env.reason : 'unknown_error';
+  const desc = typeof env.error_description === 'string' ? env.error_description.trim().slice(0, 500) : '';
+  return { code: reason, message: desc ? `${reason}: ${desc}` : reason };
 }
 
 /** Parses an iCount response; throws IcountApiError on HTTP errors and { status: false }. */
@@ -67,12 +101,18 @@ export function parseIcountResponse<T extends object>(method: string, res: HttpR
   const env = body && typeof body === 'object' && !Array.isArray(body) ? (body as IcountEnvelope) : null;
   if (!res.ok) {
     const reason = env && typeof env.reason === 'string' ? env.reason : `http_${res.status}`;
-    throw new IcountApiError(`iCount ${method}: HTTP ${res.status}${env?.reason ? ` (${String(env.reason)})` : ''}`, reason, res.status);
+    const known = env && typeof env.reason === 'string' ? REASON_MESSAGES[env.reason] : undefined;
+    const text = known
+      ? `iCount: ${known}`
+      : res.status === 401 || res.status === 403
+        ? 'iCount: ההרשאה נדחתה. בדקו את הטוקן / פרטי ההתחברות בהגדרות החיבור'
+        : `iCount החזיר שגיאה (HTTP ${res.status}). נסו שוב מאוחר יותר`;
+    throw new IcountApiError(text, reason, res.status);
   }
-  if (!env) throw new IcountApiError(`iCount ${method}: תשובה לא צפויה מהשרת`, 'bad_response', res.status);
+  if (!env) throw new IcountApiError('iCount: תשובה לא צפויה מהשרת', 'bad_response', res.status);
   if (env.status !== true) {
     const reason = typeof env.reason === 'string' && env.reason ? env.reason : 'unknown_error';
-    throw new IcountApiError(describeError(method, reason, env.error_description), reason, res.status);
+    throw new IcountApiError(describeIcountError(reason, env.error_description), reason, res.status);
   }
   return env as T & IcountEnvelope;
 }
@@ -113,9 +153,10 @@ async function login(ctx: PluginContext<IcountConfig>): Promise<string> {
     url: `${ICOUNT_BASE_URL}/auth/login`,
     json: { cid, user, pass },
     idempotent: true, // opening a session has no side effects
+    bodyError: icountBodyError,
   });
   const out = parseIcountResponse<{ sid?: unknown }>('auth/login', res);
-  if (typeof out.sid !== 'string' || !out.sid) throw new IcountApiError('iCount auth/login: לא התקבל מזהה חיבור', 'bad_response');
+  if (typeof out.sid !== 'string' || !out.sid) throw new IcountApiError('iCount: לא התקבל מזהה חיבור מהשרת', 'bad_response');
   return out.sid;
 }
 
@@ -164,6 +205,7 @@ export async function icountCall<T extends object>(
       headers,
       json,
       idempotent: !options.write,
+      bodyError: icountBodyError,
     });
     return parseIcountResponse<T>(path, res);
   };

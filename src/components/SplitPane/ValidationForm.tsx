@@ -3,6 +3,7 @@
 import { Children, cloneElement, isValidElement, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ExtractedData, Invoice, AccountMapping, ConfidenceField, LineItem } from '@/shared/types';
+import { MOVEIN_INVOICE_NUMBER_WIDTH } from '@/shared/exportData';
 import { approveInvoice, deleteInvoice, reapplySupplierRules, rejectInvoice, reopenInvoice, retryInvoice } from '@/lib/api';
 import { allocationThreshold, isAllocationRequired } from '@/shared/allocation';
 import { isAllocationNumberAcceptable } from '@/shared/approvalValidation';
@@ -434,6 +435,9 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
       toast('החשבונית אושרה בהצלחה', 'success');
       if (approval?.autoApproveDisabled) {
         toast('האישור האוטומטי לספק זה כובה בעקבות התיקונים', 'info');
+      }
+      if (Array.isArray(approval?.warnings)) {
+        for (const w of approval.warnings as unknown[]) if (typeof w === 'string') toast(w, 'info');
       }
 
       if (changedRules.length > 0) {
@@ -869,6 +873,11 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
                   onBlur={() => onFieldFocus?.(null)}
                   disabled={isReadOnly}
                 />
+                {(data.invoice_number ?? '').trim().length > MOVEIN_INVOICE_NUMBER_WIDTH && (
+                  <p className="text-xs text-amber-700 mt-1">
+                    ארוך מ-{MOVEIN_INVOICE_NUMBER_WIDTH} תווים: ייצוא ל-Move-in ידלג על החשבונית (מערכות אחרות אינן מושפעות)
+                  </p>
+                )}
               </Field>
 
               <Field label="תאריך חשבונית" error={fieldError('invoice_date') || isDateEmpty} fieldKey="invoice_date" onFieldFocus={onFieldFocus} confidence={confidenceFor('invoice_date')}>

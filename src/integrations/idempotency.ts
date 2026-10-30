@@ -7,6 +7,9 @@ import { isExportableStatus } from '@/integrations/mapping';
  *   no record / skipped          -> export (after findExisting when the plugin has it)
  *   success                      -> skip "already_exported" (force does NOT override: a document
  *                                   already exists in the target; delete it there first)
+ *   success, FILE plugin,        -> "redownload": the invoice goes into the file again without a new
+ *     force or dry run              claim / record (a file has no target system where a duplicate
+ *                                   could be created; the user lost the download - QA N9)
  *   pending, recent              -> skip "in_progress" (another run is sending it right now)
  *   pending, stale               -> the earlier run died mid-request, it may or may not have been
  *                                   created: findExisting when available, else "blocked" unless
@@ -26,6 +29,7 @@ export type ExportDecision =
   | { action: 'skip'; reason: 'in_progress' }
   | { action: 'skip'; reason: 'not_approved' }
   | { action: 'blocked'; reason: 'uncertain_previous_attempt' }
+  | { action: 'redownload'; externalId: string | null }
   | { action: 'check_existing' }
   | { action: 'export' };
 
@@ -34,6 +38,9 @@ export interface DecideExportInput {
   record: Pick<InvoiceExportRecord, 'status' | 'external_id' | 'external_url' | 'updated_at' | 'outcome_uncertain'> | null;
   hasFindExisting: boolean;
   force?: boolean;
+  /** 'file' plugins (movein, excel) may rebuild the file of an exported invoice (force / dry run). */
+  pluginKind?: 'api' | 'file';
+  dryRun?: boolean;
   now?: number;
   pendingStaleMs?: number;
 }
@@ -44,6 +51,9 @@ export function decideExport(input: DecideExportInput): ExportDecision {
   const staleMs = input.pendingStaleMs ?? PENDING_STALE_MS;
 
   if (record?.status === 'success') {
+    if (input.pluginKind === 'file' && (input.force || input.dryRun) && isExportableStatus(input.invoiceStatus)) {
+      return { action: 'redownload', externalId: record.external_id };
+    }
     return { action: 'skip', reason: 'already_exported', externalId: record.external_id, url: record.external_url };
   }
   if (!isExportableStatus(input.invoiceStatus)) return { action: 'skip', reason: 'not_approved' };
@@ -73,6 +83,8 @@ export function decideAfterLookup(found: { externalId: string; url?: string } | 
 
 export const DECISION_MESSAGES: Record<string, string> = {
   already_exported: 'כבר יוצאה למערכת זו',
+  already_exported_file: 'כבר יוצאה לקובץ זה. להורדה חוזרת של הקובץ סמנו "ייצוא חוזר / הורדה חוזרת של הקובץ" (או הריצו הדמיה).',
+  redownload: 'כבר יוצאה בעבר - נכללה שוב בקובץ להורדה חוזרת (לא נרשם ייצוא חדש). אל תקלטו את אותה חשבונית פעמיים.',
   in_progress: 'ייצוא של החשבונית כבר מתבצע',
   not_approved: 'החשבונית אינה מאושרת',
   uncertain_previous_attempt: 'ניסיון ייצוא קודם לא הסתיים בוודאות וייתכן שהמסמך כבר נוצר. בדקו במערכת היעד ונסו שוב עם "ייצוא חוזר בכל זאת".',

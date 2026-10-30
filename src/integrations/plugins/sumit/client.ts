@@ -68,13 +68,48 @@ function clip(text: string, max = 500): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+const HEBREW = /[֐-׿]/;
+const CREDENTIALS_ERROR = /credential|companyid|apikey|api key|unauthori[sz]ed|authenticat/i;
+
+/**
+ * Hebrew user message for a SUMIT error envelope (QA N18). SUMIT's UserErrorMessage is shown only
+ * when it is Hebrew; English vendor text (e.g. "Invalid Credentials (CompanyID/APIKey are
+ * incorrect)") is mapped or replaced, and stays in full in the integration log (sumitBodyError).
+ */
+export function sumitUserMessage(kind: 'business' | 'technical', userMessage: string | null): string {
+  if (userMessage && CREDENTIALS_ERROR.test(userMessage)) {
+    return 'SUMIT: פרטי ההתחברות שגויים - בדקו את מזהה החברה ומפתח ה-API בהגדרות החיבור';
+  }
+  const hebrew = userMessage && HEBREW.test(userMessage) ? userMessage : null;
+  if (kind === 'business') {
+    return hebrew ? `SUMIT דחה את הבקשה: ${hebrew}` : 'SUMIT דחה את הבקשה. הפרטים המלאים ביומן האינטגרציות.';
+  }
+  return hebrew ? `שגיאה טכנית ב-SUMIT: ${hebrew}` : 'שגיאה טכנית ב-SUMIT. נסו שוב מאוחר יותר; הפרטים ביומן האינטגרציות.';
+}
+
+/** For ctx.http: a SUMIT envelope with Status 1 / 2 (HTTP 200) is an error row in integration_logs (QA N10). */
+export function sumitBodyError(response: { body: unknown; text: string }): { code: string; message: string } | null {
+  let body = response.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(response.text); } catch { return null; }
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const env = body as SumitEnvelope<unknown>;
+  const status = sumitStatusOf(env.Status);
+  if (status !== 'business_error' && status !== 'technical_error') return null;
+  const parts = [env.UserErrorMessage, env.TechnicalErrorDetails]
+    .filter((v): v is string => typeof v === 'string' && v.trim() !== '')
+    .map((v) => v.trim());
+  return { code: status, message: clip(parts.join(' | ') || status, 1000) };
+}
+
 /**
  * Parses a SUMIT response (the spec also allows text/plain, so a string body is JSON-parsed here).
  * Returns Data on Success, throws SumitApiError otherwise.
  */
 export function parseSumitResponse<T>(res: HttpResponse<unknown>): T {
   if (!res.ok) {
-    if (res.status === 401 || res.status === 403) throw new SumitApiError(`SUMIT דחה את הבקשה (HTTP ${res.status})`, 'http', res.status);
+    if (res.status === 401 || res.status === 403) throw new SumitApiError(`SUMIT: ההרשאה נדחתה (HTTP ${res.status}) - בדקו את מזהה החברה ומפתח ה-API בהגדרות החיבור`, 'http', res.status);
     throw new SumitApiError(`SUMIT החזיר HTTP ${res.status}`, 'http', res.status);
   }
   let body: unknown = res.body;
@@ -93,11 +128,11 @@ export function parseSumitResponse<T>(res: HttpResponse<unknown>): T {
     ? clip(env.UserErrorMessage.trim())
     : null;
   if (status === 'business_error') {
-    throw new SumitApiError(`SUMIT דחה את הבקשה: ${userMessage ?? 'שגיאה עסקית'}`, 'business', res.status);
+    throw new SumitApiError(sumitUserMessage('business', userMessage), 'business', res.status);
   }
   if (status === 'technical_error') {
     // TechnicalErrorDetails stays in the (redacted) response log only, not in the user message.
-    throw new SumitApiError(`שגיאה טכנית ב-SUMIT${userMessage ? `: ${userMessage}` : ''}`, 'technical', res.status);
+    throw new SumitApiError(sumitUserMessage('technical', userMessage), 'technical', res.status);
   }
   throw new SumitApiError('תשובה לא צפויה מ-SUMIT', 'invalid_response', res.status);
 }
@@ -119,6 +154,7 @@ function call(
     url: `${SUMIT_BASE_URL}${path}`,
     headers: { 'Content-Language': 'he' },
     json: { Credentials: sumitCredentials(ctx.config), ...body },
+    bodyError: sumitBodyError,
     // Read-only calls (list / getvatrate) are safe to repeat; addexpense is not (no idempotency key).
     idempotent: options.idempotent,
     timeoutMs: options.timeoutMs,

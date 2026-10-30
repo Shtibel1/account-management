@@ -10,6 +10,7 @@ import { dbErrorResponse, readJsonObject } from '@/lib/invoiceTransitions';
 import { APPROVABLE_STATUSES, transitionRefusedMessage } from '@/shared/invoiceStatus';
 import { validateApproval } from '@/shared/approvalValidation';
 import { pruneFieldConfidence } from '@/shared/confidence';
+import { exportCompatibilityWarnings } from '@/shared/exportData';
 
 interface ApproveInvoiceRow extends Record<string, unknown> {
   id: string;
@@ -91,6 +92,9 @@ export async function POST(
       message: 'החשבונית אושרה',
       corrections: corrections.length,
       autoApproveDisabled,
+      // Valid for the books, but a specific export format will refuse it (e.g. an invoice number
+      // longer than Move-in's 9-character reference): told now, not only at export time (QA N13).
+      warnings: exportCompatibilityWarnings(finalData),
     });
   } catch (err) {
     console.error(`Error approving invoice ${id}:`, err);

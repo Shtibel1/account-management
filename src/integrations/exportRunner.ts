@@ -13,6 +13,7 @@ import { writeMayHaveBeenProcessed } from '@/integrations/retry';
 import { decideAfterLookup, decideExport, DECISION_MESSAGES } from '@/integrations/idempotency';
 import { resolveInvoiceMapping, toExportInvoice } from '@/integrations/mapping';
 import { redactDeep, scrubString, type RedactionOptions } from '@/integrations/redact';
+import { exportDataProblems } from '@/shared/exportData';
 
 /**
  * One export run: a set of invoices of ONE client (already access-checked by the route) to one plugin.
@@ -130,6 +131,8 @@ export async function runExport(input: RunExportInput): Promise<RunExportResult>
 
   const hasFindExisting = plugin.kind === 'api' && typeof plugin.findExisting === 'function';
   const toExport: { p: Prepared; ei: ExportInvoice; mapping: InvoiceMapping; checkExisting: boolean }[] = [];
+  /** File plugins: already exported invoices rebuilt into the file again (force / dry run, QA N9). */
+  const redownload: { p: Prepared; ei: ExportInvoice; mapping: InvoiceMapping; externalId: string | null }[] = [];
 
   // 1. Decide per invoice.
   for (const p of prepared) {
@@ -138,6 +141,8 @@ export async function runExport(input: RunExportInput): Promise<RunExportResult>
       record: p.record,
       hasFindExisting,
       force: input.force,
+      pluginKind: plugin.kind,
+      dryRun,
       now: now(),
     });
 
@@ -146,7 +151,9 @@ export async function runExport(input: RunExportInput): Promise<RunExportResult>
         invoiceId: p.invoice.id,
         status: decision.action === 'skip' ? 'skipped' : 'blocked',
         reason: decision.reason,
-        message: DECISION_MESSAGES[decision.reason],
+        message: plugin.kind === 'file' && decision.reason === 'already_exported'
+          ? DECISION_MESSAGES.already_exported_file
+          : DECISION_MESSAGES[decision.reason],
         ...(decision.action === 'skip' && decision.reason === 'already_exported'
           ? { externalId: decision.externalId, url: decision.url }
           : {}),
@@ -171,6 +178,20 @@ export async function runExport(input: RunExportInput): Promise<RunExportResult>
       results.push({ invoiceId: p.invoice.id, status: 'failed', reason: 'no_data', message: 'אין נתונים לחשבונית' });
       continue;
     }
+    // Stored data that can't be exported (QA #12: e.g. total "abc" / date "31/02/2026" approved
+    // before approval validation existed) fails THIS invoice only, never the whole run.
+    const dataProblems = exportDataProblems(p.exportInvoice.data);
+    if (dataProblems.length > 0) {
+      const message = `נתוני החשבונית אינם תקינים: ${dataProblems.join(', ')}. פתחו אותה מחדש לבדיקה, תקנו ואשרו שוב.`;
+      results.push({ invoiceId: p.invoice.id, status: 'failed', reason: 'invalid_data', message });
+      if (!dryRun) {
+        await ctx.logger.record({
+          operation: 'export_validation', outcome: 'error', invoiceId: p.invoice.id,
+          errorCode: 'invalid_data', errorMessage: dataProblems.join(', '),
+        });
+      }
+      continue;
+    }
     const mapping = resolveInvoiceMapping(p.exportInvoice, input.accountMappings, input.vatAccount);
     const problems = [...mapping.missing, ...(plugin.validateInvoice?.(p.exportInvoice, mapping) ?? [])];
     if (problems.length > 0) {
@@ -183,15 +204,25 @@ export async function runExport(input: RunExportInput): Promise<RunExportResult>
       }
       continue;
     }
+    if (decision.action === 'redownload') {
+      redownload.push({ p, ei: p.exportInvoice, mapping, externalId: decision.externalId });
+      continue;
+    }
     toExport.push({ p, ei: p.exportInvoice, mapping, checkExisting: decision.action === 'check_existing' });
   }
 
   // 2a. Dry run: build what would be sent, touch nothing.
   if (dryRun) {
     let file: RunExportResult['file'];
-    if (plugin.kind === 'file' && toExport.length > 0) {
-      const out = plugin.buildFile(ctx, toExport.map((t) => ({ invoice: t.ei, mapping: t.mapping })));
+    if (plugin.kind === 'file' && toExport.length + redownload.length > 0) {
+      const out = plugin.buildFile(ctx, [...toExport, ...redownload].map((t) => ({ invoice: t.ei, mapping: t.mapping })));
       file = { fileName: out.fileName, contentType: out.contentType, base64: out.body.toString('base64') };
+    }
+    for (const r of redownload) {
+      results.push({
+        invoiceId: r.ei.id, status: 'dry_run', reason: 'redownload', message: DECISION_MESSAGES.redownload,
+        externalId: r.externalId,
+      });
     }
     for (const t of toExport) {
       const payload = plugin.kind === 'api'
@@ -224,12 +255,18 @@ export async function runExport(input: RunExportInput): Promise<RunExportResult>
   let file: RunExportResult['file'];
 
   if (plugin.kind === 'file') {
-    if (claimed.length > 0) {
+    if (claimed.length + redownload.length > 0) {
       const started = now();
       try {
-        const out = plugin.buildFile(ctx, claimed.map((c) => ({ invoice: c.ei, mapping: c.mapping })));
+        const out = plugin.buildFile(ctx, [...claimed, ...redownload].map((c) => ({ invoice: c.ei, mapping: c.mapping })));
         file = { fileName: out.fileName, contentType: out.contentType, base64: out.body.toString('base64') };
         const written = new Set(out.invoiceIds);
+        // Rebuilt invoices: no claim, no record change (the earlier export stays the record).
+        for (const r of redownload) {
+          results.push(written.has(r.ei.id)
+            ? { invoiceId: r.ei.id, status: 'success', reason: 'redownload', externalId: r.externalId, message: DECISION_MESSAGES.redownload }
+            : { invoiceId: r.ei.id, status: 'failed', reason: 'not_in_file', message: 'לא נכללה בקובץ' });
+        }
         for (const c of claimed) {
           if (written.has(c.ei.id)) {
             const externalId = `${out.fileName}#${ctx.correlationId}`;
@@ -243,13 +280,16 @@ export async function runExport(input: RunExportInput): Promise<RunExportResult>
         }
         await ctx.logger.record({
           operation: 'export_file', outcome: 'ok', durationMs: now() - started,
-          details: { fileName: out.fileName, bytes: out.body.length, invoices: out.invoiceIds.length },
+          details: { fileName: out.fileName, bytes: out.body.length, invoices: out.invoiceIds.length, redownloaded: redownload.length },
         });
       } catch (err) {
         const message = errorText(err, redaction);
         for (const c of claimed) {
           await store.complete(c.record.id, { status: 'failed', last_error: message });
           results.push({ invoiceId: c.ei.id, status: 'failed', reason: 'error', message });
+        }
+        for (const r of redownload) {
+          results.push({ invoiceId: r.ei.id, status: 'failed', reason: 'error', message });
         }
         await ctx.logger.record({ operation: 'export_file', outcome: 'error', durationMs: now() - started, errorCode: 'build_failed', errorMessage: message });
       }
