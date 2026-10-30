@@ -152,3 +152,43 @@ export interface PipelineState {
   useVisionFallback: boolean;
 }
 
+
+// ── Bank / credit-card statement matching ─────────────────────────────
+
+export type BankMatchStatus = 'unmatched' | 'auto' | 'manual' | 'ignored';
+
+export interface BankTransaction {
+  id: string;
+  client_id: string;
+  account_label: string;
+  txn_date: string;                  // YYYY-MM-DD
+  description: string;
+  amount: number;                    // negative = debit (money out)
+  reference: string | null;
+  matched_invoice_id: string | null;
+  match_status: BankMatchStatus;
+  rejected_invoice_ids?: string[] | null;
+  dedupe_key: string;
+  import_batch_id: string;
+  source_file?: string | null;
+  created_at: string;
+}
+
+/** One statement line after column mapping + normalization, before it is stored. */
+export interface NormalizedBankRow {
+  txn_date: string;                  // YYYY-MM-DD
+  description: string;
+  amount: number;                    // negative = debit
+  reference: string | null;
+}
+
+/** The invoice fields bank matching needs (from validated_data, falling back to extracted_data). */
+export interface MatchableInvoice {
+  id: string;
+  file_name: string;
+  status: InvoiceStatus;
+  supplier_name: string | null;
+  invoice_number: string | null;
+  invoice_date: string | null;       // YYYY-MM-DD
+  total_amount: number | null;
+}

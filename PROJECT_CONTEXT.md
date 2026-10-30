@@ -52,6 +52,15 @@ The processing pipeline is defined in [supervisor/index.ts](file:///c:/Users/nad
 
 ---
 
+## 🏦 Bank Statement Matching (`/bank`)
+
+Bank / credit-card statements are matched against approved invoices; unmatched debits form the "missing invoices" list the accountant sends to the client.
+- **Import:** the browser reads CSV/XLS/XLSX (`src/lib/bankStatementFile.ts`), the user confirms the column mapping, and pure helpers in `src/shared/bankStatement.ts` normalize dates (dd/mm/yyyy, yyyy-mm-dd, Excel serials) and amounts ('1,234.56', '(123)', '123-'). Rows are stored in `bank_transactions` (negative amount = debit); `bankDedupeKeys()` + a unique index make re-imports idempotent.
+- **Matching:** `autoMatch()` in `src/shared/bankMatch.ts` pairs debits with approved/exported invoices of the same client (total within 0.5 ILS, charge date between invoice date -7 and +90 days, ranked by supplier-name tokens in the description, then date). Ties are left unmatched with candidates; an invoice is never matched twice (also enforced by a partial unique index).
+- **Persistence:** `src/lib/bankTransactions.ts` (repository; works with the mock DB) behind `/api/bank`, `/api/bank/import`, `/api/bank/match`, `/api/bank/transactions/[id]`. Migration: `supabase/migrations/20261030136000_bank_transactions.sql`.
+
+---
+
 ## 🛠️ Formatting & Hebrew Encoding Rules (Critical)
 Older Israeli ERP systems (such as Move-in) require single-byte Windows-1255 encoding and **Visual Hebrew** (where letters are written backwards but numbers and English stay LTR).
 - When formatting text for export file generation:

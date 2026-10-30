@@ -44,8 +44,9 @@ Each agent lives in `src/agents/<name>/` with its prompt/spec in `agent.md` and 
 | `/upload` | Bulk upload invoices per client |
 | `/review`, `/review/[id]` | Review queue and side-by-side validation |
 | `/mappings` | Supplier / category → account-code mappings |
+| `/bank` | Bank / credit-card statement import, invoice matching and the "missing invoices" list |
 
-API routes under `src/app/api/`: `invoices` (upload, upload-url, process, split, approve), `suppliers/search-vat`, `export`, `lead`.
+API routes under `src/app/api/`: `invoices` (upload, upload-url, process, split, approve), `suppliers/search-vat`, `export`, `lead`, `bank` (overview, import, match, transactions/[id]).
 
 ## Local setup
 
