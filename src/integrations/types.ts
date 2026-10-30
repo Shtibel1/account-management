@@ -178,7 +178,21 @@ export interface IntegrationLogger {
   }): Promise<void>;
 }
 
+/** The stored invoice document (PDF / image), read server-side from our own storage. */
+export interface InvoiceFile {
+  bytes: Uint8Array;
+  contentType: 'application/pdf' | 'image/jpeg' | 'image/png';
+  fileName: string;
+}
+
+export interface InvoiceFileReader {
+  /** The invoice's stored file, or null when it cannot be read (missing, foreign URL, unknown type). */
+  read(invoice: ExportInvoice): Promise<InvoiceFile | null>;
+}
+
 export interface PluginContext<C = Record<string, unknown>> {
+  /** Access to the invoice's stored file (plugins with attachPdf). Absent in dry runs / tests without it. */
+  files?: InvoiceFileReader;
   pluginId: string;
   clientId: string;
   orgId: string | null;
