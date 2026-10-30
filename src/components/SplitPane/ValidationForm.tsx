@@ -6,7 +6,7 @@ import { ExtractedData, Invoice, AccountMapping, ConfidenceField, LineItem } fro
 import { approveInvoice, deleteInvoice, reapplySupplierRules, rejectInvoice, reopenInvoice, retryInvoice } from '@/lib/api';
 import { allocationThreshold, isAllocationRequired } from '@/shared/allocation';
 import { isAllocationNumberAcceptable } from '@/shared/approvalValidation';
-import { APPROVABLE_STATUSES, REOPENABLE_STATUSES } from '@/shared/invoiceStatus';
+import { APPROVABLE_STATUSES, REJECTABLE_STATUSES, REOPENABLE_STATUSES } from '@/shared/invoiceStatus';
 import { findSupplierRule, isGenericSupplierName, normalizeVatId, VARIOUS_SUPPLIERS_ACCOUNT } from '@/shared/supplierRules';
 import { accountCodeError, mappingDbErrorMessage } from '@/shared/mappingValidation';
 import { VAT_RATE_WARNING_PREFIX, vatRateWarning } from '@/shared/vatRate';
@@ -469,8 +469,12 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
   const isRejected = invoice.status === 'rejected';
   const isError = invoice.status === 'error';
   const isReturned = invoice.status === 'returned';
-  const isReadOnly = isApproved || isRejected || isError || isReturned || invoice.status === 'exported';
+  // While the pipeline runs it overwrites the fields, and the server refuses reject / split (409):
+  // the form is read-only and offers no actions until the run ends (QA round 2, N23).
+  const isProcessing = invoice.status === 'processing';
+  const isReadOnly = isApproved || isRejected || isError || isReturned || isProcessing || invoice.status === 'exported';
   const canApprove = APPROVABLE_STATUSES.includes(invoice.status);
+  const canReject = REJECTABLE_STATUSES.includes(invoice.status);
 
   // Failed document ('error'): process again, mark as not approved, or delete.
   const handleRetry = async () => {
@@ -1064,6 +1068,11 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
         
         {isReadOnly ? (
           <div className="w-full flex items-center justify-center p-3.5 rounded-xl border text-sm font-semibold">
+            {isProcessing && (
+              <span className="text-blue-700 bg-blue-50 border-blue-200 flex items-center gap-2 px-3 py-1 rounded-full border">
+                <RotateCcw className="h-4 w-4 shrink-0" /> החשבונית בעיבוד - אפשר לערוך, לאשר או לפצל אותה כשהעיבוד יסתיים
+              </span>
+            )}
             {isApproved && (
               <span className="text-emerald-700 bg-emerald-50 border-emerald-200 flex items-center gap-2 px-3 py-1 rounded-full border">
                 <CheckCircle className="h-4 w-4" /> חשבונית זו אושרה
@@ -1151,7 +1160,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
             )}
             <button
               onClick={handleReject}
-              disabled={saving || rejecting}
+              disabled={saving || rejecting || !canReject}
               className="flex-1 py-3 bg-white border border-rose-200 hover:bg-rose-50 text-rose-700 font-semibold text-sm rounded-xl transition-colors disabled:opacity-60 flex items-center justify-center gap-2 shadow-sm"
             >
               {rejecting ? 'פוסל...' : 'לא מאושר'}

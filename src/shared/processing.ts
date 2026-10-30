@@ -15,21 +15,38 @@ export type JobStage = 'ocr' | 'detect' | 'extract';
 export interface ProcessingProgress {
   pages_done: number;
   pages_total: number | null;
+  /** Extraction of a long document runs in parts (src/shared/extractionChunks.ts). */
+  parts_done?: number;
+  parts_total?: number;
 }
 
-/** A tick holds the job lock this long; a tick that dies frees the job when it expires. */
-export const JOB_LOCK_MS = 90_000;
-/** The LLM steps (boundary detection, extraction; possibly a long retry) hold the job longer, so no second tick repeats them. */
-export const EXTRACT_LOCK_MS = 5 * 60_000;
+/**
+ * A tick holds the job for this long. While its step runs it renews the lease every
+ * JOB_HEARTBEAT_MS, so a long LLM call keeps the job, and a tick that was killed (Amplify cut the
+ * request / froze the compute) frees it within this time instead of minutes later (QA round 2, N5).
+ */
+export const JOB_LEASE_MS = 45_000;
+export const JOB_HEARTBEAT_MS = 10_000;
+/** The heartbeat renews a step's lease for at most this long (a hung call must not hold the job forever). */
+export const MAX_STEP_MS = 5 * 60_000;
 /** Time budget of one tick for OCR batches (well under the ~28 s Amplify response limit). */
 export const TICK_OCR_BUDGET_MS = 14_000;
+/** An extraction tick goes on to validation + save (no LLM) only if its LLM call ended within this. */
+export const TICK_FINALIZE_BUDGET_MS = 15_000;
+/**
+ * /process/tick answers by then even if its step still runs (202 + state 'busy'; the step goes on
+ * in the background under its lease), so the browser never gets a bare 504 (N14 / N22).
+ */
+export const TICK_RESPONSE_MS = 20_000;
+/** A run claimed this recently whose job row isn't written yet is still starting (N11). */
+export const ENQUEUE_GRACE_MS = 60_000;
 /** Pages sent to Google Vision in one files:annotate call (Vision's own maximum is 5). */
 export const OCR_PAGES_PER_REQUEST = 5;
 /** OCR requests run in parallel within a tick. */
 export const OCR_PARALLEL_REQUESTS = 2;
-/** A stage claimed this many times without finishing fails the run (killed / timed-out ticks). */
+/** A stage claimed this many times without progress fails the run (killed / timed-out ticks). */
 export const MAX_STAGE_ATTEMPTS = 3;
-/** No job activity for this long while 'processing' → the run is stuck. */
+/** No job activity for this long while 'processing' and nothing queued → the run is stuck. */
 export const STALE_PROCESSING_MS = 10 * 60_000;
 /** A run older than this is stuck even if it keeps heart-beating. */
 export const MAX_RUN_MS = 45 * 60_000;
@@ -47,6 +64,9 @@ export function describeProgress(stage: string | null | undefined, progress: Pro
   const label = (stage && STAGE_LABELS[stage as ProcessingStage]) || 'בעיבוד';
   if (progress && progress.pages_total && progress.pages_total > 1 && (stage === 'ocr' || stage === 'queued')) {
     return `${label} · ${Math.min(progress.pages_done, progress.pages_total)}/${progress.pages_total} עמודים`;
+  }
+  if (progress && stage === 'extract' && progress.parts_total && progress.parts_total > 1) {
+    return `${label} · חלק ${Math.min((progress.parts_done ?? 0) + 1, progress.parts_total)}/${progress.parts_total}`;
   }
   return label;
 }
@@ -119,6 +139,12 @@ function ts(value: string | null | undefined): number | null {
   if (!value) return null;
   const n = Date.parse(value);
   return Number.isFinite(n) ? n : null;
+}
+
+/** True when a run started more than MAX_RUN_MS ago (a run with queued work is otherwise resumed, not failed). */
+export function isRunTooOld(startedAt: string | null | undefined, now: number): boolean {
+  const started = ts(startedAt);
+  return started !== null && now - started > MAX_RUN_MS;
 }
 
 /** True when a 'processing' row has made no progress for STALE_PROCESSING_MS or ran past MAX_RUN_MS. */

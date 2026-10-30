@@ -215,7 +215,7 @@ export interface Invoice {
   processing_started_at?: string | null;
   processing_attempts?: number | null;
   processing_stage?: string | null;       // queued / ocr / detect / extract / splitting
-  processing_progress?: { pages_done: number; pages_total: number | null } | null;
+  processing_progress?: { pages_done: number; pages_total: number | null; parts_done?: number; parts_total?: number } | null;
   // Manual split lineage: the original multi-page file stays referenced by every part
   split_parent_id?: string | null;
   original_file_url?: string | null;

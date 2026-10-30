@@ -14,6 +14,8 @@ import { useFeatureFlags } from '@/components/FeatureFlags/useFeatureFlags';
 import { ReturnToClientDialog } from '@/components/ReviewLoop/ReturnToClientDialog';
 import { ReturnedNotice } from '@/components/ReviewLoop/ReturnedNotice';
 import { canReturnInvoice } from '@/shared/returns';
+import { SPLITTABLE_STATUSES } from '@/shared/invoiceStatus';
+import { splitStatusError } from '@/shared/processing';
 import { ProcessingBanner } from '@/components/Processing/ProcessingStatus';
 import { displayBboxes, fieldLabel } from '@/shared/reviewFields';
 import { useEscapeKey } from '@/components/ui/useEscapeKey';
@@ -189,7 +191,11 @@ export default function ReviewDetailPage() {
     ? usableSuggestion(invoice?.extracted_data?.split_suggestion, pageCount)
     : null;
 
+  // Split only from the statuses the server accepts (not while processing: N23)
+  const canSplit = !!invoice && SPLITTABLE_STATUSES.includes(invoice.status);
+
   const openSplitModal = () => {
+    if (!canSplit) return;
     // Pre-fill the custom ranges with the detected split unless the reviewer already typed ranges
     if (splitSuggestion && !customRanges.trim()) {
       setSplitMode('custom');
@@ -362,7 +368,9 @@ export default function ReviewDetailPage() {
             {pageCount && pageCount > 1 && (
               <button
                 onClick={openSplitModal}
-                className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg bg-blue-50 text-blue-600 border border-blue-200 hover:bg-blue-100 hover:text-blue-700 transition-colors font-semibold shadow-sm"
+                disabled={!canSplit}
+                title={canSplit ? undefined : splitStatusError(invoice.status) ?? undefined}
+                className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg bg-blue-50 text-blue-600 border border-blue-200 hover:bg-blue-100 hover:text-blue-700 transition-colors font-semibold shadow-sm disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-blue-50"
               >
                 <Scissors className="h-3.5 w-3.5" /> פיצול מסמך ({pageCount} עמודים)
               </button>
