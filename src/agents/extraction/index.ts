@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ExtractedData } from '@/shared/types';
+import { formatFewShotPrompt, type FewShotExample } from '@/shared/fewshot';
 
 const apiKey = process.env.ANTHROPIC_API_KEY;
 
@@ -110,11 +111,14 @@ export async function extractInvoiceData(
   fileUrl: string,
   mimeType: string,
   useVisionFallback = false,
-  withRetryHint = false
+  withRetryHint = false,
+  fewShot: { examples: FewShotExample[]; supplierVatId: string | null } = { examples: [], supplierVatId: null }
 ): Promise<{
   extractedData: ExtractedData;
   inputTokens: number;
   outputTokens: number;
+  /** Ids of the past invoices that were included as few-shot examples. */
+  fewShotInvoiceIds: string[];
 }> {
   const anthropic = getAnthropicClient();
   const content: Anthropic.MessageParam['content'] = [];
@@ -138,8 +142,16 @@ export async function extractInvoiceData(
     console.log(`[Extraction] Performing text-only extraction using raw OCR text`);
   }
 
+  // Per-supplier examples from human-reviewed invoices go before the invoice itself
+  const { text: fewShotText, usedInvoiceIds } = formatFewShotPrompt(fewShot.examples, fewShot.supplierVatId);
+  if (fewShotText) {
+    content.push({ type: 'text', text: fewShotText });
+  }
+
   // Construct text prompts
-  let promptText = `נתח את החשבונית וחלץ את הנתונים.`;
+  let promptText = fewShotText
+    ? `החשבונית הנוכחית — נתח אותה וחלץ את הנתונים.`
+    : `נתח את החשבונית וחלץ את הנתונים.`;
   if (rawOcrText) {
     promptText += `\n\nטקסט ה-OCR של החשבונית:\n\"\"\"\n${rawOcrText}\n\"\"\"`;
   }
@@ -202,5 +214,6 @@ export async function extractInvoiceData(
     extractedData,
     inputTokens: response.usage?.input_tokens ?? 0,
     outputTokens: response.usage?.output_tokens ?? 0,
+    fewShotInvoiceIds: usedInvoiceIds,
   };
 }

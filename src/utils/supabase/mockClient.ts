@@ -7,12 +7,21 @@ function generateId() {
   return Math.random().toString(36).substring(2, 10) + '-' + Math.random().toString(36).substring(2, 10);
 }
 
+// Resolves a column, including PostgREST JSON text paths like 'validated_data->>supplier_vat_id'
+function columnValue(item: any, col: string) {
+  const arrow = col.indexOf('->>');
+  if (arrow === -1) return item[col];
+  const value = item[col.slice(0, arrow)]?.[col.slice(arrow + 3)];
+  return value == null ? null : String(value);
+}
+
 export class MockQueryBuilder {
   private table: string;
   private filterChain: ((item: any) => boolean)[] = [];
   private orderCol: string | null = null;
   private orderAscending = true;
   private isSingle = false;
+  private limitCount: number | null = null;
   private isDelete = false;
   private updateData: any = null;
   private insertData: any = null;
@@ -27,7 +36,21 @@ export class MockQueryBuilder {
   }
 
   eq(col: string, val: any) {
-    this.filterChain.push((item: any) => item[col] === val);
+    this.filterChain.push((item: any) => columnValue(item, col) === val);
+    return this;
+  }
+
+  // Supports the forms the app uses: not(col, 'is', null) and not(col, 'eq', val)
+  not(col: string, op: string, val: any) {
+    this.filterChain.push((item: any) => {
+      const value = columnValue(item, col);
+      return op === 'is' && val === null ? value != null : value !== val;
+    });
+    return this;
+  }
+
+  limit(count: number) {
+    this.limitCount = count;
     return this;
   }
 
@@ -71,7 +94,7 @@ export class MockQueryBuilder {
 
     // Apply in filters
     for (const filter of this.checkInFilters) {
-      list = list.filter((item) => filter.vals.includes(item[filter.col]));
+      list = list.filter((item) => filter.vals.includes(columnValue(item, filter.col)));
     }
 
     // Apply eq filters
@@ -92,6 +115,11 @@ export class MockQueryBuilder {
         }
         return this.orderAscending ? (valA < valB ? -1 : 1) : (valA > valB ? -1 : 1);
       });
+    }
+
+    // Limit applies to reads only
+    if (this.limitCount !== null && !this.insertData && !this.updateData && !this.isDelete) {
+      list = list.slice(0, this.limitCount);
     }
 
     if (this.insertData) {

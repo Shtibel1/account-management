@@ -10,6 +10,7 @@ import {
   isAllocationRequired,
   normalizeAllocationNumber,
 } from '@/shared/allocation';
+import { isValidVatIdChecksum } from '@/shared/vatId';
 
 const REQUIRED_FIELDS: (keyof ExtractedData)[] = [
   'supplier_name',
@@ -73,23 +74,8 @@ function checkMath(data: ExtractedData): boolean {
 
 function checkVatId(vatId: string | null): boolean {
   if (!vatId) return true;
-  let digits = vatId.replace(/\D/g, '');
-  if (digits.length === 8) {
-    digits = '0' + digits;
-  }
-  if (digits.length !== 9) return false;
-
-  // Israeli Luhn checksum algorithm
-  let sum = 0;
-  for (let i = 0; i < 9; i++) {
-    let d = parseInt(digits[i]);
-    if (i % 2 === 1) {
-      d *= 2;
-      if (d > 9) d -= 9;
-    }
-    sum += d;
-  }
-  return sum % 10 === 0;
+  // Israeli Luhn checksum algorithm (shared with the few-shot supplier lookup)
+  return isValidVatIdChecksum(vatId);
 }
 
 // ─── Core Validation Entry Point ───────────────────────────────────────────────
