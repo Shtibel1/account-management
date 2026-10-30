@@ -110,6 +110,32 @@ export function vatIdQueryVariants(candidates: string[]): string[] {
   return [...variants];
 }
 
+/**
+ * The client's own VAT id is printed (as the buyer) on every invoice it receives, so it is a
+ * checksum-valid candidate too. If that id is a reviewed supplier at another client, a new supplier's
+ * invoice would get that other business's examples. A candidate that appears in the OCR text of the
+ * client's reviewed invoices from at least `minSuppliers` different other suppliers is treated as the
+ * client's own id (needs a little history; with less, nothing is excluded).
+ */
+export function findClientOwnVatIds(
+  candidates: string[],
+  clientRows: FewShotSourceInvoice[],
+  minSuppliers = 2
+): string[] {
+  const suppliersPerCandidate = new Map<string, Set<string>>();
+  for (const row of clientRows) {
+    const supplier = normalizeVatId(row?.validated_data?.supplier_vat_id ?? null);
+    if (!supplier || !row.ocr_text) continue;
+    for (const id of findVatIdCandidates(row.ocr_text, 100)) {
+      if (id === supplier || !candidates.includes(id)) continue;
+      const set = suppliersPerCandidate.get(id) ?? new Set<string>();
+      set.add(supplier);
+      suppliersPerCandidate.set(id, set);
+    }
+  }
+  return candidates.filter((c) => (suppliersPerCandidate.get(c)?.size ?? 0) >= minSuppliers);
+}
+
 function byReviewedAtDesc(a: FewShotSourceInvoice, b: FewShotSourceInvoice): number {
   return (b.reviewed_at ?? '').localeCompare(a.reviewed_at ?? '');
 }
@@ -281,6 +307,7 @@ export function formatFewShotPrompt(
     'השתמש בהן כדי להבין את מבנה המסמכים של הספק — היכן מופיע כל שדה ואיך לקרוא אותו.',
     'הערכים בדוגמאות שייכים לחשבוניות הקודמות בלבד: אל תעתיק מהן ערכים, חלץ את הנתונים רק מהחשבונית הנוכחית.',
     'שדות תחת previously_misread חולצו בעבר בטעות מהספק הזה — הקדש להם תשומת לב מיוחדת.',
+    'בדוגמאות הושמטו שדות ה-bbox; בחשבונית הנוכחית החזר אותם כרגיל.',
   ].join('\n');
 
   const parts: string[] = [];

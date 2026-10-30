@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   FEWSHOT_MAX_EXAMPLES,
   buildFewShotExamples,
+  findClientOwnVatIds,
   findVatIdCandidates,
   selectFewShotInvoices,
   vatIdQueryVariants,
@@ -9,6 +10,7 @@ import {
   type FewShotExample,
   type FewShotSourceInvoice,
 } from '@/shared/fewshot';
+import { normalizeVatId } from '@/shared/vatId';
 
 /** Rows fetched per query; a few spares cover rows the selection drops (empty OCR, duplicates). */
 const QUERY_LIMIT = 10;
@@ -56,6 +58,24 @@ async function fetchReviewedInvoices(
   return (data ?? []) as FewShotSourceInvoice[];
 }
 
+/** The client's latest reviewed invoices of any supplier (used to recognize the client's own VAT id). */
+async function fetchRecentClientInvoices(
+  db: SupabaseClient,
+  clientId: string,
+  currentInvoiceId: string
+): Promise<FewShotSourceInvoice[]> {
+  const { data, error } = await db
+    .from('invoices')
+    .select('id, client_id, reviewed_at, ocr_text, validated_data')
+    .eq('client_id', clientId)
+    .not('reviewed_at', 'is', null)
+    .not('ocr_text', 'is', null)
+    .order('reviewed_at', { ascending: false })
+    .limit(QUERY_LIMIT);
+  if (error) throw new Error(`client invoices query failed: ${error.message}`);
+  return ((data ?? []) as FewShotSourceInvoice[]).filter((r) => r.id !== currentInvoiceId);
+}
+
 async function lookup(
   db: SupabaseClient,
   invoiceId: string,
@@ -71,7 +91,14 @@ async function lookup(
   // Other clients' invoices of the same supplier only fill the gaps (sensitive fields stripped later)
   if (sameClientUsable < FEWSHOT_MAX_EXAMPLES) {
     try {
-      rows.push(...(await fetchReviewedInvoices(db, variants, null)));
+      // The client's own VAT id (printed as the buyer) must not pull in another business's examples
+      const ownIds = findClientOwnVatIds(candidates, await fetchRecentClientInvoices(db, tenantId, invoiceId));
+      const others = await fetchReviewedInvoices(db, variants, null);
+      rows.push(
+        ...others.filter(
+          (r) => r.client_id === tenantId || !ownIds.includes(normalizeVatId(r.validated_data?.supplier_vat_id ?? null) ?? '')
+        )
+      );
     } catch (err) {
       console.error('[FewShot] Cross-client example lookup failed, using same-client examples only:', err);
     }
