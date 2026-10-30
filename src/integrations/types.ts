@@ -190,9 +190,15 @@ export interface InvoiceFileReader {
   read(invoice: ExportInvoice): Promise<InvoiceFile | null>;
 }
 
+/** Loads an invoice's own file from Storage (server-side; only the client's own raw-invoices objects). Throws InvoiceFileError. */
+export interface InvoiceFileLoader {
+  load(invoice: ExportInvoice): Promise<InvoiceFile>;
+}
+
+/** Invoice file access given to plugins: `read` returns null on any failure, `load` throws a coded InvoiceFileError. */
+export type InvoiceFiles = InvoiceFileReader & InvoiceFileLoader;
+
 export interface PluginContext<C = Record<string, unknown>> {
-  /** Access to the invoice's stored file (plugins with attachPdf). Absent in dry runs / tests without it. */
-  files?: InvoiceFileReader;
   pluginId: string;
   clientId: string;
   orgId: string | null;
@@ -203,6 +209,8 @@ export interface PluginContext<C = Record<string, unknown>> {
   logger: IntegrationLogger;
   correlationId: string;
   dryRun: boolean;
+  /** Access to the invoice's stored file (plugins with attachPdf). Absent in dry runs / tests without it. */
+  files?: InvoiceFiles;
 }
 
 // ── Plugins ───────────────────────────────────────────────────────────────

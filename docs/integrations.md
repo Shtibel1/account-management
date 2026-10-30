@@ -17,6 +17,7 @@ UI `src/app/(dashboard)/integrations` ("חיבור להנהלת חשבונות")
 | `webhook` | api  | POSTs each invoice as JSON to an https URL of the office (own middleware, Make / Zapier, an import hook). Optional Bearer token and HMAC signature. Reference implementation of an API plugin. |
 | `morning` | api  | Morning / Green Invoice (חשבונית ירוקה): one expense per invoice (`POST /expenses`) + the stored PDF attached. See below. |
 | `icount`  | api  | iCount API v3: one expense (`expense/create`) per invoice, **draft by default**. See [iCount](#icount) below. |
+| `sumit`   | api  | SUMIT expense document (`/accounting/documents/addexpense/`) per invoice, PDF attached, **draft by default**, duplicate lookup via `documents/list`. No sandbox at SUMIT. Details, VAT / credit-note / allocation-number assumptions: `src/integrations/plugins/sumit/README.md`. |
 
 ### Morning (`src/integrations/plugins/morning/`)
 
@@ -89,7 +90,10 @@ expense category blocks the export with "קטגוריה: X").
 
 `ctx` gives the decrypted, schema-validated `config`, `environment`, `http` (below), `logger`
 (`info/warn/error` = redacted JSON console lines, `record()` = a non-HTTP row in `integration_logs`),
-`correlationId` and `dryRun`.
+`correlationId`, `dryRun` and `files` (`src/integrations/files.ts`: `files.load(invoice)` returns the invoice's own
+file - only an object of that client in the `raw-invoices` bucket, read with the Storage API, never `file_url` as a
+URL; PDF / JPEG / PNG by magic bytes, max 20 MB - for plugins with `attachPdf`; `load` throws a coded `InvoiceFileError`, `files.read(invoice)` is the same
+but returns null on any failure).
 
 ## iCount
 

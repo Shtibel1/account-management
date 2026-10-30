@@ -5,6 +5,7 @@ import { excelPlugin } from '@/integrations/plugins/excel';
 import { webhookPlugin } from '@/integrations/plugins/webhook';
 import { morningPlugin } from '@/integrations/plugins/morning';
 import { icountPlugin } from '@/integrations/plugins/icount';
+import { sumitPlugin } from '@/integrations/plugins/sumit';
 
 /**
  * Plugin registry. To add a plugin: create src/integrations/plugins/<id>/ and append it to
@@ -97,7 +98,7 @@ export function createRegistry(plugins: ExportPlugin[]): PluginRegistry {
   };
 }
 
-export const BUILTIN_PLUGINS: ExportPlugin[] = [moveinPlugin, excelPlugin, webhookPlugin, morningPlugin, icountPlugin];
+export const BUILTIN_PLUGINS: ExportPlugin[] = [moveinPlugin, excelPlugin, webhookPlugin, morningPlugin, icountPlugin, sumitPlugin];
 
 export const registry: PluginRegistry = createRegistry(BUILTIN_PLUGINS);
 

@@ -103,14 +103,26 @@ export function scrubString(text: string, secretValues: readonly string[] | unde
   return out;
 }
 
-/** Deep copy of `value` with secret keys and secret values redacted. Handles cycles. */
+/** Strings at least this long that are pure base64 (an attached file) are summarized, not logged. */
+export const LARGE_BASE64_MIN_CHARS = 1024;
+
+/** True for an attached-file style base64 string (no whitespace, base64 alphabet only, long). */
+export function isLargeBase64(text: string): boolean {
+  return text.length >= LARGE_BASE64_MIN_CHARS && /^[A-Za-z0-9+/]+={0,2}$/.test(text);
+}
+
+/** Deep copy of `value` with secret keys and secret values redacted, and attached files
+ * (long base64 strings) summarized as "[base64 N chars]". Handles cycles. */
 export function redactDeep(value: unknown, options: RedactionOptions = {}): unknown {
   const extraKeys = options.secretKeys ?? [];
   const values = usableSecretValues(options.secretValues);
   const seen = new WeakSet<object>();
 
   const walk = (v: unknown): unknown => {
-    if (typeof v === 'string') return values.length ? scrubString(v, values) : v;
+    if (typeof v === 'string') {
+      if (isLargeBase64(v)) return `[base64 ${v.length} chars]`;
+      return values.length ? scrubString(v, values) : v;
+    }
     if (v === null || typeof v !== 'object') return v;
     if (seen.has(v)) return '[Circular]';
     seen.add(v);
