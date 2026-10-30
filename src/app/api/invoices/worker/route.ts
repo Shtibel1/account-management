@@ -1,43 +1,25 @@
-import { after, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { safeEqual } from '@/lib/ingestHelpers';
-import { driveProcessing, dueJobIds, sweepStaleProcessing } from '@/lib/processingQueue';
+import { driveProcessing, dueJobs, sweepStaleProcessing } from '@/lib/processingQueue';
+import { runWorkerPass, workerConfig } from '@/lib/processingWorker';
 import { workerSecretCandidates, normalizeWorkerSecret } from '@/shared/workerAuth';
 
-/** Background work per call: each job's steps are bounded (one LLM call / ~14 s of OCR per tick). */
-const WORKER_DRIVE_BUDGET_MS = 15_000;
-/** Jobs driven in parallel per call (the next call, a minute later, takes the next ones). */
-const WORKER_MAX_JOBS = 4;
-
-async function runWorker(): Promise<void> {
-  const started = Date.now();
-  try {
-    const stuck = await sweepStaleProcessing(null);
-    const ids = await dueJobIds(WORKER_MAX_JOBS);
-    const left = Math.max(5_000, WORKER_DRIVE_BUDGET_MS - (Date.now() - started));
-    const results = await Promise.all(
-      ids.map((id) =>
-        driveProcessing(id, left).then(
-          (r) => ({ id, state: r.state }),
-          (err) => {
-            console.error(`[Processing Worker] Drive failed for invoice ${id}:`, err);
-            return { id, state: 'error' };
-          }
-        )
-      )
-    );
-    if (stuck.length > 0 || results.length > 0) {
-      console.log(`[Processing Worker] stuck=${stuck.length} driven=${JSON.stringify(results)} in ${Date.now() - started} ms`);
-    }
-  } catch (err) {
-    console.error('[Processing Worker] Run failed:', err);
-  }
-}
+export const dynamic = 'force-dynamic';
 
 /**
- * Scheduled processing worker (EventBridge Scheduler / API destination, or any cron, every minute):
- * marks stuck 'processing' invoices as error, then drives queued jobs (resumes any job whose lease
- * is free). EventBridge API destinations give up after 5 s, so the call is answered at once (202)
- * and the work runs after the response (next/server after()), in bounded steps.
+ * Scheduled processing worker (an AWS Lambda calls it every minute, and again while `due` > 0, or
+ * any cron): queues 'processing' rows that were never queued, marks stuck ones as error, then drives
+ * due jobs (any job whose lease is free and whose retry backoff is over) in bounded steps.
+ *
+ * All of it runs INSIDE this request, within PROCESSING_WORKER_BUDGET_MS (default 23 s, at most
+ * 24 s): on Amplify nothing runs after the response (Lambda without waitUntil - after() work is frozen
+ * until a later request, QA round 3), and Amplify cuts responses at ~28 s. Steps start only if they
+ * fit the budget and their calls / downloads have time limits; should one overrun anyway, the answer
+ * still leaves at budget + 3 s (at most 26 s) with what was done, listing the overrunning jobs in
+ * `overran` (their leases run out and the next pass redoes those steps). Sizing and limits:
+ * src/lib/processingWorker.ts. Safe to call back to back and concurrently: jobs are leased, so two
+ * calls never run the same step. Answers 200
+ * `{ stuck, enqueued, driven: [{ id, state }], due, ms, overran? }`.
  *
  * Auth: `PROCESSING_WORKER_SECRET` as `X-Ingest-Secret` / `X-Worker-Secret` / `X-Api-Key`,
  * `Authorization: Bearer <secret>` or Basic (secret as password or user). Surrounding whitespace or
@@ -55,8 +37,24 @@ async function handle(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: 'אין הרשאה' }, { status: 401 });
   }
 
-  after(runWorker);
-  return NextResponse.json({ accepted: true }, { status: 202 });
+  try {
+    const summary = await runWorkerPass(
+      {
+        now: () => Date.now(),
+        sweep: () => sweepStaleProcessing(null),
+        dueJobs: (limit) => dueJobs(limit),
+        drive: (id, deadline) => driveProcessing(id, deadline),
+      },
+      workerConfig()
+    );
+    if (summary.stuck > 0 || summary.enqueued > 0 || summary.driven.length > 0) {
+      console.log(`[Processing Worker] stuck=${summary.stuck} enqueued=${summary.enqueued} driven=${JSON.stringify(summary.driven)} due=${summary.due} in ${summary.ms} ms`);
+    }
+    return NextResponse.json(summary);
+  } catch (err) {
+    console.error('[Processing Worker] Run failed:', err);
+    return NextResponse.json({ error: 'הרצת ה-worker נכשלה' }, { status: 500 });
+  }
 }
 
 export const POST = handle;

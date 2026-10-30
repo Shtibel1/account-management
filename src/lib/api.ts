@@ -71,7 +71,7 @@ export async function uploadInvoices(clientId: string, files: File[]): Promise<{
   }
 
   // 3. Register the stored files (the server re-checks size and content)
-  let registered: UploadFileResult[];
+  let registered: (UploadFileResult & { queued?: boolean })[];
   try {
     const res = await fetch(`${API_URL}/api/invoices/upload`, {
       method: 'POST',
@@ -99,25 +99,28 @@ export async function uploadInvoices(clientId: string, files: File[]): Promise<{
     return { results: failedResults, count: failedResults.length };
   }
 
-  // 4. Queue processing (the server answers at once; the work runs in the background)
+  // 4. Processing: the upload route already queued each row on the server (`queued`), and the
+  // review screens / scheduled worker drive the jobs. Only a row the server could not queue gets a
+  // /process call here (it is idempotent for a run that is already queued).
   const queued = await Promise.all(
     registered.map(async (result): Promise<UploadFileResult> => {
-      if (result.status !== 'success' || !result.id) return result;
-      const uf = uploadedFiles.find((f) => f.fileName === result.fileName);
+      const { queued: serverQueued, ...row } = result;
+      if (row.status !== 'success' || !row.id || serverQueued) return row;
+      const uf = uploadedFiles.find((f) => f.fileName === row.fileName);
       try {
-        const res = await fetch(`${API_URL}/api/invoices/${result.id}/process`, {
+        const res = await fetch(`${API_URL}/api/invoices/${row.id}/process`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mimeType: uf?.mimeType || undefined }),
         });
         if (!res.ok) {
-          return { ...result, status: 'error', error: await errorText(res, 'הקובץ נשמר אך העיבוד לא הופעל') };
+          return { ...row, status: 'error', error: await errorText(res, 'הקובץ נשמר אך העיבוד לא הופעל') };
         }
-        return result;
+        return row;
       } catch (err) {
-        console.error(`[Frontend API] Failed to queue processing for invoice ${result.id}:`, err);
-        // The row exists; the review screen / scheduled worker will still pick it up
-        return result;
+        console.error(`[Frontend API] Failed to queue processing for invoice ${row.id}:`, err);
+        // The row stays 'processing' and was never queued: the scheduled worker queues such rows itself
+        return row;
       }
     })
   );
@@ -176,7 +179,7 @@ async function invoiceAction(id: string, action: 'reject' | 'retry' | 'reopen', 
   });
   const body = await res.json().catch(() => null);
   if (!res.ok) throw new Error(body?.error ?? fallbackError);
-  return body as { success: true; status: string };
+  return body as { success: true; status: string; queued?: boolean };
 }
 
 /** "לא מאושרת": invoice in review, or a failed document, with an optional reason. */
@@ -188,13 +191,16 @@ export function rejectInvoice(id: string, reason?: string) {
 /** Failed document: back to processing, then (fire-and-forget) re-runs the pipeline. */
 export async function retryInvoice(id: string) {
   const result = await invoiceAction(id, 'retry', 'שגיאה בהפעלת העיבוד מחדש');
-  fetch(`${API_URL}/api/invoices/${encodeURIComponent(id)}/process`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
-  }).catch((err) => {
-    console.error(`[Frontend API] Failed to trigger reprocessing for invoice ${id}:`, err);
-  });
+  // The retry route queues the run on the server; /process only if it could not (idempotent anyway)
+  if (!result?.queued) {
+    fetch(`${API_URL}/api/invoices/${encodeURIComponent(id)}/process`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }).catch((err) => {
+      console.error(`[Frontend API] Failed to trigger reprocessing for invoice ${id}:`, err);
+    });
+  }
   return result;
 }
 

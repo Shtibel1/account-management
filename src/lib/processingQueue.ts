@@ -8,22 +8,37 @@ import type { SplitSuggestion } from '@/shared/documentSplit';
 import { checkStoredBytes, mimeFromFileName } from '@/shared/uploadValidation';
 import {
   ENQUEUE_GRACE_MS,
+  INTERRUPTED_STEP_ERROR,
   JOB_HEARTBEAT_MS,
   JOB_LEASE_MS,
+  LLM_FULL_WINDOW_MS,
+  MAX_LLM_CALL_MS,
   MAX_STAGE_ATTEMPTS,
   MAX_STEP_MS,
+  MAX_TRANSIENT_ATTEMPTS,
+  MIN_FINALIZE_STEP_MS,
+  MIN_LLM_STEP_MS,
+  MIN_OCR_STEP_MS,
+  OPTIONAL_STEP_TRANSIENT_RETRIES,
   STALE_PROCESSING_MS,
+  STEP_SAVE_MARGIN_MS,
   STUCK_RUN_MESSAGE,
-  TICK_FINALIZE_BUDGET_MS,
   TICK_OCR_BUDGET_MS,
+  TICK_RESPONSE_MS,
   TOO_MANY_ATTEMPTS_MESSAGE,
   UserFacingError,
   canProcess,
+  errorDetail,
   isPermanentError,
   isRunTooOld,
   isStaleRun,
+  isTimeoutError,
+  isTransientError,
   nextOcrBatches,
+  orphanRunAction,
   toUserErrorMessage,
+  transientBackoffMs,
+  transientFailureMessage,
   type JobStage,
   type ProcessingProgress,
   type ProcessingStage,
@@ -37,6 +52,7 @@ import {
   isValidExtractState,
   mergeChunkResults,
   nextChunkIndex,
+  splitChunk,
   type ExtractState,
   type PageSpan,
 } from '@/shared/extractionChunks';
@@ -44,25 +60,31 @@ import type { QueuedExtractionInput, QueuedExtractionOutcome } from '@/agents/su
 import type { BoundaryDetectionResult } from '@/agents/splitter';
 
 /**
- * Durable processing queue (finding #6, QA round 2). Amplify cuts every HTTP response at ~28 s and
- * may kill the compute with it, so the pipeline never runs inside the request that asks for it:
+ * Durable processing queue (finding #6, QA rounds 2 + 3). Amplify cuts every HTTP response at ~28 s,
+ * and nothing runs after a response (SSR compute is a Lambda without waitUntil: work left in
+ * next/server after() is frozen until a later request thaws the instance, its sockets break and its
+ * lease lapses - QA round 3). So all work happens INSIDE requests, in steps that end before the
+ * request's deadline:
  *
- *   enqueueProcessing()  - /process: status guard, new run token, a processing_jobs row. Returns at once.
- *   runProcessingTick()  - one bounded step: up to ~14 s of page-batched OCR, or boundary detection,
- *                          or ONE extraction call over a few pages (long documents are extracted in
- *                          parts, src/shared/extractionChunks.ts), or validation + save. Every step's
- *                          result is stored in processing_jobs before the next starts, so a tick that
- *                          is killed loses only its own step. The job lease (JOB_LEASE_MS) is renewed
- *                          by a heartbeat while the step runs, so a dead tick frees the job within
- *                          seconds and the next tick redoes only that step (MAX_STAGE_ATTEMPTS
- *                          without progress, then a Hebrew error).
- *   driveProcessing()    - ticks in a loop within a time budget (after(), the worker, webhooks).
- *   sweepStaleProcessing() - 'processing' rows with nothing queued for STALE_PROCESSING_MS (or a run
- *                          older than MAX_RUN_MS) -> error. A queued job is resumed, not failed.
+ *   enqueueProcessing()  - status guard, new run token, a processing_jobs row. Called by every entry
+ *                          point (upload, email / WhatsApp, split, retry, /process). Returns at once.
+ *   runProcessingTick()  - one bounded step: page-batched OCR within the time left, or boundary
+ *                          detection, or ONE extraction call over a few pages (long documents are
+ *                          extracted in parts, src/shared/extractionChunks.ts), or validation + save.
+ *                          A step starts only if it fits before the deadline (MIN_*_STEP_MS), and its
+ *                          external calls get timeouts that end before it. Every step's result is
+ *                          stored in processing_jobs before the next starts, so a killed tick loses
+ *                          only its own step. Transient failures (network, timeouts, 429 / 5xx, an
+ *                          interrupted tick) are retried with backoff up to MAX_TRANSIENT_ATTEMPTS,
+ *                          real errors up to MAX_STAGE_ATTEMPTS; then a Hebrew error, with the
+ *                          technical cause kept in invoices.processing_error_detail.
+ *   driveProcessing()    - ticks in a loop until a deadline (the scheduled worker).
+ *   sweepStaleProcessing() - 'processing' rows without a job: never queued -> queued; queued but lost
+ *                          / stuck for STALE_PROCESSING_MS (or older than MAX_RUN_MS) -> error.
  *
- * Ticks are driven by the scheduled worker (/api/invoices/worker every minute, PROCESSING_WORKER_SECRET),
- * by after() right after enqueueing, and by the browser (/api/invoices/[id]/process/tick while an invoice
- * is shown as processing), so progress never depends on one request living long or on an open screen.
+ * Ticks are driven by the scheduled worker (/api/invoices/worker, called every minute and again while
+ * jobs are due) and by the browser (/api/invoices/[id]/process/tick while an invoice is shown as
+ * processing), so progress never depends on one request living long or on an open screen.
  */
 
 const JOBS = 'processing_jobs';
@@ -77,6 +99,7 @@ interface InvoiceRow {
   processing_run_id?: string | null;
   processing_started_at?: string | null;
   processing_attempts?: number | null;
+  processing_stage?: string | null;
   updated_at?: string | null;
   created_at?: string | null;
 }
@@ -101,7 +124,12 @@ export interface JobRow {
   split_output_tokens: number;
   /** Extraction progress (migration 20261030180000_qa2_pipeline2.sql); null until extraction starts. */
   extract_state?: ExtractState | null;
+  /** Real (non-transient) failures of the current stage without progress. */
   stage_attempts: number;
+  /** Transient failures / interruptions without progress (migration 20261030191000_qa3_processing_error_detail.sql). */
+  transient_attempts?: number | null;
+  /** Backoff after a transient failure: no tick takes the job before this. */
+  retry_at?: string | null;
   lock_version: number;
   locked_until: string | null;
   last_error: string | null;
@@ -121,6 +149,8 @@ export interface ExtractCallInput {
   hint: string | null;
   allowLargeRetry: boolean;
   fewShot: FewShotLookupState;
+  /** Time limit of the call: it must end before the tick's deadline. */
+  timeoutMs: number;
 }
 
 export interface ExtractCallResult {
@@ -128,6 +158,15 @@ export interface ExtractCallResult {
   inputTokens: number;
   outputTokens: number;
   fewShotInvoiceIds: string[];
+  /** The response was cut at max_tokens or at its time limit (its data may be incomplete). */
+  truncated?: boolean;
+  /** Cut at its time limit (streamed; the data written by then is kept), not at max_tokens. */
+  timedOut?: boolean;
+}
+
+/** Time limit of one external call of a step (OCR batch, LLM call). */
+export interface CallOptions {
+  timeoutMs: number;
 }
 
 export type FinalizeInput = Omit<QueuedExtractionInput, 'costMetrics'> & {
@@ -140,18 +179,17 @@ export interface QueueDeps {
   db: SupabaseClient;
   now: () => number;
   /** Bytes of a stored file_url (a storage reference since QA #31) of this client. */
-  fetchFile: (url: string, clientId: string) => Promise<Buffer>;
-  ocrPdfPages: (file: Buffer, pdf: unknown, pages: number[]) => Promise<{ pageTexts: string[]; ocrWords: OcrWord[] }>;
+  fetchFile: (url: string, clientId: string, options: CallOptions) => Promise<Buffer>;
+  ocrPdfPages: (file: Buffer, pdf: unknown, pages: number[], options: CallOptions) => Promise<{ pageTexts: string[]; ocrWords: OcrWord[] }>;
   loadPdf: (file: Buffer) => Promise<{ getPageCount(): number } | null>;
-  ocrImage: (file: Buffer) => Promise<{ rawOcrText: string; ocrWords: OcrWord[]; confidence: number; detectedLanguages: string[] }>;
-  detect: (pageTexts: string[]) => Promise<BoundaryDetectionResult>;
+  ocrImage: (file: Buffer, options: CallOptions) => Promise<{ rawOcrText: string; ocrWords: OcrWord[]; confidence: number; detectedLanguages: string[] }>;
+  detect: (pageTexts: string[], options: CallOptions) => Promise<BoundaryDetectionResult>;
   loadFewShot: (invoiceId: string, clientId: string, ocrText: string) => Promise<FewShotLookupState>;
   /** One extraction LLM call. */
   extract: (input: ExtractCallInput) => Promise<ExtractCallResult>;
   /** Validation + save of the merged extraction (no LLM). */
   finalize: (input: FinalizeInput) => Promise<QueuedExtractionOutcome>;
   ocrBudgetMs: number;
-  finalizeBudgetMs: number;
   /** Lease renewal interval while a step runs (0 = off, tests). */
   heartbeatMs: number;
 }
@@ -167,13 +205,13 @@ async function defaultDeps(): Promise<QueueDeps> {
     db: supabase,
     now: () => Date.now(),
     // file_url is a storage reference (not a link, QA #31): read it through a short-lived signed URL
-    fetchFile: async (url, clientId) => {
-      return pre.fetchInvoiceFile((await files.signedInvoiceFileUrl(url, clientId, files.PIPELINE_URL_TTL_SECONDS)) ?? url);
+    fetchFile: async (url, clientId, options) => {
+      return pre.fetchInvoiceFile((await files.signedInvoiceFileUrl(url, clientId, files.PIPELINE_URL_TTL_SECONDS)) ?? url, options.timeoutMs);
     },
-    ocrPdfPages: (file, pdf, pages) => pre.ocrPdfPages(file, pdf as Awaited<ReturnType<typeof pre.loadPdf>>, pages),
+    ocrPdfPages: (file, pdf, pages, options) => pre.ocrPdfPages(file, pdf as Awaited<ReturnType<typeof pre.loadPdf>>, pages, options),
     loadPdf: pre.loadPdf,
     ocrImage: pre.ocrImage,
-    detect: (pageTexts) => splitter.detectDocumentBoundaries(pageTexts),
+    detect: (pageTexts, options) => splitter.detectDocumentBoundaries(pageTexts, undefined, options.timeoutMs),
     loadFewShot: (invoiceId, clientId, ocrText) => fewshot.loadFewShotExamples(supabase, { invoiceId, tenantId: clientId, ocrText }),
     extract: async (input) => {
       // An image is sent to the model as bytes when asked (vision) and also when its OCR text is
@@ -184,8 +222,16 @@ async function defaultDeps(): Promise<QueueDeps> {
       const r = await extraction.extractInvoiceData(input.text, fileUrl, input.mimeType, input.useVision, input.retryHint, input.fewShot, {
         hint: input.hint,
         allowLargeRetry: input.allowLargeRetry,
+        timeoutMs: input.timeoutMs,
       });
-      return { data: r.extractedData, inputTokens: r.inputTokens, outputTokens: r.outputTokens, fewShotInvoiceIds: r.fewShotInvoiceIds };
+      return {
+        data: r.extractedData,
+        inputTokens: r.inputTokens,
+        outputTokens: r.outputTokens,
+        fewShotInvoiceIds: r.fewShotInvoiceIds,
+        truncated: r.truncated,
+        timedOut: r.timedOut,
+      };
     },
     finalize: (input) => {
       const { tokens, ocrOpCount, ...rest } = input;
@@ -194,7 +240,6 @@ async function defaultDeps(): Promise<QueueDeps> {
       return supervisor.finalizeQueuedExtraction({ ...rest, costMetrics: metrics });
     },
     ocrBudgetMs: TICK_OCR_BUDGET_MS,
-    finalizeBudgetMs: TICK_FINALIZE_BUDGET_MS,
     heartbeatMs: JOB_HEARTBEAT_MS,
   };
 }
@@ -206,17 +251,20 @@ export function setQueueDepsForTests(overrides: Partial<QueueDeps> | null): void
 }
 async function deps(): Promise<QueueDeps> {
   const base = depsOverride?.db && depsOverride.fetchFile && depsOverride.extract && depsOverride.finalize
-    ? ({ now: () => Date.now(), ocrBudgetMs: TICK_OCR_BUDGET_MS, finalizeBudgetMs: TICK_FINALIZE_BUDGET_MS, heartbeatMs: 0 } as QueueDeps)
+    ? ({ now: () => Date.now(), ocrBudgetMs: TICK_OCR_BUDGET_MS, heartbeatMs: 0 } as QueueDeps)
     : await defaultDeps();
   return { ...base, ...(depsOverride ?? {}) } as QueueDeps;
 }
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
+const INVOICE_COLUMNS =
+  'id, client_id, file_url, file_name, status, processing_run_id, processing_started_at, processing_attempts, processing_stage, updated_at, created_at';
+
 async function readInvoice(db: SupabaseClient, invoiceId: string): Promise<InvoiceRow | null> {
   const { data, error } = await db
     .from('invoices')
-    .select('id, client_id, file_url, file_name, status, processing_run_id, processing_started_at, processing_attempts, updated_at, created_at')
+    .select(INVOICE_COLUMNS)
     .eq('id', invoiceId)
     .single();
   if (error || !data) return null;
@@ -235,10 +283,69 @@ function pickMimeType(hint: unknown, fileName: string | null): string {
   return mimeFromFileName(fileName ?? '') ?? ((fileName ?? '').toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
 }
 
+// ── Columns of migration 20261030191000 (the app keeps working until it is applied) ──
+
+/** processing_jobs.transient_attempts / retry_at are missing: transient failures then count as real ones. */
+let transientColumnsUnsupported = false;
+/** invoices.processing_error_detail is missing: the technical cause stays in the server log only. */
+let errorDetailUnsupported = false;
+
+function isMissingColumn(error: { message?: string; code?: string } | null | undefined, column: RegExp): boolean {
+  if (!error) return false;
+  const text = error.message ?? '';
+  return column.test(text) && (error.code === 'PGRST204' || error.code === '42703' || /(column|schema cache)/i.test(text));
+}
+
+const TRANSIENT_COLUMNS = /transient_attempts|retry_at/;
+
+function withoutTransientColumns<T extends Record<string, unknown>>(patch: T): T {
+  if (!transientColumnsUnsupported) return patch;
+  const { transient_attempts: _t, retry_at: _r, ...rest } = patch as Record<string, unknown>;
+  return rest as T;
+}
+
+type JobUpdateQuery = ReturnType<ReturnType<SupabaseClient['from']>['update']>;
+interface WriteResult {
+  data: unknown;
+  error: { message: string; code?: string } | null;
+}
+
+/**
+ * processing_jobs update with `where` filters; returns the updated keys. Retried once without the
+ * migration-20261030191000 columns when the DB doesn't have them yet.
+ */
+async function updateJobRows(d: QueueDeps, patch: Record<string, unknown>, where: (q: JobUpdateQuery) => JobUpdateQuery): Promise<WriteResult> {
+  const run = async () => (await where(d.db.from(JOBS).update(withoutTransientColumns(patch))).select('invoice_id')) as WriteResult;
+  let result = await run();
+  if (result.error && !transientColumnsUnsupported && isMissingColumn(result.error, TRANSIENT_COLUMNS)) {
+    transientColumnsUnsupported = true;
+    console.warn('[Queue] processing_jobs.transient_attempts / retry_at are missing (migration 20261030191000 not applied); transient failures count as real ones.');
+    result = await run();
+  }
+  return result;
+}
+
+/** Keeps the technical cause of a failed run on the invoice (best-effort; the user sees error_message only). */
+async function saveErrorDetail(d: QueueDeps, invoiceId: string, detail: string | null): Promise<void> {
+  if (errorDetailUnsupported) return;
+  try {
+    const { error } = await d.db.from('invoices').update({ processing_error_detail: detail ? detail.slice(0, 2000) : null }).eq('id', invoiceId);
+    if (!error) return;
+    if (isMissingColumn(error, /processing_error_detail/)) {
+      errorDetailUnsupported = true;
+      console.warn('[Queue] invoices.processing_error_detail is missing (migration 20261030191000 not applied).');
+      return;
+    }
+    console.warn(`[Queue] Could not store the error detail of invoice ${invoiceId}:`, error.message);
+  } catch (err) {
+    console.warn(`[Queue] Could not store the error detail of invoice ${invoiceId}:`, err);
+  }
+}
+
 // ── Enqueue ──────────────────────────────────────────────────────────────────
 
 export type EnqueueResult =
-  | { ok: true; runId: string }
+  | { ok: true; runId: string; alreadyQueued?: boolean }
   | { ok: false; httpStatus: 400 | 404 | 409 | 500; error: string };
 
 export interface EnqueueOptions {
@@ -249,6 +356,12 @@ export interface EnqueueOptions {
    * a competing run, so it doesn't count as live (else part 1 of every split got 409, QA round 2).
    */
   claimToken?: string | null;
+  /**
+   * A live run of a 'processing' row is the answer, not a conflict: ok with that run's id and
+   * `alreadyQueued`. For /process, which a browser may still call after the server already queued
+   * the upload / retry itself (QA round 3); a stuck run is still replaced.
+   */
+  reuseActiveRun?: boolean;
 }
 
 /**
@@ -270,16 +383,21 @@ async function hasActiveRun(d: QueueDeps, invoice: InvoiceRow, ownClaim: string 
 
 /**
  * Queues a (re)processing run. Refuses approved (reopen it first), exported, rejected and returned
- * invoices and invoices with a live run (409). The claim is conditioned on the status and run token
- * just read, and a freshly claimed run counts as live even before its job row exists, so of several
- * concurrent requests exactly one starts a run and the others get 409.
+ * invoices and invoices with a live run (409, or the live run with `reuseActiveRun`). The claim is
+ * conditioned on the status and run token just read, and a freshly claimed run counts as live even
+ * before its job row exists, so of several concurrent requests exactly one starts a run.
+ * The claim sets processing_started_at and updated_at, so the stale clock starts at the enqueue.
  */
 export async function enqueueProcessing(invoiceId: string, options: EnqueueOptions = {}): Promise<EnqueueResult> {
   const d = await deps();
   const invoice = await readInvoice(d.db, invoiceId);
   if (!invoice) return { ok: false, httpStatus: 404, error: 'החשבונית לא נמצאה' };
 
-  const decision = canProcess({ status: invoice.status, activeRun: await hasActiveRun(d, invoice, options.claimToken ?? null) });
+  const activeRun = await hasActiveRun(d, invoice, options.claimToken ?? null);
+  if (activeRun && options.reuseActiveRun && invoice.processing_run_id) {
+    return { ok: true, runId: invoice.processing_run_id, alreadyQueued: true };
+  }
+  const decision = canProcess({ status: invoice.status, activeRun });
   if (!decision.ok) return { ok: false, httpStatus: decision.status, error: decision.error };
 
   if (!invoice.file_url) {
@@ -324,6 +442,13 @@ export async function enqueueProcessing(invoiceId: string, options: EnqueueOptio
     return { ok: false, httpStatus: 500, error: 'לא ניתן היה להתחיל את העיבוד. יש לנסות שוב' };
   }
   if (!Array.isArray(claimed) || claimed.length === 0) {
+    if (options.reuseActiveRun) {
+      // Lost the race to a concurrent enqueue: that run is the answer
+      const current = await readInvoice(d.db, invoiceId);
+      if (current?.status === 'processing' && current.processing_run_id) {
+        return { ok: true, runId: current.processing_run_id, alreadyQueued: true };
+      }
+    }
     return { ok: false, httpStatus: 409, error: 'החשבונית כבר בעיבוד - יש להמתין לסיומו' };
   }
 
@@ -349,16 +474,22 @@ export async function enqueueProcessing(invoiceId: string, options: EnqueueOptio
   });
   if (jobErr) {
     console.error(`[Queue] Could not create the job of invoice ${invoiceId}:`, jobErr);
-    await failRun(d, invoiceId, runId, 'לא ניתן היה להתחיל את העיבוד. יש לנסות שוב');
+    await failRun(d, invoiceId, runId, 'לא ניתן היה להתחיל את העיבוד. יש לנסות שוב', `enqueue: job insert failed: ${jobErr.message}`);
     return { ok: false, httpStatus: 500, error: 'לא ניתן היה להתחיל את העיבוד. יש לנסות שוב' };
   }
+  // The detail of an earlier failed run doesn't describe this one
+  await saveErrorDetail(d, invoiceId, null);
   console.log(`[Queue] Invoice ${invoiceId} queued (run ${runId}).`);
   return { ok: true, runId };
 }
 
 // ── Failing / finishing a run ────────────────────────────────────────────────
 
-async function failRun(d: QueueDeps, invoiceId: string, runId: string | null, message: string): Promise<void> {
+/**
+ * Ends a run as 'error' with a Hebrew message. `detail` (the technical cause) is kept on the invoice
+ * (processing_error_detail), since the job row - and its last_error - is deleted here.
+ */
+async function failRun(d: QueueDeps, invoiceId: string, runId: string | null, message: string, detail: string | null = null): Promise<void> {
   let query = d.db.from('invoices').update({
     status: 'error',
     error_message: message,
@@ -367,8 +498,9 @@ async function failRun(d: QueueDeps, invoiceId: string, runId: string | null, me
     updated_at: iso(d.now()),
   }).eq('id', invoiceId).eq('status', 'processing');
   query = runId ? query.eq('processing_run_id', runId) : query;
-  const { error } = await query;
+  const { data, error } = await query.select('id');
   if (error) console.error(`[Queue] Could not mark invoice ${invoiceId} as failed:`, error);
+  else if (Array.isArray(data) && data.length > 0) await saveErrorDetail(d, invoiceId, detail ?? message);
   await deleteJob(d, invoiceId, runId);
 }
 
@@ -398,20 +530,41 @@ class LostJobLockError extends Error {
   }
 }
 
-/** Saves job fields; conditioned on the lock version this tick holds (throws LostJobLockError otherwise). */
+/**
+ * A streamed extraction call was cut at its time limit, and its partial result isn't kept: it had a
+ * short window (it started late), or a one-page part gets one more try. A timeout, so the step is
+ * retried with backoff on the transient budget.
+ */
+class CallCutLateError extends Error {
+  constructor(timeoutMs: number, retryOnce = false) {
+    super(retryOnce
+      ? `Extraction call timed out at its ${timeoutMs} ms limit; retrying the page once before keeping a partial result`
+      : `Extraction call timed out at its ${timeoutMs} ms limit (started late); retrying with a full window`);
+    this.name = 'TimeoutError';
+  }
+}
+
+/**
+ * Saves job fields; conditioned on the lock version this tick holds (throws LostJobLockError otherwise).
+ * Progress (stage_attempts reset to 0) also resets the transient counter.
+ */
 async function saveJob(d: QueueDeps, job: JobRow, patch: Partial<JobRow>): Promise<void> {
-  const { data, error } = await d.db.from(JOBS).update({ ...patch, updated_at: iso(d.now()) })
-    .eq('invoice_id', job.invoice_id).eq('lock_version', job.lock_version).eq('run_id', job.run_id).select('invoice_id');
+  const full: Partial<JobRow> = patch.stage_attempts === 0 ? { transient_attempts: 0, retry_at: null, ...patch } : patch;
+  const { data, error } = await updateJobRows(d, { ...full, updated_at: iso(d.now()) }, (q) =>
+    q.eq('invoice_id', job.invoice_id).eq('lock_version', job.lock_version).eq('run_id', job.run_id)
+  );
   if (error) throw new Error(`processing_jobs update failed: ${error.message}`);
   if (!Array.isArray(data) || data.length === 0) throw new LostJobLockError(job.invoice_id);
-  Object.assign(job, patch);
+  Object.assign(job, full);
 }
 
 /**
  * Renews the lease of the job this tick holds every `heartbeatMs` while its step runs. Only while
- * the lease is still held (lock_version unchanged, not released): a beat can never re-lock a job
- * the step already released. If the compute is frozen or killed, the beats stop and the lease runs
- * out after JOB_LEASE_MS, so the next tick takes over quickly.
+ * the lease is still held (lock_version unchanged, not released, not expired): a beat can never
+ * re-lock a job the step already released, nor revive a lease that ran out (a frozen step thawing).
+ * Steps end before their request's deadline, well inside the lease; if the compute is frozen or
+ * killed anyway, the beats stop and the lease runs out after JOB_LEASE_MS, and the next tick takes
+ * over (counted as an interruption, a transient failure).
  */
 function startHeartbeat(d: QueueDeps, job: JobRow): () => void {
   if (!d.heartbeatMs || d.heartbeatMs <= 0) return () => {};
@@ -431,7 +584,7 @@ function startHeartbeat(d: QueueDeps, job: JobRow): () => void {
           .update({ locked_until: iso(now + JOB_LEASE_MS), updated_at: iso(now) })
           .eq('invoice_id', job.invoice_id)
           .eq('lock_version', lockVersion)
-          .not('locked_until', 'is', null)
+          .gt('locked_until', iso(now))
       ).then(({ error }) => {
         if (error) console.warn(`[Queue] Lease renewal failed for invoice ${job.invoice_id}:`, error.message);
       }, (err) => console.warn(`[Queue] Lease renewal failed for invoice ${job.invoice_id}:`, err));
@@ -448,14 +601,26 @@ function startHeartbeat(d: QueueDeps, job: JobRow): () => void {
 export type TickState =
   | 'done'      // not processing any more (review / approved / error / ...)
   | 'pending'   // more work left; call again
-  | 'busy'      // another tick holds the job (or this tick's step goes on in the background)
-  | 'waiting'   // processing, but nothing queued yet (fresh upload before /process)
+  | 'busy'      // another tick holds the job, or it waits for its retry backoff
+  | 'waiting'   // processing, but nothing queued yet (a fresh row whose enqueue is still due)
   | 'failed';   // this tick marked the invoice as error
 
 export interface TickResult {
   state: TickState;
   stage?: ProcessingStage | null;
   progress?: ProcessingProgress | null;
+  /** 'pending' without work done: the next step doesn't fit before this tick's deadline. */
+  deferred?: boolean;
+  /** 'busy' because of a retry backoff: not before this time. */
+  retryAt?: string | null;
+}
+
+export interface TickOptions {
+  /**
+   * Epoch ms by which the tick's work must be done (its request answers right after). Default:
+   * TICK_RESPONSE_MS from now. Nothing may run after the response (Amplify freezes it).
+   */
+  deadline?: number;
 }
 
 function jobProgress(job: JobRow): ProcessingProgress {
@@ -468,31 +633,54 @@ function jobProgress(job: JobRow): ProcessingProgress {
   return progress;
 }
 
+/** Time a tick needs left before its deadline to start this job's next step. */
+export function minStepMs(job: Pick<JobRow, 'stage' | 'extract_state'>): number {
+  if (job.stage === 'ocr') return MIN_OCR_STEP_MS;
+  if (job.stage === 'extract' && job.extract_state?.phase === 'finalize') return MIN_FINALIZE_STEP_MS;
+  return MIN_LLM_STEP_MS;
+}
+
+/** Time limit of an external call that starts now: ends STEP_SAVE_MARGIN_MS before the deadline. */
+function callTimeoutMs(d: QueueDeps, deadline: number, cap: number = MAX_LLM_CALL_MS): number {
+  return Math.max(1_000, Math.min(cap, deadline - d.now() - STEP_SAVE_MARGIN_MS));
+}
+
 /**
- * One bounded step of an invoice's run. Safe to call concurrently and repeatedly: the job lease
- * (optimistic lock_version + locked_until, renewed by a heartbeat) lets one tick work at a time;
- * the others answer 'busy'.
+ * Transient failures of the current step so far (optional-step retries). Without migration
+ * 20261030191000 they are counted as real ones, in stage_attempts.
  */
-export async function runProcessingTick(invoiceId: string): Promise<TickResult> {
+function transientTries(job: JobRow): number {
+  return transientColumnsUnsupported ? job.stage_attempts : job.transient_attempts ?? 0;
+}
+
+/** The technical cause of a step failure, for processing_error_detail. */
+function stepDetail(job: JobRow, kind: string, cause: unknown): string {
+  return `stage ${job.stage}, ${kind} (real ${job.stage_attempts}/${MAX_STAGE_ATTEMPTS}, transient ${job.transient_attempts ?? 0}/${MAX_TRANSIENT_ATTEMPTS}): ${typeof cause === 'string' ? cause : errorDetail(cause)}`;
+}
+
+/**
+ * One bounded step of an invoice's run, finished before `options.deadline`. Safe to call
+ * concurrently and repeatedly: the job lease (optimistic lock_version + locked_until) lets one tick
+ * work at a time; the others answer 'busy'.
+ */
+export async function runProcessingTick(invoiceId: string, options: TickOptions = {}): Promise<TickResult> {
   const d = await deps();
+  const deadline = options.deadline ?? d.now() + TICK_RESPONSE_MS;
+  // The job is read before the invoice: an enqueue in between then shows up as a newer run on the
+  // invoice (this job really is superseded), never as a "stale" invoice next to the new run's job.
+  // Deletes are conditioned on the job's own run, so a new run's job is never removed.
+  let job = await readJob(d.db, invoiceId);
   const invoice = await readInvoice(d.db, invoiceId);
   if (!invoice) return { state: 'done' };
-  let job = await readJob(d.db, invoiceId);
 
   if (invoice.status !== 'processing') {
-    if (job) await d.db.from(JOBS).delete().eq('invoice_id', invoiceId);
+    if (job) await deleteJob(d, invoiceId, job.run_id);
     return { state: 'done' };
   }
 
   if (!job || job.run_id !== invoice.processing_run_id) {
-    if (job) await d.db.from(JOBS).delete().eq('invoice_id', invoiceId); // left over from a superseded run
-    // A row stuck in 'processing' with no queued work (e.g. from before the queue existed, or an
-    // upload whose /process call never arrived): give up after STALE_PROCESSING_MS so it can be retried.
-    if (isStaleRun({ now: d.now(), startedAt: invoice.processing_started_at, lastActivityAt: null, rowUpdatedAt: invoice.updated_at ?? invoice.created_at })) {
-      await failRun(d, invoiceId, invoice.processing_run_id ?? null, STUCK_RUN_MESSAGE);
-      return { state: 'failed' };
-    }
-    return { state: 'waiting', stage: 'queued' };
+    if (job) await deleteJob(d, invoiceId, job.run_id); // left over from a superseded run
+    return handleOrphanRun(d, invoice);
   }
 
   const now = d.now();
@@ -500,71 +688,159 @@ export async function runProcessingTick(invoiceId: string): Promise<TickResult> 
   if (lockedUntil !== null && lockedUntil > now) {
     return { state: 'busy', stage: job.stage, progress: jobProgress(job) };
   }
+  const retryAt = job.retry_at ? Date.parse(job.retry_at) : null;
+  if (retryAt !== null && retryAt > now) {
+    return { state: 'busy', stage: job.stage, progress: jobProgress(job), retryAt: job.retry_at };
+  }
 
   // A queued job whose lease is free is resumed, however long nobody drove it (N4: "nobody ticked
-  // it" is not a failure). Killed ticks are bounded by MAX_STAGE_ATTEMPTS, endless runs by MAX_RUN_MS.
+  // it" is not a failure). Failing ticks are bounded by the attempt budgets, endless runs by MAX_RUN_MS.
   if (isRunTooOld(invoice.processing_started_at, now)) {
     console.warn(`[Queue] Run ${job.run_id} of invoice ${invoiceId} ran too long; marking as error.`);
-    await failRun(d, invoiceId, job.run_id, STUCK_RUN_MESSAGE);
+    await failRun(d, invoiceId, job.run_id, STUCK_RUN_MESSAGE, stepDetail(job, 'run older than MAX_RUN_MS', job.last_error ?? 'no error recorded'));
     return { state: 'failed' };
   }
 
-  // Claim: only the tick that bumps the version it read gets the job
+  // Only a step that can end before the deadline is started (nothing may run after the response)
+  if (deadline - now < minStepMs(job)) {
+    return { state: 'pending', stage: job.stage, progress: jobProgress(job), deferred: true };
+  }
+
+  // Claim: only the tick that bumps the version it read gets the job. A lease that ran out (not
+  // released) means the previous tick was interrupted mid-step - a transient failure, not a real one.
+  const interrupted = lockedUntil !== null;
   const nextVersion = job.lock_version + 1;
-  const { data: claimed, error: claimErr } = await d.db.from(JOBS).update({
+  const counted: Partial<JobRow> = !interrupted
+    ? {}
+    : transientColumnsUnsupported
+      ? { stage_attempts: job.stage_attempts + 1, last_error: INTERRUPTED_STEP_ERROR }
+      : { transient_attempts: (job.transient_attempts ?? 0) + 1, last_error: INTERRUPTED_STEP_ERROR };
+  const { data: claimed, error: claimErr } = await updateJobRows(d, {
     lock_version: nextVersion,
     locked_until: iso(now + JOB_LEASE_MS),
-    stage_attempts: job.stage_attempts + 1,
+    retry_at: null,
+    ...counted,
     updated_at: iso(now),
-  }).eq('invoice_id', invoiceId).eq('lock_version', job.lock_version).select('invoice_id');
+  }, (q) => q.eq('invoice_id', invoiceId).eq('lock_version', job!.lock_version));
   if (claimErr) throw new Error(`processing_jobs claim failed: ${claimErr.message}`);
   if (!Array.isArray(claimed) || claimed.length === 0) return { state: 'busy', stage: job.stage };
-  job = { ...job, lock_version: nextVersion, stage_attempts: job.stage_attempts + 1 };
+  // The fallback above may have dropped transient_attempts (migration missing): count it as real then
+  if (interrupted && transientColumnsUnsupported && counted.transient_attempts !== undefined) {
+    counted.stage_attempts = job.stage_attempts + 1;
+    delete counted.transient_attempts;
+    await updateJobRows(d, { stage_attempts: counted.stage_attempts }, (q) => q.eq('invoice_id', invoiceId).eq('lock_version', nextVersion));
+  }
+  job = { ...job, ...counted, lock_version: nextVersion, locked_until: iso(now + JOB_LEASE_MS), retry_at: null };
 
-  if (job.stage_attempts > MAX_STAGE_ATTEMPTS) {
-    console.error(`[Queue] Stage ${job.stage} of invoice ${invoiceId} failed ${MAX_STAGE_ATTEMPTS} times (last: ${job.last_error ?? 'killed / timed out'}).`);
-    await failRun(d, invoiceId, job.run_id, job.last_error ? toUserErrorMessage(job.last_error) : TOO_MANY_ATTEMPTS_MESSAGE);
-    return { state: 'failed' };
+  if (interrupted) {
+    console.warn(`[Queue] Stage ${job.stage} of invoice ${invoiceId} was interrupted (lease expired); retrying it.`);
+    if ((job.transient_attempts ?? 0) >= MAX_TRANSIENT_ATTEMPTS) {
+      await failRun(d, invoiceId, job.run_id, transientFailureMessage(INTERRUPTED_STEP_ERROR), stepDetail(job, 'interrupted too often', INTERRUPTED_STEP_ERROR));
+      return { state: 'failed' };
+    }
+    if (job.stage_attempts >= MAX_STAGE_ATTEMPTS) {
+      await failRun(d, invoiceId, job.run_id, TOO_MANY_ATTEMPTS_MESSAGE, stepDetail(job, 'interrupted too often', INTERRUPTED_STEP_ERROR));
+      return { state: 'failed' };
+    }
   }
 
   const stopHeartbeat = startHeartbeat(d, job);
   try {
-    if (job.stage === 'ocr') return await ocrStep(d, job);
-    if (job.stage === 'detect') return await detectStep(d, job);
-    return await extractStep(d, job);
+    if (job.stage === 'ocr') return await ocrStep(d, job, deadline);
+    if (job.stage === 'detect') return await detectStep(d, job, deadline);
+    return await extractStep(d, job, deadline);
   } catch (err) {
     if (err instanceof LostJobLockError) {
       // Another tick (or a new run) owns the job now: leave it alone
       console.warn(`[Queue] ${err.message}; stopping this tick.`);
       return { state: 'busy', stage: job.stage };
     }
-    console.error(`[Queue] Tick failed for invoice ${invoiceId} (stage ${job.stage}, attempt ${job.stage_attempts}):`, err);
-    if (isPermanentError(err) || job.stage_attempts >= MAX_STAGE_ATTEMPTS) {
-      await failRun(d, invoiceId, job.run_id, toUserErrorMessage(err));
-      return { state: 'failed' };
-    }
-    // Transient (rate limit, 5xx, network): free the lease, the next tick retries this step only
-    // (the results of earlier steps are already stored in the job)
-    await d.db.from(JOBS).update({
-      locked_until: null,
-      last_error: (err instanceof Error ? err.message : String(err)).slice(0, 2000),
-      updated_at: iso(d.now()),
-    }).eq('invoice_id', invoiceId).eq('lock_version', job.lock_version);
-    return { state: 'pending', stage: job.stage };
+    return await handleStepError(d, job, err);
   } finally {
     stopHeartbeat();
   }
 }
 
-async function ocrStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
+/**
+ * A step threw. Transient errors (network, timeouts, 429 / 5xx) release the job with a backoff and
+ * count against MAX_TRANSIENT_ATTEMPTS; real errors are retried at once up to MAX_STAGE_ATTEMPTS;
+ * permanent ones (bad file) fail the run at once. The results of earlier steps stay in the job.
+ */
+async function handleStepError(d: QueueDeps, job: JobRow, err: unknown): Promise<TickResult> {
+  const invoiceId = job.invoice_id;
+  const transient = isTransientError(err) && !transientColumnsUnsupported;
+  const lastError = errorDetail(err) || 'unknown error';
+  if (transient) {
+    const attempts = (job.transient_attempts ?? 0) + 1;
+    console.warn(`[Queue] Transient failure of invoice ${invoiceId} (stage ${job.stage}, ${attempts}/${MAX_TRANSIENT_ATTEMPTS}): ${lastError}`);
+    if (attempts >= MAX_TRANSIENT_ATTEMPTS) {
+      await failRun(d, invoiceId, job.run_id, transientFailureMessage(err), stepDetail({ ...job, transient_attempts: attempts }, 'transient', err));
+      return { state: 'failed' };
+    }
+    const retryAt = iso(d.now() + transientBackoffMs(attempts));
+    await updateJobRows(d, {
+      locked_until: null,
+      retry_at: retryAt,
+      transient_attempts: attempts,
+      last_error: lastError,
+      updated_at: iso(d.now()),
+    }, (q) => q.eq('invoice_id', invoiceId).eq('lock_version', job.lock_version));
+    return { state: 'busy', stage: job.stage, retryAt };
+  }
+
+  const attempts = job.stage_attempts + 1;
+  console.error(`[Queue] Tick failed for invoice ${invoiceId} (stage ${job.stage}, attempt ${attempts}/${MAX_STAGE_ATTEMPTS}):`, err);
+  if (isPermanentError(err) || attempts >= MAX_STAGE_ATTEMPTS) {
+    await failRun(d, invoiceId, job.run_id, toUserErrorMessage(err), stepDetail({ ...job, stage_attempts: attempts }, 'error', err));
+    return { state: 'failed' };
+  }
+  // The next tick retries this step only (the results of earlier steps are already stored in the job)
+  await updateJobRows(d, {
+    locked_until: null,
+    stage_attempts: attempts,
+    last_error: lastError,
+    updated_at: iso(d.now()),
+  }, (q) => q.eq('invoice_id', invoiceId).eq('lock_version', job.lock_version));
+  return { state: 'pending', stage: job.stage };
+}
+
+/** A 'processing' row without a job of its run: queue it (never queued), fail it (stuck) or wait. */
+async function handleOrphanRun(d: QueueDeps, invoice: InvoiceRow): Promise<TickResult> {
+  const action = orphanRunAction({
+    now: d.now(),
+    attempts: invoice.processing_attempts,
+    processingStage: invoice.processing_stage,
+    startedAt: invoice.processing_started_at,
+    rowUpdatedAt: invoice.updated_at ?? invoice.created_at,
+  });
+  if (action === 'enqueue') {
+    const queued = await enqueueProcessing(invoice.id, { reuseActiveRun: true });
+    if (queued.ok) {
+      if (!queued.alreadyQueued) console.log(`[Queue] Invoice ${invoice.id} was never queued; queued it now.`);
+      return { state: 'pending', stage: 'queued' };
+    }
+    console.warn(`[Queue] Could not queue never-queued invoice ${invoice.id}: ${queued.error}`);
+    return { state: 'waiting', stage: 'queued' };
+  }
+  if (action === 'fail') {
+    // Queued once but its job is gone, or a split that never finished: give up so it can be retried
+    await failRun(d, invoice.id, invoice.processing_run_id ?? null, STUCK_RUN_MESSAGE,
+      `no job of run ${invoice.processing_run_id ?? '-'} for ${Math.round(STALE_PROCESSING_MS / 60_000)} min (stage ${invoice.processing_stage ?? '-'})`);
+    return { state: 'failed' };
+  }
+  return { state: 'waiting', stage: 'queued' };
+}
+
+async function ocrStep(d: QueueDeps, job: JobRow, deadline: number): Promise<TickResult> {
   const started = d.now();
-  const file = await d.fetchFile(job.file_url, job.client_id);
+  // The download is bounded too (up to 20 MB): a slow one must not push the answer past the deadline
+  const file = await d.fetchFile(job.file_url, job.client_id, { timeoutMs: callTimeoutMs(d, deadline, Number.POSITIVE_INFINITY) });
   // Reject what Vision can't read before calling it (empty, oversized, not a PDF / image)
   const check = checkStoredBytes(file);
   if (!check.ok) throw new UserFacingError(check.error);
 
   if (check.mimeType !== 'application/pdf') {
-    const img = await d.ocrImage(file);
+    const img = await d.ocrImage(file, { timeoutMs: callTimeoutMs(d, deadline, Number.POSITIVE_INFINITY) });
     await saveJob(d, job, {
       page_count: 1, pages_done: 1, page_texts: [img.rawOcrText], ocr_words: img.ocrWords,
       ocr_confidence: img.confidence, detected_languages: img.detectedLanguages, ocr_op_count: 1,
@@ -583,22 +859,24 @@ async function ocrStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
   await setInvoiceProgress(d, job, 'ocr', { pages_done: job.pages_done, pages_total: pageCount });
 
   // OCR a few pages at a time, saving after each round. A new round starts only if it is expected
-  // to end within the tick's budget (estimated from the previous round), so a tick stays short.
-  // At least one round per tick, so a slow download can never stall the run.
+  // to end within the tick's budget and before its deadline (estimated from the previous round).
+  // At least one round per tick (the claim checked MIN_OCR_STEP_MS), so a slow download can't stall the run.
+  const budget = Math.min(d.ocrBudgetMs, deadline - started - STEP_SAVE_MARGIN_MS);
   let lastRoundMs = 0;
   let rounds = 0;
-  while (job.pages_done < pageCount && (rounds === 0 || d.now() - started + lastRoundMs < d.ocrBudgetMs)) {
+  while (job.pages_done < pageCount && (rounds === 0 || d.now() - started + lastRoundMs < budget)) {
     rounds++;
     const roundStarted = d.now();
     const batches = nextOcrBatches(job.pages_done, pageCount);
-    const results = await Promise.all(batches.map((pages) => d.ocrPdfPages(file, pdf, pages)));
+    const timeoutMs = callTimeoutMs(d, deadline, Number.POSITIVE_INFINITY);
+    const results = await Promise.all(batches.map((pages) => d.ocrPdfPages(file, pdf, pages, { timeoutMs })));
     const done = batches.reduce((n, b) => n + b.length, 0);
     await saveJob(d, job, {
       pages_done: job.pages_done + done,
       page_texts: [...job.page_texts, ...results.flatMap((r) => r.pageTexts)],
       ocr_words: [...job.ocr_words, ...results.flatMap((r) => r.ocrWords)],
       ocr_op_count: job.ocr_op_count + batches.length,
-      // progress resets the attempt counter: only a stage that makes no progress fails the run
+      // progress resets the attempt counters: only a stage that makes no progress fails the run
       stage_attempts: 0,
       last_error: null,
     });
@@ -617,8 +895,18 @@ async function ocrStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
   return { state: 'pending', stage: 'ocr', progress };
 }
 
-async function detectStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
-  const detection = await d.detect(job.page_texts);
+async function detectStep(d: QueueDeps, job: JobRow, deadline: number): Promise<TickResult> {
+  let detection: BoundaryDetectionResult;
+  try {
+    // With a time limit, detect() throws transient failures (instead of "no suggestion")
+    detection = await d.detect(job.page_texts, { timeoutMs: callTimeoutMs(d, deadline) });
+  } catch (err) {
+    // Detection is optional: retried a couple of times on transient failures, then the run goes on
+    // without a split suggestion (flagged as failed for the reviewer) instead of failing
+    if (!isTransientError(err) || transientTries(job) < OPTIONAL_STEP_TRANSIENT_RETRIES) throw err;
+    console.warn(`[Queue] Boundary detection of invoice ${job.invoice_id} keeps failing; going on without a split suggestion:`, errorDetail(err));
+    detection = { suggestion: null, inputTokens: 0, outputTokens: 0, failed: true };
+  }
   await saveJob(d, job, {
     split_suggestion: detection.suggestion,
     split_detection_failed: detection.failed === true,
@@ -646,14 +934,18 @@ function wordsInSpan(words: OcrWord[], span: PageSpan): OcrWord[] {
 }
 
 /**
- * Extraction in resumable steps (QA round 2, N5 / N14 / N22). Each tick makes at most ONE LLM call
- * (one page chunk, or the math retry) and stores its result in processing_jobs.extract_state before
- * it returns, so no request has to outlive the Amplify limit and a killed tick re-pays only for
- * its own call. When every chunk is in, the merged result is validated and saved (no LLM), in the
- * same tick if there is time left, else in the next.
+ * Extraction in resumable steps (QA round 2, N5 / N14 / N22; QA round 3). Each tick makes at most
+ * ONE LLM call (one page chunk, or the math retry), with a timeout that ends before the tick's
+ * deadline, and stores its result in processing_jobs.extract_state before it returns, so no request
+ * has to outlive the Amplify limit and a killed tick re-pays only for its own call. Calls are
+ * streamed and cut at their limit with what they wrote so far. A part whose call had the full
+ * window (LLM_FULL_WINDOW_MS) and still ran out of time or of output tokens is split in two
+ * (smaller calls fit); a one-page part is tried once more, then keeps its partial result. A call
+ * cut only because it started late is retried as a transient failure, not split. The math re-read
+ * is optional: cut or failing, the first-pass result is saved. When every chunk is in, the merged
+ * result is validated and saved (no LLM), in the same tick if there is time left, else in the next.
  */
-async function extractStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
-  const started = d.now();
+async function extractStep(d: QueueDeps, job: JobRow, deadline: number): Promise<TickResult> {
   const pageCount = job.page_count ?? Math.max(1, job.page_texts.length);
   let state: ExtractState = isValidExtractState(job.extract_state, pageCount)
     ? (job.extract_state as ExtractState)
@@ -664,6 +956,7 @@ async function extractStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
   /** Stores the state; false when it can't be stored (old DB): the step then goes on in memory. */
   const persist = async (next: ExtractState): Promise<boolean> => {
     state = next;
+    job.extract_state = next;
     if (extractStateUnsupported) return false;
     try {
       await saveJob(d, job, { extract_state: next, stage_attempts: 0, last_error: null });
@@ -675,6 +968,19 @@ async function extractStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
       return false;
     }
   };
+  /**
+   * Keeps the tokens of a call whose result is thrown away, without counting progress (the attempt
+   * counters stay as they are, so a part that keeps failing still runs out of attempts).
+   */
+  const keepTokens = async (discarded: { input: number; output: number }): Promise<void> => {
+    state = { ...state, discarded_tokens: discarded };
+    job.extract_state = state;
+    if (extractStateUnsupported) return;
+    await saveJob(d, job, { extract_state: state }).catch((err) => {
+      if (err instanceof LostJobLockError) throw err;
+      console.warn(`[Queue] Could not keep the tokens of a discarded call of invoice ${job.invoice_id}:`, err);
+    });
+  };
   /** Ends this tick after its LLM call; the next tick continues from the stored state. */
   const yieldTick = async (): Promise<TickResult> => {
     await saveJob(d, job, { locked_until: null });
@@ -683,6 +989,8 @@ async function extractStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
     return { state: 'pending', stage: 'extract', progress };
   };
   const canYield = () => !extractStateUnsupported;
+  /** One LLM call per tick; a further one only without stored state (old DB) and with time left. */
+  const mustYield = () => llmCalls > 0 && (canYield() || deadline - d.now() < MIN_LLM_STEP_MS);
 
   for (;;) {
     if (state.phase === 'chunks') {
@@ -691,24 +999,65 @@ async function extractStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
         state = { ...state, phase: 'finalize' };
         continue;
       }
-      if (llmCalls > 0 && canYield()) return yieldTick();
+      if (mustYield()) return yieldTick();
       const fewShot = state.few_shot ?? (await d.loadFewShot(job.invoice_id, job.client_id, rangeText));
       const span = state.chunks[index];
-      const r = await d.extract({
-        invoiceId: job.invoice_id,
-        clientId: job.client_id,
-        text: chunkText(job.page_texts, span),
-        fileUrl: job.file_url,
-        mimeType: job.mime_type,
-        useVision: false,
-        retryHint: false,
-        hint: chunkHint(state, index),
-        // A response cut at max_tokens may lose every field of the part: always retried larger
-        // (a long call is fine: the lease is renewed and /process/tick answers early)
-        allowLargeRetry: true,
-        fewShot,
-      });
+      const timeoutMs = callTimeoutMs(d, deadline);
+      // Only a call that had (about) the whole window was really too long; one that started late
+      // is retried later with a full window instead of breaking the part up for nothing
+      const fullWindow = timeoutMs >= LLM_FULL_WINDOW_MS;
+      const pages = span.start === span.end ? `page ${span.start}` : `pages ${span.start}-${span.end}`;
+      let r: ExtractCallResult;
+      const callStarted = d.now();
+      try {
+        r = await d.extract({
+          invoiceId: job.invoice_id,
+          clientId: job.client_id,
+          text: chunkText(job.page_texts, span),
+          fileUrl: job.file_url,
+          mimeType: job.mime_type,
+          useVision: false,
+          retryHint: false,
+          hint: chunkHint(state, index),
+          // No 16k-token retry: such a call can't end before the deadline. A cut response of a
+          // multi-page part is redone as two smaller parts instead (below).
+          allowLargeRetry: false,
+          fewShot,
+          timeoutMs,
+        });
+      } catch (err) {
+        // A timeout here means nothing was written in time (a streamed call keeps what it wrote)
+        const smaller = isTimeoutError(err) && fullWindow ? splitChunk(state, index) : null;
+        if (!smaller) throw err;
+        console.warn(`[Queue] Extraction of ${pages} of invoice ${job.invoice_id} timed out (${timeoutMs} ms); splitting the part.`);
+        llmCalls++;
+        await persist({ ...smaller, few_shot: fewShot });
+        continue;
+      }
       llmCalls++;
+      console.log(`[Queue] Extraction of ${pages} of invoice ${job.invoice_id}: ${d.now() - callStarted} ms (limit ${timeoutMs} ms, ${r.outputTokens} output tokens${r.timedOut ? ', cut at the limit' : r.truncated ? ', cut at max_tokens' : ''}).`);
+      if (r.truncated) {
+        const discarded = state.discarded_tokens ?? { input: 0, output: 0 };
+        const discard = { input: discarded.input + r.inputTokens, output: discarded.output + r.outputTokens };
+        if (r.timedOut && !fullWindow) {
+          // Cut only because it started late: redo the same part with a full window (transient)
+          await keepTokens(discard);
+          throw new CallCutLateError(timeoutMs);
+        }
+        const smaller = splitChunk(state, index);
+        if (smaller) {
+          console.warn(`[Queue] Extraction of ${pages} of invoice ${job.invoice_id} was cut (${r.timedOut ? 'time limit' : 'max_tokens'}); splitting the part.`);
+          await persist({ ...smaller, few_shot: fewShot, discarded_tokens: discard });
+          continue;
+        }
+        if (r.timedOut && transientTries(job) < 1) {
+          // A one-page part cut at the time limit: try it once more (the model's speed varies)
+          await keepTokens(discard);
+          throw new CallCutLateError(timeoutMs, true);
+        }
+        // Nothing smaller to try: keep what was written (validation flags what is missing)
+        console.warn(`[Queue] Extraction of ${pages} of invoice ${job.invoice_id} was cut again; keeping the partial result.`);
+      }
       const results = [...state.results];
       results[index] = { data: r.data, input_tokens: r.inputTokens, output_tokens: r.outputTokens };
       await persist({
@@ -721,27 +1070,51 @@ async function extractStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
     }
 
     if (state.phase === 'retry') {
-      if (llmCalls > 0 && canYield()) return yieldTick();
+      if (mustYield()) return yieldTick();
       // The sums didn't match: read the part with the amounts again, more carefully (once).
       // A one-page image is sent as the image itself, as the pipeline always did.
       const index = amountsChunkIndex(state);
       const previous = state.results[index];
-      const r = await d.extract({
-        invoiceId: job.invoice_id,
-        clientId: job.client_id,
-        text: chunkText(job.page_texts, state.chunks[index]),
-        fileUrl: job.file_url,
-        mimeType: job.mime_type,
-        useVision: job.mime_type.startsWith('image/') && state.chunks.length === 1,
-        retryHint: true,
-        hint: chunkHint(state, index),
-        // A response cut at max_tokens may lose every field of the part: always retried larger
-        // (a long call is fine: the lease is renewed and /process/tick answers early)
-        allowLargeRetry: true,
-        fewShot: state.few_shot ?? { examples: [], supplierVatId: null },
-      });
+      let r: ExtractCallResult;
+      try {
+        r = await d.extract({
+          invoiceId: job.invoice_id,
+          clientId: job.client_id,
+          text: chunkText(job.page_texts, state.chunks[index]),
+          fileUrl: job.file_url,
+          mimeType: job.mime_type,
+          useVision: job.mime_type.startsWith('image/') && state.chunks.length === 1,
+          retryHint: true,
+          hint: chunkHint(state, index),
+          // A 16k-token retry can't end before the deadline
+          allowLargeRetry: false,
+          fewShot: state.few_shot ?? { examples: [], supplierVatId: null },
+          timeoutMs: callTimeoutMs(d, deadline),
+        });
+      } catch (err) {
+        // The re-read is optional: the first-pass result is already stored. A transient failure is
+        // retried a couple of times; after that, or on a real error, the run is saved without it.
+        if (err instanceof LostJobLockError) throw err;
+        if (isTransientError(err) && transientTries(job) < OPTIONAL_STEP_TRANSIENT_RETRIES) throw err;
+        console.warn(`[Queue] Math re-read of invoice ${job.invoice_id} failed; saving the first-pass result:`, errorDetail(err));
+        llmCalls++;
+        await persist({ ...state, retry_count: state.retry_count + 1, phase: 'finalize' });
+        continue;
+      }
       llmCalls++;
       const results = [...state.results];
+      if (r.truncated && previous) {
+        // A cut re-read may miss fields the first pass has: keep the first pass, count the tokens
+        console.warn(`[Queue] Math re-read of invoice ${job.invoice_id} was cut; keeping the first-pass result.`);
+        const discarded = state.discarded_tokens ?? { input: 0, output: 0 };
+        await persist({
+          ...state,
+          discarded_tokens: { input: discarded.input + r.inputTokens, output: discarded.output + r.outputTokens },
+          retry_count: state.retry_count + 1,
+          phase: 'finalize',
+        });
+        continue;
+      }
       results[index] = {
         data: r.data,
         input_tokens: (previous?.input_tokens ?? 0) + r.inputTokens,
@@ -751,8 +1124,8 @@ async function extractStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
       continue;
     }
 
-    // finalize: validation + save, no LLM. After a long LLM call it gets a tick of its own.
-    if (llmCalls > 0 && d.now() - started > d.finalizeBudgetMs && canYield()) return yieldTick();
+    // finalize: validation + save, no LLM. After an LLM call it runs only if it still fits the deadline.
+    if (llmCalls > 0 && deadline - d.now() < MIN_FINALIZE_STEP_MS && canYield()) return yieldTick();
     const tokens = extractionTokens(state);
     const outcome = await d.finalize({
       invoiceId: job.invoice_id,
@@ -786,74 +1159,126 @@ async function extractStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
 
 // ── Drivers ──────────────────────────────────────────────────────────────────
 
-/** Runs ticks back to back until the run ends, another tick holds it, or the budget is used. */
-export async function driveProcessing(invoiceId: string, budgetMs: number): Promise<TickResult> {
-  const started = Date.now();
-  let last: TickResult = { state: 'pending' };
-  let lastTickMs = 0;
-  // A further tick starts only if it is expected (from the previous one) to end within the budget,
-  // so the background work after a response doesn't run on long past it (the first tick always runs)
-  while (Date.now() - started + lastTickMs < budgetMs) {
-    const tickStarted = Date.now();
-    last = await runProcessingTick(invoiceId);
-    lastTickMs = Date.now() - tickStarted;
-    if (last.state !== 'pending') break;
+/**
+ * Runs ticks back to back until the run ends, another tick holds it, the next step doesn't fit
+ * before `deadline` (epoch ms), or the deadline is reached. Everything ends before the deadline.
+ */
+export async function driveProcessing(invoiceId: string, deadline: number): Promise<TickResult> {
+  let last: TickResult = { state: 'pending', deferred: true };
+  while (Date.now() < deadline - MIN_FINALIZE_STEP_MS) {
+    last = await runProcessingTick(invoiceId, { deadline });
+    if (last.state !== 'pending' || last.deferred) break;
   }
   return last;
 }
 
-/**
- * Marks 'processing' invoices as error (retry allowed) when nothing is queued for them and they made
- * no progress for STALE_PROCESSING_MS, or their run is older than MAX_RUN_MS. A run with a queued
- * job is left to the ticks, which resume it. `clientIds` limits the sweep (null = all, for the
- * scheduled worker). Returns the ids it failed.
- */
-export async function sweepStaleProcessing(clientIds: string[] | null = null, limit = 50): Promise<string[]> {
-  const d = await deps();
-  const cutoff = iso(d.now() - STALE_PROCESSING_MS);
-  let query = d.db
-    .from('invoices')
-    .select('id, client_id, file_url, file_name, status, processing_run_id, processing_started_at, processing_attempts, updated_at, created_at')
-    .eq('status', 'processing')
-    .lt('updated_at', cutoff);
-  if (clientIds) {
-    if (clientIds.length === 0) return [];
-    query = query.in('client_id', clientIds);
-  }
-  const { data, error } = await query.limit(limit);
-  if (error) {
-    console.error('[Queue] Stale sweep query failed:', error);
-    return [];
-  }
-  const failed: string[] = [];
-  for (const invoice of (data ?? []) as InvoiceRow[]) {
-    const job = await readJob(d.db, invoice.id);
-    const current = job && job.run_id === invoice.processing_run_id ? job : null;
-    const locked = current?.locked_until ? Date.parse(current.locked_until) > d.now() : false;
-    if (locked) continue;
-    const stuck = current
-      ? isRunTooOld(invoice.processing_started_at, d.now())
-      : isStaleRun({ now: d.now(), startedAt: invoice.processing_started_at, lastActivityAt: null, rowUpdatedAt: invoice.updated_at ?? invoice.created_at });
-    if (stuck) {
-      await failRun(d, invoice.id, invoice.processing_run_id ?? null, STUCK_RUN_MESSAGE);
-      failed.push(invoice.id);
-    }
-  }
-  if (failed.length > 0) console.warn(`[Queue] Marked ${failed.length} stuck invoices as error: ${failed.join(', ')}`);
-  return failed;
+export interface SweepResult {
+  /** Invoices marked as error (stuck). */
+  failed: string[];
+  /** 'processing' rows that were never queued and are queued now. */
+  enqueued: string[];
 }
 
-/** Jobs whose lease is free, oldest activity first (scheduled worker). */
-export async function dueJobIds(limit = 5): Promise<string[]> {
+/**
+ * Looks at 'processing' invoices with no fresh activity: a row without a job of its run is queued
+ * when it was never queued (processing_attempts 0) and marked as error (retry allowed) when it was
+ * queued but made no progress for STALE_PROCESSING_MS; a run older than MAX_RUN_MS is marked as
+ * error too. A run with a queued job is left to the ticks, which resume it. `clientIds` limits the
+ * sweep (null = all, for the scheduled worker).
+ */
+export async function sweepStaleProcessing(clientIds: string[] | null = null, limit = 100): Promise<SweepResult> {
   const d = await deps();
-  const { data, error } = await d.db.from(JOBS).select('invoice_id, locked_until, updated_at').order('updated_at', { ascending: true }).limit(100);
+  const result: SweepResult = { failed: [], enqueued: [] };
+  if (clientIds && clientIds.length === 0) return result;
+  // Only rows that may need action, so a long queue of live jobs can't crowd them out (QA round 3
+  // review): never-queued rows past the enqueue grace, and rows without any change for
+  // STALE_PROCESSING_MS (a stale run has an old updated_at; a live job's steps keep bumping it).
+  const candidates = (cutoffMs: number, neverQueued: boolean) => {
+    let query = d.db
+      .from('invoices')
+      .select(INVOICE_COLUMNS)
+      .eq('status', 'processing')
+      .lt('updated_at', iso(d.now() - cutoffMs));
+    if (neverQueued) query = query.or('processing_attempts.is.null,processing_attempts.eq.0');
+    if (clientIds) query = query.in('client_id', clientIds);
+    return query.order('updated_at', { ascending: true }).limit(limit);
+  };
+  const [fresh, stale] = await Promise.all([candidates(ENQUEUE_GRACE_MS, true), candidates(STALE_PROCESSING_MS, false)]);
+  if (fresh.error || stale.error) {
+    console.error('[Queue] Stale sweep query failed:', fresh.error ?? stale.error);
+    return result;
+  }
+  const byId = new Map<string, InvoiceRow>();
+  for (const row of [...(fresh.data ?? []), ...(stale.data ?? [])] as unknown as InvoiceRow[]) byId.set(row.id, row);
+  const invoices = [...byId.values()];
+  if (invoices.length === 0) return result;
+
+  const { data: jobRows, error: jobsErr } = await d.db
+    .from(JOBS)
+    .select('invoice_id, run_id, locked_until')
+    .in('invoice_id', invoices.map((i) => i.id));
+  if (jobsErr) {
+    console.error('[Queue] Stale sweep job query failed:', jobsErr);
+    return result;
+  }
+  const jobs = new Map(((jobRows ?? []) as Pick<JobRow, 'invoice_id' | 'run_id' | 'locked_until'>[]).map((j) => [j.invoice_id, j]));
+
+  for (const invoice of invoices) {
+    const job = jobs.get(invoice.id);
+    const current = job && job.run_id === invoice.processing_run_id ? job : null;
+    if (current) {
+      const locked = current.locked_until ? Date.parse(current.locked_until) > d.now() : false;
+      if (!locked && isRunTooOld(invoice.processing_started_at, d.now())) {
+        await failRun(d, invoice.id, invoice.processing_run_id ?? null, STUCK_RUN_MESSAGE, 'run older than MAX_RUN_MS (sweep)');
+        result.failed.push(invoice.id);
+      }
+      continue;
+    }
+    const action = orphanRunAction({
+      now: d.now(),
+      attempts: invoice.processing_attempts,
+      processingStage: invoice.processing_stage,
+      startedAt: invoice.processing_started_at,
+      rowUpdatedAt: invoice.updated_at ?? invoice.created_at,
+    });
+    if (action === 'enqueue') {
+      const queued = await enqueueProcessing(invoice.id, { reuseActiveRun: true });
+      if (queued.ok && !queued.alreadyQueued) result.enqueued.push(invoice.id);
+      else if (!queued.ok) console.warn(`[Queue] Could not queue never-queued invoice ${invoice.id}: ${queued.error}`);
+    } else if (action === 'fail') {
+      await failRun(d, invoice.id, invoice.processing_run_id ?? null, STUCK_RUN_MESSAGE,
+        `no job of run ${invoice.processing_run_id ?? '-'} for ${Math.round(STALE_PROCESSING_MS / 60_000)} min (sweep, stage ${invoice.processing_stage ?? '-'})`);
+      result.failed.push(invoice.id);
+    }
+  }
+  if (result.failed.length > 0) console.warn(`[Queue] Marked ${result.failed.length} stuck invoices as error: ${result.failed.join(', ')}`);
+  if (result.enqueued.length > 0) console.log(`[Queue] Queued ${result.enqueued.length} never-queued invoices: ${result.enqueued.join(', ')}`);
+  return result;
+}
+
+export interface DueJobs {
+  /** Up to `limit` jobs a tick can take now, oldest activity first. */
+  ids: string[];
+  /** All jobs a tick can take now (lease free, no retry backoff pending). */
+  total: number;
+}
+
+/** Jobs whose lease is free and whose retry backoff (if any) is over, oldest activity first (scheduled worker). */
+export async function dueJobs(limit = 5): Promise<DueJobs> {
+  const d = await deps();
+  const select = (cols: string) => d.db.from(JOBS).select(cols).order('updated_at', { ascending: true }).limit(200);
+  let { data, error } = await select(transientColumnsUnsupported ? 'invoice_id, locked_until, updated_at' : 'invoice_id, locked_until, retry_at, updated_at');
+  if (error && !transientColumnsUnsupported && isMissingColumn(error, TRANSIENT_COLUMNS)) {
+    transientColumnsUnsupported = true;
+    ({ data, error } = await select('invoice_id, locked_until, updated_at'));
+  }
   if (error) {
     console.error('[Queue] Due jobs query failed:', error);
-    return [];
+    return { ids: [], total: 0 };
   }
   const now = d.now();
-  return ((data ?? []) as { invoice_id: string; locked_until: string | null }[])
-    .filter((j) => !j.locked_until || Date.parse(j.locked_until) <= now)
-    .slice(0, limit)
+  const due = ((data ?? []) as unknown as { invoice_id: string; locked_until: string | null; retry_at?: string | null }[])
+    .filter((j) => (!j.locked_until || Date.parse(j.locked_until) <= now) && (!j.retry_at || Date.parse(j.retry_at) <= now))
     .map((j) => j.invoice_id);
+  return { ids: due.slice(0, limit), total: due.length };
 }

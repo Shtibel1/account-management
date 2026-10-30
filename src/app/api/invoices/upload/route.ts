@@ -1,17 +1,21 @@
 import { NextResponse } from 'next/server';
-import { registerStoredDocument, type RegisterResult } from '@/lib/ingest';
+import { registerStoredDocument, schedulePipeline, type RegisterResult } from '@/lib/ingest';
 import { requireClientAccess } from '@/lib/auth';
 import { isOwnStoragePath } from '@/lib/ingestHelpers';
-import { checkUploadDeclaration } from '@/shared/uploadValidation';
+import { checkUploadDeclaration, mimeFromFileName } from '@/shared/uploadValidation';
 
 /** Max files registered in one request. */
 const MAX_FILES = 50;
+/** Registered rows queued in parallel. */
+const ENQUEUE_CONCURRENCY = 5;
 
 /**
  * Registers files the browser already PUT into raw-invoices (see /api/invoices/upload-url).
  * registerStoredDocument checks the stored bytes (size, empty, real PDF / image by magic bytes):
  * a rejected file gets no invoice row and is reported per file with a Hebrew error.
- * The browser then queues /api/invoices/[id]/process for each successful row.
+ * Each registered row is queued for processing here, on the server (`queued: true` per result), so
+ * processing never depends on the browser's /process call (QA round 3); the scheduled worker and the
+ * review screens drive the queued jobs.
  */
 export async function POST(request: Request) {
   let body: unknown;
@@ -55,10 +59,18 @@ export async function POST(request: Request) {
         continue;
       }
       // registerStoredDocument also fingerprints the stored bytes (invoices.file_hash) before
-      // returning, so the hash is in place before the client triggers processing.
-      results.push(
-        await registerStoredDocument({ clientId, filePath: file.filePath, fileName: file.fileName, source: 'upload' })
-      );
+      // returning, so the hash is in place before the job is queued.
+      results.push(await registerStoredDocument({ clientId, filePath: file.filePath, fileName: file.fileName, source: 'upload' }));
+    }
+
+    // Queue the registered rows after the loop, a few at a time (each enqueue is several DB round
+    // trips), so a large batch still answers well before Amplify's ~28 s cut. A row that could not be
+    // queued is queued by the worker's sweep (never-queued rows).
+    const registered = results.filter((r): r is Extract<RegisterResult, { status: 'success' }> => r.status === 'success');
+    for (let i = 0; i < registered.length; i += ENQUEUE_CONCURRENCY) {
+      await Promise.all(registered.slice(i, i + ENQUEUE_CONCURRENCY).map(async (r) => {
+        r.queued = await schedulePipeline(r.id, mimeFromFileName(r.fileName));
+      }));
     }
 
     const anySuccess = results.some((r) => r.status === 'success');

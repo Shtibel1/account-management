@@ -1,6 +1,5 @@
-import { after } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { driveProcessing, enqueueProcessing } from '@/lib/processingQueue';
+import { enqueueProcessing } from '@/lib/processingQueue';
 import { buildStoragePath, MAX_DOCUMENT_BYTES } from '@/lib/ingestHelpers';
 import { storedFileUrlFor } from '@/lib/invoiceFiles';
 import { hashStoredFile, saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
@@ -9,7 +8,7 @@ import { checkStoredBytes } from '@/shared/uploadValidation';
 
 /**
  * Single server-side entry point for every ingestion channel (upload, email, WhatsApp):
- * store the raw file in the raw-invoices bucket, create the invoice row, start the pipeline.
+ * store the raw file in the raw-invoices bucket, create the invoice row, queue the pipeline.
  */
 
 const RAW_BUCKET = 'raw-invoices';
@@ -30,7 +29,14 @@ export interface StoredDocument {
 }
 
 export type RegisterResult =
-  | { fileName: string; status: 'success'; id: string; fileUrl: string }
+  | {
+      fileName: string;
+      status: 'success';
+      id: string;
+      fileUrl: string;
+      /** The processing job was queued on the server (the browser need not call /process). */
+      queued?: boolean;
+    }
   | { fileName: string; status: 'error'; id?: string; error: string; duplicate?: boolean };
 
 interface DbError {
@@ -94,7 +100,7 @@ async function removeStoredFile(filePath: string): Promise<void> {
 
 /**
  * Creates the invoice row for a file already in the raw-invoices bucket (signs a read URL first).
- * Does NOT start the pipeline - the browser upload flow triggers /api/invoices/[id]/process itself.
+ * Does NOT queue the pipeline: callers do that with schedulePipeline() (ingestDocument, the upload route).
  */
 export async function registerStoredDocument(doc: StoredDocument): Promise<RegisterResult> {
   const { clientId, filePath, fileName } = doc;
@@ -177,30 +183,22 @@ export async function registerStoredDocument(doc: StoredDocument): Promise<Regis
 }
 
 /**
- * Queues the pipeline (src/lib/processingQueue.ts) and gives it a head start after the HTTP
- * response is sent (next/server `after`), so webhooks answer within the provider's timeout.
- * If the platform stops the function early, the scheduled worker / review screen continue the run.
+ * Queues the pipeline (src/lib/processingQueue.ts) of a registered document; true when it is queued
+ * (or already was). Nothing runs here or after the response (on Amplify that work would be frozen,
+ * QA round 3): the scheduled worker and the review screens drive the job. A row that could not be
+ * queued stays 'processing' and the worker's sweep queues it (never-queued rows).
  */
-export async function schedulePipeline(invoiceId: string, mimeType: string): Promise<void> {
-  // Enqueued before answering, so the job exists even if the background head start never runs
-  const queued = await enqueueProcessing(invoiceId, { mimeType });
-  if (!queued.ok) {
-    console.error(`[Ingest] Could not queue invoice ${invoiceId}: ${queued.error}`);
-    return;
-  }
-  const task = async () => {
-    try {
-      await driveProcessing(invoiceId, 20_000);
-    } catch (err) {
-      console.error(`[Ingest] Pipeline tick failed for invoice ${invoiceId}:`, err);
-    }
-  };
-
+export async function schedulePipeline(invoiceId: string, mimeType?: string | null): Promise<boolean> {
   try {
-    after(task);
+    const queued = await enqueueProcessing(invoiceId, { mimeType: mimeType ?? undefined, reuseActiveRun: true });
+    if (!queued.ok) {
+      console.error(`[Ingest] Could not queue invoice ${invoiceId}: ${queued.error}`);
+      return false;
+    }
+    return true;
   } catch (err) {
-    console.warn('[Ingest] after() unavailable outside a request scope, running pipeline detached:', err);
-    void task();
+    console.error(`[Ingest] Queueing invoice ${invoiceId} crashed:`, err);
+    return false;
   }
 }
 
@@ -214,7 +212,7 @@ export interface IngestDocumentInput {
   sourceRef?: string | null;
 }
 
-/** Stores the bytes, creates the invoice row and schedules the pipeline - like a browser upload. */
+/** Stores the bytes, creates the invoice row and queues the pipeline - like a browser upload. */
 export async function ingestDocument(input: IngestDocumentInput): Promise<RegisterResult> {
   const { clientId, fileName, mimeType, bytes } = input;
 
@@ -246,7 +244,7 @@ export async function ingestDocument(input: IngestDocumentInput): Promise<Regist
   });
 
   if (result.status === 'success') {
-    await schedulePipeline(result.id, mimeType);
+    return { ...result, queued: await schedulePipeline(result.id, mimeType) };
   }
   return result;
 }

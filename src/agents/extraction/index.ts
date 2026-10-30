@@ -3,6 +3,7 @@ import type { ExtractedData } from '@/shared/types';
 import { formatFewShotPrompt, type FewShotExample } from '@/shared/fewshot';
 import { MAX_LINE_ITEMS, normalizeLineItems } from '@/shared/lineItems';
 import { normalizeFieldConfidence } from '@/shared/confidence';
+import { estimateOutputTokens, trimPartialToolInput } from '@/shared/partialToolInput';
 
 const apiKey = process.env.ANTHROPIC_API_KEY;
 
@@ -166,6 +167,12 @@ export async function extractInvoiceData(
     hint?: string | null;
     /** Retry a response cut at max_tokens with a larger budget (one long call). Off for page chunks. */
     allowLargeRetry?: boolean;
+    /**
+     * Time limit of each model call (ms). The processing queue passes what is left of its request's
+     * deadline, so a call can never outlive the response (nothing runs after it on Amplify). No SDK
+     * retries then: the queue retries transient failures itself, with backoff.
+     */
+    timeoutMs?: number;
   } = {}
 ): Promise<{
   extractedData: ExtractedData;
@@ -173,8 +180,14 @@ export async function extractInvoiceData(
   outputTokens: number;
   /** Ids of the past invoices that were included as few-shot examples. */
   fewShotInvoiceIds: string[];
+  /** The final response was cut at max_tokens or at its time limit (its tool input may be incomplete). */
+  truncated: boolean;
+  /** The call was cut at its time limit (`timeoutMs`), not at max_tokens. */
+  timedOut: boolean;
 }> {
   const anthropic = getAnthropicClient();
+  // The time limit covers the image download too
+  const callDeadline = options.timeoutMs ? Date.now() + options.timeoutMs : null;
   const content: Anthropic.MessageParam['content'] = [];
 
   // Decide if we should fetch and send the image (fallback / missing OCR text). Only real images:
@@ -183,7 +196,8 @@ export async function extractInvoiceData(
 
   if (shouldSendImage) {
     console.log(`[Extraction] Performing multimodal vision extraction (fallback or missing OCR)`);
-    const imageBuffer = await fetch(fileUrl).then((r) => r.arrayBuffer());
+    const imageBuffer = await fetch(fileUrl, options.timeoutMs ? { signal: AbortSignal.timeout(Math.max(1_000, Math.floor(options.timeoutMs))) } : undefined)
+      .then((r) => r.arrayBuffer());
     const base64 = Buffer.from(imageBuffer).toString('base64');
     const mediaType = mimeType.startsWith('image/')
       ? (mimeType as 'image/jpeg' | 'image/png' | 'image/webp')
@@ -222,38 +236,55 @@ export async function extractInvoiceData(
     text: promptText,
   });
 
-  const callModel = (maxTokens: number) =>
-    anthropic.messages.create({
-      model: 'claude-sonnet-4-5-20250929',
-      max_tokens: maxTokens,
-      system: shouldSendImage ? SYSTEM_PROMPT_VISION : SYSTEM_PROMPT_TEXT_ONLY,
-      tools: [TOOL_DEFINITION],
-      tool_choice: { type: 'any' },
-      messages: [{ role: 'user', content }],
-    });
+  const params = (maxTokens: number): Anthropic.MessageCreateParamsNonStreaming => ({
+    model: 'claude-sonnet-4-5-20250929',
+    max_tokens: maxTokens,
+    system: shouldSendImage ? SYSTEM_PROMPT_VISION : SYSTEM_PROMPT_TEXT_ONLY,
+    tools: [TOOL_DEFINITION],
+    tool_choice: { type: 'any' },
+    messages: [{ role: 'user', content }],
+  });
 
-  // 1024 was enough for the scalar fields; up to MAX_LINE_ITEMS lines + confidences need more.
-  // A tool call cut at max_tokens may lose every field (not just line_items), so retry once
-  // with a larger budget (billing is per token actually generated).
-  let response = await callModel(4096);
-  let inputTokens = response.usage?.input_tokens ?? 0;
-  let outputTokens = response.usage?.output_tokens ?? 0;
-  if (response.stop_reason === 'max_tokens' && options.allowLargeRetry === false) {
-    console.warn('[Extraction] Response hit max_tokens (4096) on a page chunk — keeping the partial tool input');
-  } else if (response.stop_reason === 'max_tokens') {
-    console.warn('[Extraction] Response hit max_tokens (4096) — retrying with 16384');
-    response = await callModel(16384);
-    inputTokens += response.usage?.input_tokens ?? 0;
-    outputTokens += response.usage?.output_tokens ?? 0;
-    if (response.stop_reason === 'max_tokens') {
-      console.warn('[Extraction] Response hit max_tokens again — tool input may be truncated');
+  let raw: Record<string, unknown>;
+  let inputTokens: number;
+  let outputTokens: number;
+  let truncated: boolean;
+  let timedOut = false;
+  if (options.timeoutMs) {
+    // Processing queue: one streamed call under the step's time limit, no large retry (it can't end
+    // before the deadline). A call still writing at the limit is cut there and keeps what it wrote.
+    const r = await streamToolCall(anthropic, params(4096), Math.max(1_000, (callDeadline ?? 0) - Date.now()));
+    if (!r.toolInput) throw new Error('המודל לא החזיר נתוני חשבונית');
+    raw = r.toolInput;
+    inputTokens = r.inputTokens;
+    outputTokens = r.outputTokens;
+    timedOut = r.timedOut;
+    truncated = r.timedOut || r.stopReason === 'max_tokens';
+    if (r.timedOut) console.warn(`[Extraction] Call cut at its ${Math.round(options.timeoutMs)} ms limit — keeping the partial tool input`);
+    else if (truncated) console.warn('[Extraction] Response hit max_tokens (4096) — keeping the partial tool input');
+  } else {
+    // 1024 was enough for the scalar fields; up to MAX_LINE_ITEMS lines + confidences need more.
+    // A tool call cut at max_tokens may lose every field (not just line_items), so retry once
+    // with a larger budget (billing is per token actually generated).
+    let response = await anthropic.messages.create(params(4096));
+    inputTokens = response.usage?.input_tokens ?? 0;
+    outputTokens = response.usage?.output_tokens ?? 0;
+    if (response.stop_reason === 'max_tokens' && options.allowLargeRetry === false) {
+      console.warn('[Extraction] Response hit max_tokens (4096) on a page chunk — keeping the partial tool input');
+    } else if (response.stop_reason === 'max_tokens') {
+      console.warn('[Extraction] Response hit max_tokens (4096) — retrying with 16384');
+      response = await anthropic.messages.create(params(16384));
+      inputTokens += response.usage?.input_tokens ?? 0;
+      outputTokens += response.usage?.output_tokens ?? 0;
+      if (response.stop_reason === 'max_tokens') {
+        console.warn('[Extraction] Response hit max_tokens again — tool input may be truncated');
+      }
     }
+    const toolUse = response.content.find((b) => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
+    if (!toolUse) throw new Error('המודל לא החזיר נתוני חשבונית');
+    raw = toolUse.input as Record<string, unknown>;
+    truncated = response.stop_reason === 'max_tokens';
   }
-
-  const toolUse = response.content.find((b) => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
-  if (!toolUse) throw new Error('המודל לא החזיר נתוני חשבונית');
-
-  const raw = toolUse.input as Record<string, unknown>;
 
   const bbox = (key: string) => {
     const b = raw[`${key}_bbox`] as { x1: number; y1: number; x2: number; y2: number } | undefined;
@@ -296,5 +327,71 @@ export async function extractInvoiceData(
     inputTokens,
     outputTokens,
     fewShotInvoiceIds: usedInvoiceIds,
+    truncated,
+    timedOut,
   };
+}
+
+/** A model call that ran out of time before it wrote any tool input (a transient failure for the queue). */
+class CallTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`Extraction call timed out after ${Math.round(ms)} ms`);
+    this.name = 'TimeoutError';
+  }
+}
+
+/**
+ * One streamed tool call under a time limit (QA round 3 review): at `timeoutMs` the stream is
+ * aborted and the tool input written so far is kept (trimPartialToolInput drops the value that may
+ * be cut). Throws a timeout when nothing usable was written by then, and the API's own errors.
+ */
+async function streamToolCall(
+  anthropic: Anthropic,
+  body: Anthropic.MessageCreateParamsNonStreaming,
+  timeoutMs: number
+): Promise<{ toolInput: Record<string, unknown> | null; stopReason: string | null; inputTokens: number; outputTokens: number; timedOut: boolean }> {
+  const startedAt = Date.now();
+  const stream = anthropic.messages.stream(body, { maxRetries: 0 });
+  let snapshot: unknown = null;
+  let jsonChars = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  stream.on('inputJson', (delta, json) => {
+    snapshot = json;
+    jsonChars += delta.length;
+  });
+  stream.on('streamEvent', (event) => {
+    if (event.type === 'message_start') {
+      inputTokens = event.message.usage?.input_tokens ?? 0;
+      outputTokens = event.message.usage?.output_tokens ?? 0;
+    } else if (event.type === 'message_delta') {
+      outputTokens = event.usage?.output_tokens ?? outputTokens;
+    }
+  });
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    stream.abort();
+  }, Math.max(1_000, Math.floor(timeoutMs)));
+  try {
+    const message = await stream.finalMessage();
+    const toolUse = message.content.find((b) => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
+    console.log(`[Extraction] Call took ${Date.now() - startedAt} ms (${message.usage?.output_tokens ?? 0} output tokens, limit ${Math.round(timeoutMs)} ms).`);
+    return {
+      toolInput: (toolUse?.input as Record<string, unknown> | undefined) ?? null,
+      stopReason: message.stop_reason,
+      inputTokens: message.usage?.input_tokens ?? inputTokens,
+      outputTokens: message.usage?.output_tokens ?? outputTokens,
+      timedOut: false,
+    };
+  } catch (err) {
+    if (!timedOut) throw err;
+    const partial = trimPartialToolInput(snapshot);
+    console.warn(`[Extraction] Call cut at ${Date.now() - startedAt} ms (~${estimateOutputTokens(jsonChars)} output tokens written).`);
+    if (!partial) throw new CallTimeoutError(timeoutMs);
+    // The usage of an aborted stream never arrives: estimate the output tokens from what was written
+    return { toolInput: partial, stopReason: null, inputTokens, outputTokens: Math.max(outputTokens, estimateOutputTokens(jsonChars)), timedOut: true };
+  } finally {
+    clearTimeout(timer);
+  }
 }
