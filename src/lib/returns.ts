@@ -109,6 +109,10 @@ async function logNotification(row: {
   outcome: NotificationOutcome;
   providerMessageId: string | null;
 }): Promise<void> {
+  if (!row.orgId) {
+    console.error(`[returns] Cannot log ${row.outcome.channel} notification for invoice ${row.invoiceId}: unknown office`);
+    return;
+  }
   const { error } = await deps.db.from('client_notifications').insert({
     org_id: row.orgId,
     client_id: row.clientId,
@@ -189,7 +193,10 @@ export async function notifyClientOfReturn(params: {
         outcome = { channel: 'email', to: item.to, status: 'failed', error: `SES: ${msg}`.slice(0, 300) };
       }
     } else {
-      const res = await deps.sendWhatsApp(waConfig!, item.to, message.text);
+      const res = await deps.sendWhatsApp(waConfig!, item.to, message.text).catch((err: unknown) => ({
+        ok: false as const,
+        error: `Twilio: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300),
+      }));
       outcome = res.ok
         ? { channel: 'whatsapp', to: item.to, status: 'sent', error: null }
         : { channel: 'whatsapp', to: item.to, status: 'failed', error: res.error };
@@ -255,7 +262,10 @@ export async function returnInvoiceToClient(params: {
   }
 
   const returnedAt = new Date().toISOString();
-  const { error: updErr } = await deps.db
+  // Conditional update that returns the rows it changed: an empty result means somebody changed
+  // the status meanwhile and NOTHING was written (no reload / timestamp string compare - PostgREST
+  // renders timestamptz as '+00:00', never as the 'Z' of toISOString()).
+  const { data: changedRows, error: updErr } = await deps.db
     .from('invoices')
     .update({
       status: 'returned' satisfies InvoiceStatus,
@@ -266,23 +276,43 @@ export async function returnInvoiceToClient(params: {
       updated_at: returnedAt,
     })
     .eq('id', current.id)
-    .eq('status', current.status); // only if nobody changed it meanwhile
+    .eq('status', current.status) // only if nobody changed it meanwhile
+    .select('*');
   if (updErr) throw new Error(`Failed to mark the invoice as returned: ${updErr.message}`);
-
-  const { data: afterRows, error: reloadErr } = await deps.db.from('invoices').select('*').eq('id', current.id).limit(1);
-  if (reloadErr) throw new Error(`Failed to reload invoice: ${reloadErr.message}`);
-  const updated = ((Array.isArray(afterRows) ? afterRows[0] : null) as Invoice | undefined) ?? null;
-  if (!updated || updated.status !== 'returned' || updated.returned_at !== returnedAt) {
+  const updated = ((Array.isArray(changedRows) ? changedRows[0] : null) as Invoice | undefined) ?? null;
+  if (!updated) {
     throw new ReturnInvoiceError('החשבונית עודכנה במקביל - רעננו ונסו שוב', 409);
   }
 
-  const notifications = await notifyClientOfReturn({
-    invoice: current,
-    clientId: current.client_id,
-    orgId: params.orgId,
-    userId: params.userId,
-    reasonText: params.reason.text,
-  });
+  // The status change is committed: from here on the request succeeds and the client is notified.
+  // Every channel attempt is logged (sent / failed / not_sent); an unexpected error while preparing
+  // the notifications is logged as 'failed' rows instead of failing the (already done) return.
+  let notifications: NotificationOutcome[];
+  try {
+    notifications = await notifyClientOfReturn({
+      invoice: current,
+      clientId: current.client_id,
+      orgId: params.orgId,
+      userId: params.userId,
+      reasonText: params.reason.text,
+    });
+  } catch (err) {
+    const msg = (err instanceof Error ? err.message : String(err)).slice(0, 250);
+    console.error(`[returns] Notifying the client of returned invoice ${current.id} failed:`, msg);
+    notifications = [];
+    for (const channel of ['email', 'whatsapp'] as const) {
+      const outcome: NotificationOutcome = { channel, to: null, status: 'failed', error: `שגיאה בהכנת ההודעה: ${msg}` };
+      await logNotification({
+        orgId: params.orgId,
+        clientId: current.client_id,
+        invoiceId: current.id,
+        userId: params.userId,
+        outcome,
+        providerMessageId: null,
+      }).catch(() => undefined);
+      notifications.push(outcome);
+    }
+  }
   return { invoice: updated, notifications };
 }
 

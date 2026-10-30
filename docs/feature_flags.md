@@ -69,7 +69,9 @@ notified, and the corrected document the client re-sends is linked to the return
 - **Invoice table**: status filter "הוחזר ללקוח (N)" and the reason under the file name; banners on the review screen
   show the reason, the notification log and links between the returned invoice and its correction.
 - **Flag off**: no button, banner, filter or email field is rendered, and `/api/invoices/[id]/return`,
-  `/api/invoices/[id]/notifications`, `/api/clients/[id]/contact-email` answer `404`.
+  `/api/invoices/[id]/notifications`, `/api/clients/[id]/contact-email` answer `404`. The DB refuses direct
+  PostgREST writes of `clients.contact_email` by members (trigger `clients_check_writes`), so the address can only
+  be set through that route, i.e. only while the flag is on.
 
 **Schema changes**: `invoices.status` accepts `'returned'` (the migration replaces an existing CHECK constraint or adds
 the value to an enum, whichever the live column uses); new columns on `invoices` (above) and `clients.contact_email`.

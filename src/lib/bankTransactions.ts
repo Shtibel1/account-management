@@ -142,31 +142,122 @@ function isMissingFunction(error: DbError | null): boolean {
   return !!error && (error.code === 'PGRST202' || error.code === '42883');
 }
 
+/** Rows per staging call: each call is one small, fast statement (one jsonb row), far below the
+ * 8 s PostgREST statement timeout and the ~28 s request cut of the Amplify compute. */
+const STAGE_CHUNK = 2500;
+const STAGE_CONCURRENCY = 4;
+const STAGE_RPC = 'stage_bank_import_chunk';
+const COMMIT_RPC = 'commit_bank_import';
+const STAGING_TABLE = 'bank_import_staging';
+
+type ImportRpcRow = Pick<BankInsertRow, 'txn_date' | 'description' | 'amount' | 'reference' | 'dedupe_key'>;
+
+function toRpcRow(r: BankInsertRow): ImportRpcRow {
+  return { txn_date: r.txn_date, description: r.description, amount: r.amount, reference: r.reference, dedupe_key: r.dedupe_key };
+}
+
+/** Runs `tasks` with at most `limit` in flight; rejects with the first failure (no new task starts after it). */
+async function runLimited(tasks: (() => Promise<void>)[], limit: number): Promise<void> {
+  let next = 0;
+  let failure: { error: unknown } | null = null;
+  const worker = async () => {
+    while (!failure && next < tasks.length) {
+      const task = tasks[next++];
+      try {
+        await task();
+      } catch (error) {
+        if (!failure) failure = { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
+  if (failure) throw (failure as { error: unknown }).error;
+}
+
+type ImportBatch = { clientId: string; accountLabel: string; batchId: string; sourceFile: string | null };
+
+class StageError extends Error {
+  constructor(public readonly dbError: DbError) {
+    super(dbError.message);
+  }
+}
+
 /**
- * Inserts every new line or none. Preferred path: the import_bank_transactions() SQL function (one
- * statement = one transaction). Fallback (mock DB / function not deployed yet): chunked inserts,
- * and on any failure the lines of this batch already written are deleted again.
+ * Large statements (QA round 2 N8): the rows are uploaded in small chunks to bank_import_staging
+ * (service role only, invisible to the app), then commit_bank_import() moves the whole batch into
+ * bank_transactions in ONE statement - all or nothing - and drops the staging rows. The commit
+ * reads the staged rows inside the database (no multi-MB JSON parse in the timed statement) and has
+ * its own statement_timeout (function setting, applied by PostgREST). Returns null when the staging
+ * functions aren't deployed yet (the caller falls back to the single-call import).
  */
-async function insertAllOrNothing(
-  db: SupabaseClient,
-  batch: { clientId: string; accountLabel: string; batchId: string; sourceFile: string | null },
-  rows: BankInsertRow[]
-): Promise<number> {
-  if (rows.length === 0) return 0;
+async function importViaStaging(db: SupabaseClient, batch: ImportBatch, rows: BankInsertRow[]): Promise<number | null> {
+  const chunks: ImportRpcRow[][] = [];
+  for (let i = 0; i < rows.length; i += STAGE_CHUNK) chunks.push(rows.slice(i, i + STAGE_CHUNK).map(toRpcRow));
+
+  const stage = async (seq: number) => {
+    const { error } = await db.rpc(STAGE_RPC, {
+      p_batch_id: batch.batchId,
+      p_client_id: batch.clientId,
+      p_account_label: batch.accountLabel,
+      p_seq: seq,
+      p_rows: chunks[seq],
+    });
+    if (error) throw new StageError(error as DbError);
+  };
+
+  try {
+    // The first call also tells whether the staging function is deployed at all.
+    try {
+      await stage(0);
+    } catch (err) {
+      if (err instanceof StageError && isMissingFunction(err.dbError)) return null;
+      throw err;
+    }
+    await runLimited(chunks.slice(1).map((_, i) => () => stage(i + 1)), STAGE_CONCURRENCY);
+
+    const { data, error } = await db.rpc(COMMIT_RPC, {
+      p_batch_id: batch.batchId,
+      p_client_id: batch.clientId,
+      p_account_label: batch.accountLabel,
+      p_source_file: batch.sourceFile,
+      p_chunks: chunks.length,
+      p_rows: rows.length,
+    });
+    if (error) throw new StageError(error as DbError);
+    return typeof data === 'number' ? data : Number(data ?? 0);
+  } catch (err) {
+    // Nothing reached bank_transactions; drop what was staged (stale batches are also purged by
+    // stage_bank_import_chunk after a day).
+    const { error: cleanupError } = await db.from(STAGING_TABLE).delete().eq('batch_id', batch.batchId);
+    if (cleanupError) console.error(`[bank] Failed to drop staged import ${batch.batchId}:`, cleanupError.message);
+    if (err instanceof StageError) throwDbError(err.dbError, 'staged import');
+    throw err;
+  }
+}
+
+/**
+ * Inserts every new line or none; lines already imported (same client + account + dedupe key) are
+ * skipped by the database (ON CONFLICT DO NOTHING), so no per-key lookups are needed up front.
+ * Preferred path: import_bank_transactions() for up to one chunk, staging + commit_bank_import()
+ * for more (one statement = one transaction either way). Fallback (mock DB / functions not
+ * deployed yet): chunked inserts, and on any failure the lines of this batch already written are
+ * deleted again.
+ */
+async function insertAllOrNothing(db: SupabaseClient, batch: ImportBatch, allRows: BankInsertRow[]): Promise<number> {
+  if (allRows.length === 0) return 0;
 
   if (typeof db.rpc === 'function') {
+    if (allRows.length > STAGE_CHUNK) {
+      const staged = await importViaStaging(db, batch, allRows);
+      if (staged !== null) return staged;
+      console.warn(`[bank] ${STAGE_RPC}() not deployed, importing in a single call`);
+    }
     const { data, error } = await db.rpc(IMPORT_RPC, {
       p_client_id: batch.clientId,
       p_account_label: batch.accountLabel,
       p_batch_id: batch.batchId,
       p_source_file: batch.sourceFile,
-      p_rows: rows.map((r) => ({
-        txn_date: r.txn_date,
-        description: r.description,
-        amount: r.amount,
-        reference: r.reference,
-        dedupe_key: r.dedupe_key,
-      })),
+      p_rows: allRows.map(toRpcRow),
     });
     if (!isMissingFunction(error)) {
       throwDbError(error, 'import transactions');
@@ -174,6 +265,22 @@ async function insertAllOrNothing(
     }
     console.warn(`[bank] ${IMPORT_RPC}() not deployed, falling back to chunked inserts with rollback`);
   }
+
+  // Fallback: skip keys that already exist (the mock client has no upsert / ON CONFLICT).
+  const existing = new Set<string>();
+  const keys = allRows.map((r) => r.dedupe_key);
+  for (let i = 0; i < keys.length; i += KEY_LOOKUP_CHUNK) {
+    const chunk = keys.slice(i, i + KEY_LOOKUP_CHUNK);
+    const { data, error } = await db
+      .from(TABLE)
+      .select('dedupe_key')
+      .eq('client_id', batch.clientId)
+      .eq('account_label', batch.accountLabel)
+      .in('dedupe_key', chunk);
+    throwDbError(error, 'check duplicates');
+    for (const r of (data ?? []) as { dedupe_key: string }[]) existing.add(r.dedupe_key);
+  }
+  const rows = allRows.filter((r) => !existing.has(r.dedupe_key));
 
   let inserted = 0;
   try {
@@ -216,35 +323,21 @@ export async function importBankRows(
   const batchId = randomUUID();
   const keys = bankDedupeKeys(rows);
 
-  const existing = new Set<string>();
-  for (let i = 0; i < keys.length; i += KEY_LOOKUP_CHUNK) {
-    const chunk = keys.slice(i, i + KEY_LOOKUP_CHUNK);
-    const { data, error } = await db
-      .from(TABLE)
-      .select('dedupe_key')
-      .eq('client_id', clientId)
-      .eq('account_label', accountLabel)
-      .in('dedupe_key', chunk);
-    throwDbError(error, 'check duplicates');
-    for (const r of (data ?? []) as { dedupe_key: string }[]) existing.add(r.dedupe_key);
-  }
-
-  const toInsert = rows
-    .map((r, i) => ({
-      client_id: clientId,
-      account_label: accountLabel,
-      txn_date: r.txn_date,
-      description: r.description,
-      amount: r.amount,
-      reference: r.reference,
-      matched_invoice_id: null,
-      match_status: 'unmatched' as const,
-      rejected_invoice_ids: [] as string[],
-      dedupe_key: keys[i],
-      import_batch_id: batchId,
-      source_file: sourceFile,
-    }))
-    .filter((r) => !existing.has(r.dedupe_key));
+  // Duplicates (lines imported before) are skipped inside insertAllOrNothing.
+  const toInsert: BankInsertRow[] = rows.map((r, i) => ({
+    client_id: clientId,
+    account_label: accountLabel,
+    txn_date: r.txn_date,
+    description: r.description,
+    amount: r.amount,
+    reference: r.reference,
+    matched_invoice_id: null,
+    match_status: 'unmatched' as const,
+    rejected_invoice_ids: [] as string[],
+    dedupe_key: keys[i],
+    import_batch_id: batchId,
+    source_file: sourceFile,
+  }));
 
   const inserted = await insertAllOrNothing(db, { clientId, accountLabel, batchId, sourceFile }, toInsert);
   return { batchId, inserted, duplicates: rows.length - inserted };

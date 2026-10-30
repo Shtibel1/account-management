@@ -8,7 +8,7 @@ import { Plus, Building2, ChevronLeft, Users, Loader2, Plug } from 'lucide-react
 import { useSession } from '@/components/Auth/SessionContext';
 import { useToast } from '@/components/ui/Toast';
 import { ClientChannelsDialog, ClientChannelsSummary, useClientChannels } from '@/components/ClientChannels/ClientChannels';
-import { vatAccountError } from '@/shared/mappingValidation';
+import { mappingDbErrorMessage, vatAccountError } from '@/shared/mappingValidation';
 
 export default function ClientsPage() {
   const supabase = createClient();
@@ -64,7 +64,7 @@ export default function ClientsPage() {
     if (insertErr || !newClient) {
       // e.g. RLS: the user has no office yet.
       console.error('[Clients] Failed to create client:', insertErr?.message);
-      toast('יצירת הלקוח נכשלה. ודאו שאתם משויכים למשרד ונסו שוב.', 'error');
+      toast((insertErr?.code === '23514' ? mappingDbErrorMessage(insertErr) : null) ?? 'יצירת הלקוח נכשלה. ודאו שאתם משויכים למשרד ונסו שוב.', 'error');
       setSaving(false);
       return;
     }

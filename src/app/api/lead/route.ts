@@ -105,31 +105,56 @@ async function sendViaSES(data: LeadData): Promise<void> {
 
 const memoryLimiter = new MemoryRateLimiter();
 
-/** One hit on every rate bucket of this request; false when any bucket is over its limit. */
+/** Per-bucket DB counters (lead_rate_limit_hit), short-circuiting on the first full bucket; null when unavailable. */
+async function withinLegacyDbRateLimits(entries: { bucket: string; windowSeconds: number; max: number }[]): Promise<boolean | null> {
+  for (const e of entries) {
+    const { data, error } = await supabase.rpc('lead_rate_limit_hit', {
+      p_bucket: e.bucket,
+      p_window_seconds: e.windowSeconds,
+      p_max: e.max,
+    });
+    if (error || typeof data !== 'boolean') {
+      console.warn('[Lead] DB rate limit unavailable, using the in-memory limiter:', error?.message ?? 'no result');
+      return null;
+    }
+    if (!data) return false;
+  }
+  return true;
+}
+
+/**
+ * Rate limits of this request, all-or-nothing: true = within every limit (one hit counted on each
+ * bucket); false = some bucket is full and NOTHING was counted, so requests refused by the per-IP
+ * limit don't use up the global budget (QA round 2 N6). Counted atomically in the DB
+ * (lead_rate_limit_hit_all, migration 20261030182000_qa2_security2.sql) so it holds across server
+ * instances; the in-memory limiter (same semantics) is the fallback when the DB counter is missing.
+ */
 async function withinRateLimits(request: NextRequest): Promise<boolean> {
   const salt = process.env.LEAD_RATE_SALT || process.env.SUPABASE_SERVICE_KEY || 'lead';
   const ipHash = createHash('sha256').update(`${salt}:${clientIpFrom(request.headers)}`).digest('hex').slice(0, 32);
-  let allowed = true;
-  for (const { rule, bucket } of rateBuckets(ipHash)) {
-    let ok: boolean | null = null;
-    try {
-      const db = supabase as unknown as { rpc?: SupabaseClient['rpc'] };
-      if (typeof db.rpc === 'function') {
-        const { data, error } = await supabase.rpc('lead_rate_limit_hit', {
-          p_bucket: bucket,
-          p_window_seconds: rule.windowSeconds,
-          p_max: rule.max,
-        });
-        if (!error && typeof data === 'boolean') ok = data;
-        else if (error) console.warn('[Lead] DB rate limit unavailable, using the in-memory limiter:', error.message);
+  const entries = rateBuckets(ipHash).map(({ rule, bucket }) => ({ bucket, windowSeconds: rule.windowSeconds, max: rule.max }));
+  try {
+    const db = supabase as unknown as { rpc?: SupabaseClient['rpc'] };
+    if (typeof db.rpc === 'function') {
+      const { data, error } = await supabase.rpc('lead_rate_limit_hit_all', {
+        p_buckets: entries.map((e) => ({ bucket: e.bucket, window_seconds: e.windowSeconds, max: e.max })),
+      });
+      if (!error && typeof data === 'boolean') return data;
+      const missing = !!error && (error.code === 'PGRST202' || error.code === '42883');
+      if (missing) {
+        // lead_rate_limit_hit_all not deployed yet: keep the cross-instance DB counters with the
+        // older per-bucket function, stopping at the first full bucket. Per-IP buckets come first,
+        // so a request refused by its IP limit never counts toward the global bucket.
+        const legacy = await withinLegacyDbRateLimits(entries);
+        if (legacy !== null) return legacy;
+      } else if (error) {
+        console.warn('[Lead] DB rate limit unavailable, using the in-memory limiter:', error.message);
       }
-    } catch (err) {
-      console.warn('[Lead] DB rate limit failed, using the in-memory limiter:', err instanceof Error ? err.message : String(err));
     }
-    if (ok === null) ok = memoryLimiter.hit(bucket, rule.windowSeconds, rule.max);
-    if (!ok) allowed = false;
+  } catch (err) {
+    console.warn('[Lead] DB rate limit failed, using the in-memory limiter:', err instanceof Error ? err.message : String(err));
   }
-  return allowed;
+  return memoryLimiter.hitAll(entries);
 }
 
 export async function POST(request: NextRequest) {
@@ -154,17 +179,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: parsed.error }, { status: 400 });
     }
 
+    // Honeypot filled (a bot): answer like a success, send nothing - and count nothing, so bot
+    // traffic can't fill the shared rate-limit buckets of real visitors.
+    if (parsed.honeypot) {
+      console.warn('[Lead] Honeypot field filled - ignoring the submission.');
+      return NextResponse.json({ success: true });
+    }
+
     if (!(await withinRateLimits(request))) {
       return NextResponse.json(
         { error: 'נשלחו יותר מדי פניות. נסו שוב מאוחר יותר או פנו אלינו ישירות.' },
         { status: 429, headers: { 'Retry-After': '600' } }
       );
-    }
-
-    // Honeypot filled (a bot): answer like a success, send nothing.
-    if (parsed.honeypot) {
-      console.warn('[Lead] Honeypot field filled - ignoring the submission.');
-      return NextResponse.json({ success: true });
     }
 
     const leadData: LeadData = parsed.lead;

@@ -181,14 +181,27 @@ export function isRealIsoDate(value: string): boolean {
   return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
 }
 
+/** U+0000: Postgres text cannot store it (the insert fails), so it's rejected up front with a 400. */
+// Unpaired UTF-16 surrogates are rejected the same way: Postgres jsonb/text refuses them too.
+const BAD_TEXT_CHARS = /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+const hasNoNul = (value: string | null | undefined) => value == null || !BAD_TEXT_CHARS.test(value);
+const NUL_MESSAGE = 'מכיל תו לא חוקי (כגון NUL) - ייתכן שהקובץ אינו קובץ טקסט תקין';
+
 export const NormalizedBankRowSchema = z.object({
   txn_date: z.string({ message: 'חסר תאריך' }).refine(isRealIsoDate, { message: 'תאריך לא תקין' }),
-  description: z.string({ message: 'תיאור לא תקין' }).max(500, { message: 'התיאור ארוך מדי (עד 500 תווים)' }),
+  description: z
+    .string({ message: 'תיאור לא תקין' })
+    .max(500, { message: 'התיאור ארוך מדי (עד 500 תווים)' })
+    .refine(hasNoNul, { message: `התיאור ${NUL_MESSAGE}` }),
   amount: z
     .number({ message: 'סכום לא תקין' })
     .finite({ message: 'סכום לא תקין' })
     .refine((n) => Math.abs(n) <= MAX_BANK_AMOUNT, { message: 'הסכום גדול מדי' }),
-  reference: z.string({ message: 'אסמכתא לא תקינה' }).max(100, { message: 'האסמכתא ארוכה מדי (עד 100 תווים)' }).nullable(),
+  reference: z
+    .string({ message: 'אסמכתא לא תקינה' })
+    .max(100, { message: 'האסמכתא ארוכה מדי (עד 100 תווים)' })
+    .refine(hasNoNul, { message: `האסמכתא ${NUL_MESSAGE}` })
+    .nullable(),
 });
 
 export const MAX_BANK_IMPORT_ROWS = 20000;
@@ -199,8 +212,14 @@ export const BankImportSchema = z.object({
     .string({ message: 'חסר שם חשבון / כרטיס' })
     .trim()
     .min(1, { message: 'חסר שם חשבון / כרטיס' })
-    .max(100, { message: 'שם החשבון ארוך מדי (עד 100 תווים)' }),
-  fileName: z.string().max(255, { message: 'שם הקובץ ארוך מדי' }).nullable().optional(),
+    .max(100, { message: 'שם החשבון ארוך מדי (עד 100 תווים)' })
+    .refine(hasNoNul, { message: `שם החשבון ${NUL_MESSAGE}` }),
+  fileName: z
+    .string()
+    .max(255, { message: 'שם הקובץ ארוך מדי' })
+    .refine(hasNoNul, { message: `שם הקובץ ${NUL_MESSAGE}` })
+    .nullable()
+    .optional(),
   rows: z
     .array(NormalizedBankRowSchema, { message: 'חסרות שורות לייבוא' })
     .min(1, { message: 'אין שורות לייבוא' })
