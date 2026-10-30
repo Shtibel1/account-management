@@ -40,12 +40,12 @@ Each agent lives in `src/agents/<name>/` with its prompt/spec in `agent.md` and 
 | `/` | Hebrew marketing site |
 | `/order` | Lead / order form (sent via AWS SES) |
 | `/privacy` | Privacy policy |
-| `/clients` | Manage bookkeeping clients |
+| `/clients` | Manage bookkeeping clients, their inbound email address and WhatsApp phones |
 | `/upload` | Bulk upload invoices per client |
 | `/review`, `/review/[id]` | Review queue and side-by-side validation |
 | `/mappings` | Supplier / category → account-code mappings |
 
-API routes under `src/app/api/`: `invoices` (upload, upload-url, process, split, approve), `suppliers/search-vat`, `export`, `lead`.
+API routes under `src/app/api/`: `invoices` (upload, upload-url, process, split, approve), `ingest/email` and `ingest/whatsapp` (inbound channels, see [docs/ingestion.md](docs/ingestion.md)), `clients` (channels, contacts), `suppliers/search-vat`, `export`, `lead`.
 
 ## Local setup
 
@@ -60,6 +60,7 @@ Environment variables (names only):
 - `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
 - `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_API_KEY`
 - `AWS_REGION` / `AWS_SES_REGION`, `CONTACT_FROM_EMAIL`, `CONTACT_TO_EMAIL`
+- Optional ingestion channels: `INGEST_EMAIL_SECRET`, `INBOUND_EMAIL_DOMAIN`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WEBHOOK_URL`, `TWILIO_WHATSAPP_NUMBER` - see [docs/ingestion.md](docs/ingestion.md)
 
 A mock Supabase client (`src/utils/supabase/mockClient.ts`) allows running the UI without a database.
 
@@ -71,5 +72,5 @@ src/app/         Next.js routes – (dashboard), (marketing), api
 src/components/  UI: InvoiceTable, SplitPane viewer/form, UploadZone
 src/lib/         API client, exporters
 src/shared/      Zod schemas & types
-docs/            DB schema and coding standards
+docs/            DB schema, coding standards, ingestion channel setup
 ```

@@ -1,23 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-
-function sanitizeStorageFilename(fileName: string): string {
-  const lastDot = fileName.lastIndexOf('.');
-  const ext = lastDot !== -1 ? fileName.substring(lastDot) : '';
-  const nameWithoutExt = lastDot !== -1 ? fileName.substring(0, lastDot) : fileName;
-  
-  let sanitized = nameWithoutExt
-    .replace(/[^a-zA-Z0-9-.]/g, '_')
-    .replace(/__+/g, '_')
-    .replace(/--+/g, '-')
-    .replace(/^[_-]+|[_-]+$/g, '');
-    
-  if (!sanitized) {
-    sanitized = Buffer.from(nameWithoutExt).toString('hex').substring(0, 16);
-  }
-  
-  return `${sanitized}${ext}`;
-}
+import { buildStoragePath } from '@/lib/ingestHelpers';
 
 export async function POST(request: Request) {
   try {
@@ -32,8 +15,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Missing clientId or fileName' }, { status: 400 });
     }
 
-    const sanitizedName = sanitizeStorageFilename(fileName);
-    const filePath = `${clientId}/${Date.now()}_${sanitizedName}`;
+    const filePath = buildStoragePath(clientId, fileName);
 
     // Generate signed upload URL
     const { data, error } = await supabase.storage
