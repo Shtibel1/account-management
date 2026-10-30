@@ -16,7 +16,7 @@ import { isValidVatIdChecksum } from '@/shared/vatId';
 import { checkLineItemsSum, hasMixedVat, lineItemWarnings, normalizeLineItems } from '@/shared/lineItems';
 import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
 import { vatRateWarning } from '@/shared/vatRate';
-import { checkSupplierVatId, supplierVatIdWarning } from '@/shared/buyerVatId';
+import { checkSupplierVatId, findVatIdOccurrences, findVatIdOccurrencesFromWords, supplierVatIdWarning } from '@/shared/buyerVatId';
 import { isZeroVatInvoice, ZERO_VAT_WITH_HISTORY_WARNING } from '@/shared/supplierVatHistory';
 import { fetchClientOwnVatIds, fetchSupplierVatHistory } from '@/lib/validationHistory';
 
@@ -198,6 +198,32 @@ export async function validateInvoice(
     warnings.push(`מספר ח.פ./עוסק מורשה עודכן אוטומטית ל-${webSearchVatId} לפי חיפוש באינטרנט`);
   }
 
+  // Registrar cross-check (finding #15): the registrar number for the supplier's name is printed
+  // on the page but differs from the extracted ID -> the extracted one is probably the buyer's (or
+  // a misread). Swap when the extracted ID is not on the page at all; otherwise warn, mark the
+  // field low-confidence and block auto-approve so a reviewer decides.
+  let registrarVatConflict = false;
+  if (!supplierTableVatId && webSearchVatId && corrected.supplier_vat_id) {
+    const registrarId = normalizeVatId(webSearchVatId);
+    const currentId = normalizeVatId(corrected.supplier_vat_id);
+    if (registrarId && currentId && registrarId !== currentId) {
+      const printed = new Set(
+        [...findVatIdOccurrences(context.ocrText), ...findVatIdOccurrencesFromWords(context.ocrWords)].map((o) => o.vatId)
+      );
+      if (printed.has(registrarId)) {
+        registrarVatConflict = true;
+        if (!printed.has(currentId)) {
+          console.log(`[Validation] supplier_vat_id ${currentId} is not on the page; using the registrar's ${registrarId}, which is.`);
+          warnings.push(`ח.פ. שזוהה (${corrected.supplier_vat_id}) אינו מופיע במסמך — הוחלף ל-${registrarId} שמופיע במסמך ותואם לשם הספק ברשם. אנא ודא`);
+          corrected.supplier_vat_id = registrarId;
+        } else {
+          console.log(`[Validation] supplier_vat_id ${currentId} differs from the registrar's ${registrarId} (also on the page): needs review.`);
+          warnings.push(`ח.פ. שזוהה (${corrected.supplier_vat_id}) שונה מהמספר ${registrarId} שמופיע במסמך ותואם לשם הספק ברשם — ייתכן שזה המספר של הלקוח. אנא ודא`);
+        }
+      }
+    }
+  }
+
   // 1.6 Supplier rule (client's supplier defaults). Applied to validated_data only by the save nodes;
   // the rule-dependent checks below (supplier name, category) run on the values the reviewer will see.
   const supplierMapping = findSupplierRule(await fetchSupplierMappings(supabase, tenantId), corrected);
@@ -270,6 +296,11 @@ export async function validateInvoice(
   // Model confidences no longer apply to fields auto-corrected above (amounts, VAT ID from the supplier table)
   corrected.field_confidence = pruneFieldConfidence(data.field_confidence, data, corrected);
   if (!corrected.field_confidence) delete corrected.field_confidence;
+  if (registrarVatConflict && corrected.supplier_vat_id) {
+    // The model's (often 0.95) score is not evidence against the registrar: highlight the field
+    const prev = corrected.field_confidence?.supplier_vat_id;
+    corrected.field_confidence = { ...(corrected.field_confidence ?? {}), supplier_vat_id: Math.min(prev ?? 0.5, 0.5) };
+  }
   // Low model confidence blocks auto-approve, except for fields the supplier rule fills in
   const ruleFilled = new Set(Object.keys(supplierRule?.applied ?? {}));
   const lowConfidenceFields = CONFIDENCE_FIELDS.filter(
@@ -339,7 +370,7 @@ export async function validateInvoice(
         exemptGuessed,
         zeroVatContradictsHistory,
         zeroVatHistoryUnknown,
-        buyerVatIdSuspected,
+        buyerVatIdSuspected: buyerVatIdSuspected || registrarVatConflict,
       })
     : [];
   const autoApproved = optedIn && blockers.length === 0;

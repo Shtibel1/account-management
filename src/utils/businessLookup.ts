@@ -1,4 +1,7 @@
-import { isSpecificSupplierName, registrarNameMatches } from '@/shared/supplierNameMatch';
+import { isSpecificSupplierName, pickRegistrarMatch, type RegistrarRecord } from '@/shared/supplierNameMatch';
+
+/** Per-request cap: the lookup runs inside the review form and the pipeline (each HTTP request is cut at ~28s). */
+const REGISTRAR_TIMEOUT_MS = 6000;
 
 /**
  * Helper function to look up the official VAT ID (ח.פ. / מספר תאגיד) 
@@ -31,7 +34,7 @@ export async function searchVatIdByName(supplierName: string): Promise<string | 
     // Query Gov.il APIs concurrently
     const responses = await Promise.all(
       endpoints.map(url => 
-        fetch(url)
+        fetch(url, { signal: AbortSignal.timeout(REGISTRAR_TIMEOUT_MS) })
           .then(async r => {
             if (!r.ok) {
               console.warn(`[businessLookup] Gov.il request failed: ${url} status ${r.status}`);
@@ -46,38 +49,15 @@ export async function searchVatIdByName(supplierName: string): Promise<string | 
       )
     );
     
-    // A record must be the queried business as a whole (see registrarNameMatches)
-    const isMatch = registrarNameMatches;
-
-    // 1. Parse Companies
-    const companyRecords = responses[0]?.result?.records || [];
-    for (const rec of companyRecords) {
-      const name = rec['שם חברה'] || '';
-      const num = rec['מספר חברה'];
-      if (name && num && isMatch(query, name)) {
-        return String(num).trim();
-      }
-    }
-
-    // 2. Parse Partnerships
-    const partnershipRecords = responses[1]?.result?.records || [];
-    for (const rec of partnershipRecords) {
-      const name = rec['שם שותפות'] || '';
-      const num = rec['מספר שותפות'];
-      if (name && num && isMatch(query, name)) {
-        return String(num).trim();
-      }
-    }
-
-    // 3. Parse Non-Profits (Amutot)
-    const nonProfitRecords = responses[2]?.result?.records || [];
-    for (const rec of nonProfitRecords) {
-      const name = rec['שם עמותה בעברית'] || '';
-      const num = rec['מספר עמותה'];
-      if (name && num && isMatch(query, name)) {
-        return String(num).trim();
-      }
-    }
+    // A record must be the queried business as a whole, and an ambiguous query (several different
+    // businesses match and none is named exactly like it) gives nothing (see pickRegistrarMatch)
+    const records: RegistrarRecord[] = [
+      ...(responses[0]?.result?.records || []).map((rec: any) => ({ name: rec['שם חברה'], number: rec['מספר חברה'] })),
+      ...(responses[1]?.result?.records || []).map((rec: any) => ({ name: rec['שם שותפות'], number: rec['מספר שותפות'] })),
+      ...(responses[2]?.result?.records || []).map((rec: any) => ({ name: rec['שם עמותה בעברית'], number: rec['מספר עמותה'] })),
+    ];
+    const picked = pickRegistrarMatch(query, records);
+    if (picked) return picked;
 
     // No record whose name matches: return nothing. (The top full-text hit for a name that matches
     // no record is an unrelated business, and its number would be autofilled as the supplier's.)

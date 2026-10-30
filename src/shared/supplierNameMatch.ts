@@ -64,3 +64,32 @@ export function registrarNameMatches(query: string, recordName: string): boolean
 
   return false;
 }
+
+export interface RegistrarRecord {
+  name: unknown;
+  number: unknown;
+}
+
+/**
+ * The registrar number for the queried business, or null. A record named exactly like the query
+ * (after legal suffixes) wins; otherwise every matching record must be the same business (one
+ * number). A multi-word query such as "שירותי ניקיון" can match several unrelated companies whose
+ * names contain it; taking the first would autofill an unrelated company's number.
+ */
+export function pickRegistrarMatch(query: string, records: readonly RegistrarRecord[]): string | null {
+  if (!isSpecificSupplierName(query)) return null;
+  const q = cleanBusinessName(query);
+  const matches: { name: string; number: string }[] = [];
+  for (const rec of records) {
+    const name = typeof rec.name === 'string' ? rec.name : '';
+    const number = rec.number == null ? '' : String(rec.number).trim();
+    if (!name || !/^\d{5,9}$/.test(number)) continue;
+    if (registrarNameMatches(query, name)) matches.push({ name, number });
+  }
+  if (matches.length === 0) return null;
+  const exact = [...new Set(matches.filter((m) => cleanBusinessName(m.name) === q).map((m) => m.number))];
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) return null;
+  const numbers = [...new Set(matches.map((m) => m.number))];
+  return numbers.length === 1 ? numbers[0] : null;
+}
