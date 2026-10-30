@@ -5,6 +5,7 @@ import type {
   InvoiceStatus,
   ValidationResult,
 } from '@/shared/types';
+import { isValidVatIdChecksum } from '@/shared/vatId';
 
 // Duplicate / fraud detection rules (pure logic, no DB access).
 // Three signals, strongest first:
@@ -164,11 +165,16 @@ function fingerprintOfRow(row: DuplicateCandidateRow): Fingerprint {
 }
 
 /**
- * Same supplier: equal VAT IDs when both have one (different IDs = different suppliers,
- * whatever the names say); otherwise any equal normalized name.
+ * Same supplier: equal VAT IDs when both have one (two different valid IDs = different suppliers,
+ * whatever the names say); otherwise any equal normalized name. An ID that fails the checksum is a
+ * misread, so it doesn't prove a different supplier: the names decide (the same page read twice must
+ * still be caught as a duplicate when one read garbled the VAT ID).
  */
 function sameSupplier(a: Fingerprint, b: Fingerprint): boolean {
-  if (a.vatId && b.vatId) return a.vatId === b.vatId;
+  if (a.vatId && b.vatId) {
+    if (a.vatId === b.vatId) return true;
+    if (isValidVatIdChecksum(a.vatId) && isValidVatIdChecksum(b.vatId)) return false;
+  }
   return a.names.some((n) => b.names.includes(n));
 }
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Mail, ShieldAlert, Trash2, UserCog, UserPlus, X } from 'lucide-react';
 import clsx from 'clsx';
 import { useSession } from '@/components/Auth/SessionContext';
@@ -39,12 +39,18 @@ export default function OrgMembersPage() {
 
   const isOwner = orgs.find((o) => o.id === orgId)?.role === 'owner';
 
+  // The office currently shown: a response for an office switched away from is dropped
+  const shownOrgId = useRef<string | null>(null);
+  useEffect(() => { shownOrgId.current = orgId; }, [orgId]);
+
   const load = useCallback(async (id: string) => {
     setError(null);
     try {
-      setData(await fetchOrgMembers(id));
+      const result = await fetchOrgMembers(id);
+      if (shownOrgId.current === id) setData(result);
     } catch (err) {
       console.error('[settings/members] Failed to load members:', err);
+      if (shownOrgId.current !== id) return;
       setData(null);
       setError(err instanceof Error ? err.message : 'שגיאה בטעינת משתמשי המשרד');
     }
