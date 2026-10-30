@@ -5,6 +5,7 @@ import { extractInvoiceData } from '../extraction';
 import { validateInvoice } from '../validation';
 import { approvalNode } from '../approval';
 import { supabase } from '@/lib/supabase';
+import { computeConfidence } from '@/shared/confidence';
 import { PDFDocument } from 'pdf-lib';
 
 function parseNumber(text: string): number | null {
@@ -200,33 +201,8 @@ function sanitizeStorageFilename(fileName: string): string {
 }
 
 
-// Helper to compute confidence (Legacy calculation method)
-export function computeConfidence(data: ExtractedData | null): number {
-  if (!data) return 0;
-
-  const critical: (keyof ExtractedData)[] = [
-    'supplier_name', 'invoice_date', 'total_amount',
-  ];
-  const secondary: (keyof ExtractedData)[] = [
-    'supplier_vat_id', 'invoice_number', 'amount_before_vat', 'vat_amount', 'expense_category',
-  ];
-
-  const criticalScore = critical.filter((f) => data[f] != null).length / critical.length;
-  const secondaryScore = secondary.filter((f) => data[f] != null).length / secondary.length;
-  const base = criticalScore * 0.6 + secondaryScore * 0.4;
-
-  const flags = data.validation_flags;
-  let penalty = 0;
-  if (flags) {
-    if (!flags.math_ok) penalty += 0.25;
-    if (!flags.vat_id_ok) penalty += 0.10;
-    if ((flags.warnings ?? []).length > 0) {
-      penalty += 0.05 * Math.min((flags.warnings ?? []).length, 2);
-    }
-  }
-
-  return Math.max(0.1, Math.round((base - penalty) * 100) / 100);
-}
+// Confidence scoring lives in shared/confidence.ts (also used by the approval node)
+export { computeConfidence };
 
 // Fetch dynamic tenant rules helper
 export async function getTenantRules(tenantId: string): Promise<TenantRules> {

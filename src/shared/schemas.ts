@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MAX_LINE_ITEMS } from '@/shared/lineItems';
 
 export const FieldBboxSchema = z.object({
   x1: z.number(),
@@ -19,6 +20,26 @@ export const BboxMapSchema = z.object({
   allocation_number: FieldBboxSchema.optional(),
 });
 
+export const FieldConfidenceMapSchema = z.object({
+  supplier_name: z.number().min(0).max(1).optional(),
+  supplier_vat_id: z.number().min(0).max(1).optional(),
+  invoice_number: z.number().min(0).max(1).optional(),
+  invoice_date: z.number().min(0).max(1).optional(),
+  amount_before_vat: z.number().min(0).max(1).optional(),
+  vat_amount: z.number().min(0).max(1).optional(),
+  total_amount: z.number().min(0).max(1).optional(),
+  expense_category: z.number().min(0).max(1).optional(),
+  allocation_number: z.number().min(0).max(1).optional(),
+});
+
+export const LineItemSchema = z.object({
+  description: z.string().nullable(),
+  quantity: z.number().nullable(),
+  unit_price: z.number().nullable(),
+  line_total: z.number().nullable(),
+  vat_exempt: z.boolean().optional(),
+});
+
 export const VatIdSourcesSchema = z.object({
   invoice: z.string().nullable(),
   supplier_table: z.string().nullable(),
@@ -35,6 +56,8 @@ export const ValidationResultSchema = z.object({
   requires_manual_review: z.boolean(),
   not_an_invoice: z.boolean().optional(),
   allocation_required: z.boolean().optional(),
+  line_items_sum_ok: z.boolean().nullable().optional(),
+  mixed_vat: z.boolean().optional(),
   vat_id_sources: VatIdSourcesSchema.optional(),
 });
 
@@ -48,6 +71,8 @@ export const ExtractedDataSchema = z.object({
   total_amount: z.number().nullable(),
   expense_category: z.string().nullable(),
   allocation_number: z.string().nullable().optional(),
+  line_items: z.array(LineItemSchema).max(MAX_LINE_ITEMS).nullable().optional(),
+  field_confidence: FieldConfidenceMapSchema.optional(),
   validation_flags: ValidationResultSchema.optional(),
   bboxes: BboxMapSchema.optional(),
 });

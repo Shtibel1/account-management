@@ -35,6 +35,8 @@ export interface ExtractedData {
   vat_amount: number | null;
   total_amount: number | null;
   expense_category: string | null;
+  line_items?: LineItem[] | null;     // up to MAX_LINE_ITEMS (50), see shared/lineItems.ts
+  field_confidence?: Partial<Record<ConfidenceField, number>>; // model's 0-1 score per main field
   bboxes?: {
     supplier_name?: FieldBbox;
     supplier_vat_id?: FieldBbox;
@@ -47,6 +49,10 @@ export interface ExtractedData {
   };
 }
 ```
+
+### Line Items & Field Confidence
+- `line_items`: `{ description, quantity, unit_price, line_total, vat_exempt? }` per printed line (discounts as negative lines, no summary rows). Sanitized and capped by `normalizeLineItems`; `max_tokens` is 4096 to fit 50 lines.
+- `field_confidence`: the model's own 0-1 score per main field, normalized by `normalizeFieldConfidence` (shared/confidence.ts). Old records have none.
 
 ### Cumulative Cost Metrics
 Each time the Extraction Agent calls the LLM, it must log usage metrics to the shared LangGraph State:

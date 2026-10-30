@@ -7,6 +7,7 @@ import {
   isAllocationRequired,
   normalizeAllocationNumber,
 } from '@/shared/allocation';
+import { checkLineItemsSum, hasMixedVat, lineItemWarnings, normalizeLineItems } from '@/shared/lineItems';
 
 const REQUIRED_FIELDS: (keyof ExtractedData)[] = [
   'supplier_name',
@@ -220,6 +221,13 @@ export async function validateInvoice(
     warnings.push(`מספר ההקצאה ${corrected.allocation_number} אינו בן 9 ספרות — אנא ודא`);
   }
 
+  // Line items (when extracted): sum vs. invoice amounts and mixed VAT — warnings only
+  const lineItems = normalizeLineItems(corrected.line_items);
+  corrected.line_items = lineItems.length > 0 ? lineItems : null;
+  const lineItemsSumOk = checkLineItemsSum(corrected).ok;
+  const mixedVat = hasMixedVat(lineItems);
+  warnings.push(...lineItemWarnings(corrected));
+
   // 4. Duplicate checks
   let duplicateFound = false;
   if (rules.duplicateInvoiceCheck && corrected.supplier_vat_id && corrected.invoice_number) {
@@ -264,6 +272,8 @@ export async function validateInvoice(
     requires_manual_review: requiresManualReview,
     not_an_invoice: notAnInvoice,
     allocation_required: allocationRequired,
+    line_items_sum_ok: lineItemsSumOk,
+    mixed_vat: mixedVat,
     vat_id_sources: {
       invoice: invoiceVatId,
       supplier_table: supplierTableVatId,

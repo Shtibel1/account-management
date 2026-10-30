@@ -23,6 +23,8 @@ export interface ValidationResult {
   rule_violations: string[];      // List of failed tenant rules
   warnings: string[];             // General warnings (e.g. exempt supplier checks, credit notes)
   requires_manual_review: boolean;// True if any rule or mathematical check fails
+  line_items_sum_ok?: boolean | null; // Line totals = amount_before_vat or total_amount (±1 ILS); null = nothing to compare
+  mixed_vat?: boolean;            // Some (not all) line items are VAT-exempt
 }
 ```
 
@@ -48,5 +50,8 @@ export interface ValidationResult {
   - If mathematical validation fails but `total_amount` minus `vat_amount` matches the invoice within rounding boundaries, auto-correct `amount_before_vat` and append a warning: `"סכום לפני מע\"מ תוקן אוטומטית ל-₪... (= סה\"כ - מע\"מ)"`.
   - Flags if supplier has zero or null VAT and marks as an exempt supplier.
   - Flags negative amounts as credit notes.
+- **Line Items (warnings only, never violations):**
+  - When line items exist, their sum must match `amount_before_vat` or `total_amount` within 1 ILS (lines may be printed before or including VAT); otherwise a `"שורות פריטים: ..."` warning is added.
+  - Mixed VAT (some lines `vat_exempt`) and all-exempt lines on an invoice with VAT are flagged with the same prefix, so the review form can recompute them after edits (`isLineItemWarning`).
 - **Manual Review Trigger:**
   - If `requires_manual_review` is true, the supervisor will route the graph to the HITL approval state.

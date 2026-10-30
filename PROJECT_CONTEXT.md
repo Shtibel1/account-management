@@ -45,8 +45,9 @@ The processing pipeline is defined in [supervisor/index.ts](file:///c:/Users/nad
 
 1. **`init_rules`:** Fetch client-specific dynamic rules from the database.
 2. **`preprocess`:** Run Google Vision OCR. If a multi-page PDF contains multiple invoices, Claude Haiku detects split boundaries. The PDF is split, parts are uploaded, and child pipelines are triggered.
-3. **`extract`:** Use Claude 3.5 Sonnet with a tool-use definition (`save_invoice_data`) to extract invoice fields and bounding box coordinates (bboxes).
-4. **`validate`:** Run calculations, Luhn checksum for Israeli VAT IDs (H.P.), whitelist category checks, database duplication checks, and composed VAT ID identification (from the invoice, supplier table, and Gov.il API web search).
+3. **`extract`:** Use Claude 3.5 Sonnet with a tool-use definition (`save_invoice_data`) to extract invoice fields, bounding box coordinates (bboxes), line items (up to 50, `shared/lineItems.ts`) and a per-field 0-1 confidence map (`field_confidence`, `shared/confidence.ts`).
+4. **`validate`:** Run calculations, Luhn checksum for Israeli VAT IDs (H.P.), whitelist category checks, database duplication checks, and composed VAT ID identification (from the invoice, supplier table, and Gov.il API web search). Line items are checked against the invoice amounts (±1 ILS) and for mixed VAT — as warnings only.
+   - `ai_confidence` is computed by `computeConfidence` in `shared/confidence.ts` (field presence weighted by the model's field confidence, minus validation penalties) at save and again at approval. Records without `field_confidence` score exactly as before.
 5. **`save_review` / `save_success`:** Invoices currently route to `save_review` since manual review is forced (`requires_manual_review: true` in validation). The status becomes `review` and execution interrupts.
 6. **`approval`:** When a human reviews the invoice, the client-side invokes `resumeApproval` to update the state graph with modified values and finishes the graph.
 
