@@ -44,18 +44,28 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 async function fetchReviewedInvoices(
   db: SupabaseClient,
   variants: string[],
-  clientId: string | null
+  clientIds: string[]
 ): Promise<FewShotSourceInvoice[]> {
+  if (clientIds.length === 0) return [];
   let query = db
     .from('invoices')
     .select('id, client_id, reviewed_at, ocr_text, validated_data')
     .in('validated_data->>supplier_vat_id', variants)
     .not('reviewed_at', 'is', null)
     .not('ocr_text', 'is', null);
-  if (clientId) query = query.eq('client_id', clientId);
+  query = clientIds.length === 1 ? query.eq('client_id', clientIds[0]) : query.in('client_id', clientIds);
   const { data, error } = await query.order('reviewed_at', { ascending: false }).limit(QUERY_LIMIT);
   if (error) throw new Error(`invoices query failed: ${error.message}`);
   return (data ?? []) as FewShotSourceInvoice[];
+}
+
+/** Other clients of the same office (organization); examples never cross offices. */
+async function fetchSameOrgClientIds(db: SupabaseClient, clientId: string): Promise<string[]> {
+  const { data: client, error } = await db.from('clients').select('org_id').eq('id', clientId).single();
+  if (error || !client?.org_id) throw new Error(`client org lookup failed: ${error?.message ?? 'no org_id'}`);
+  const { data, error: listError } = await db.from('clients').select('id').eq('org_id', client.org_id);
+  if (listError) throw new Error(`org clients query failed: ${listError.message}`);
+  return ((data ?? []) as { id: string }[]).map((c) => c.id).filter((id) => id !== clientId);
 }
 
 /** The client's latest reviewed invoices of any supplier (used to recognize the client's own VAT id). */
@@ -86,14 +96,14 @@ async function lookup(
   if (candidates.length === 0) return EMPTY;
   const variants = vatIdQueryVariants(candidates);
 
-  const rows = await fetchReviewedInvoices(db, variants, tenantId);
+  const rows = await fetchReviewedInvoices(db, variants, [tenantId]);
   const sameClientUsable = rows.filter((r) => r.id !== invoiceId && r.ocr_text?.trim()).length;
-  // Other clients' invoices of the same supplier only fill the gaps (sensitive fields stripped later)
+  // Other clients' (same office only) invoices of the same supplier fill the gaps (sensitive fields stripped later)
   if (sameClientUsable < FEWSHOT_MAX_EXAMPLES) {
     try {
       // The client's own VAT id (printed as the buyer) must not pull in another business's examples
       const ownIds = findClientOwnVatIds(candidates, await fetchRecentClientInvoices(db, tenantId, invoiceId));
-      const others = await fetchReviewedInvoices(db, variants, null);
+      const others = await fetchReviewedInvoices(db, variants, await fetchSameOrgClientIds(db, tenantId));
       rows.push(
         ...others.filter(
           (r) => r.client_id === tenantId || !ownIds.includes(normalizeVatId(r.validated_data?.supplier_vat_id ?? null) ?? '')
