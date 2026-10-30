@@ -39,7 +39,8 @@ Amplify cuts every HTTP response at ~28 s, so no request runs the whole pipeline
   starts, so a killed tick re-pays only for its own call. The math retry is a step of its own.
 - A tick holds the job by a **45 s lease** that a heartbeat renews every 10 s while the step runs; a tick
   killed by the platform frees the job within the lease, and the next tick redoes only that step
-  (3 attempts per step without progress, then a Hebrew error).
+  (3 attempts per step without progress, then a Hebrew error). The heartbeat stops after 5 minutes, so a
+  hung call can't hold a job forever.
 - `POST /api/invoices/[id]/process/tick` never waits past 20 s: a longer step answers `202 { state: 'busy' }`
   and goes on in the background under its lease (no bare 504 from Amplify).
 - Ticks are driven by the **scheduled worker** `GET|POST /api/invoices/worker` every minute, by `after()`
@@ -54,6 +55,7 @@ Amplify cuts every HTTP response at ~28 s, so no request runs the whole pipeline
   minutes; the user can retry ("עבד מחדש" on the review screen).
 - Concurrent `/process` calls start exactly one run: the claim is conditioned on the run token read, and a
   run claimed less than a minute ago counts as live even before its job row exists (the others get `409`).
+  The split route queues part 1 under its own claim token (`claimToken`), which is not a competing run.
 - Every pipeline write is conditioned on `processing_run_id`, so a superseded run (re-process, manual split,
   sweeper) can't overwrite the row. The UI shows `processing_stage` / `processing_progress`; while an invoice
   is processing the review form is read-only and reject / split are disabled.

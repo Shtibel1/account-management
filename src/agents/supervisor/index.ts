@@ -339,9 +339,14 @@ export async function writeRunResult(
 
   let query = supabase.from('invoices').update(payload).eq('id', state.invoiceId);
   if (runId) query = query.eq('processing_run_id', runId);
-  const { error } = await query;
+  const { data: written, error } = await query.select('id');
   if (error) {
     console.error(`[Supervisor] Failed to save result of invoice ${state.invoiceId}:`, error);
+    return false;
+  }
+  // Superseded between the read above and this write (re-process / split / sweeper): nothing saved
+  if (Array.isArray(written) && written.length === 0) {
+    console.warn(`[Supervisor] Run ${runId} of invoice ${state.invoiceId} was superseded while saving; result discarded.`);
     return false;
   }
   return true;

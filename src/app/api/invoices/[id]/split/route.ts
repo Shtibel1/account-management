@@ -266,7 +266,7 @@ export async function POST(
   const queuedIds: string[] = [];
   const queuedResults = await Promise.all(
     results.map((part) =>
-      enqueueProcessing(part.id, { mimeType: 'application/pdf' }).catch((err) => {
+      enqueueProcessing(part.id, { mimeType: 'application/pdf', ...(part.id === id ? { claimToken } : {}) }).catch((err) => {
         console.error(`[Split API] Queueing part ${part.id} crashed:`, err);
         return { ok: false as const, httpStatus: 500 as const, error: String(err) };
       })

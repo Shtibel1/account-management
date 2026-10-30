@@ -11,6 +11,7 @@ import {
   JOB_HEARTBEAT_MS,
   JOB_LEASE_MS,
   MAX_STAGE_ATTEMPTS,
+  MAX_STEP_MS,
   STALE_PROCESSING_MS,
   STUCK_RUN_MESSAGE,
   TICK_FINALIZE_BUDGET_MS,
@@ -175,7 +176,9 @@ async function defaultDeps(): Promise<QueueDeps> {
     detect: (pageTexts) => splitter.detectDocumentBoundaries(pageTexts),
     loadFewShot: (invoiceId, clientId, ocrText) => fewshot.loadFewShotExamples(supabase, { invoiceId, tenantId: clientId, ocrText }),
     extract: async (input) => {
-      const fileUrl = input.useVision
+      // An image is sent to the model as bytes when asked (vision) and also when its OCR text is
+      // empty, so it is always read through a signed URL (file_url is a storage reference, QA #31)
+      const fileUrl = input.mimeType.startsWith('image/')
         ? (await files.signedInvoiceFileUrl(input.fileUrl, input.clientId, files.PIPELINE_URL_TTL_SECONDS)) ?? input.fileUrl
         : input.fileUrl;
       const r = await extraction.extractInvoiceData(input.text, fileUrl, input.mimeType, input.useVision, input.retryHint, input.fewShot, {
@@ -240,6 +243,12 @@ export type EnqueueResult =
 
 export interface EnqueueOptions {
   mimeType?: unknown;
+  /**
+   * The processing_run_id the caller itself claimed the row with (manual split: the split route
+   * holds the row in 'processing' under its own token while it builds the parts). That claim is not
+   * a competing run, so it doesn't count as live (else part 1 of every split got 409, QA round 2).
+   */
+  claimToken?: string | null;
 }
 
 /**
@@ -248,8 +257,9 @@ export interface EnqueueOptions {
  * the claim and the job insert, in which a concurrent /process used to see "no job", take the run
  * over and start a second one (QA round 2, N11).
  */
-async function hasActiveRun(d: QueueDeps, invoice: InvoiceRow): Promise<boolean> {
+async function hasActiveRun(d: QueueDeps, invoice: InvoiceRow, ownClaim: string | null = null): Promise<boolean> {
   if (invoice.status !== 'processing' || !invoice.processing_run_id) return false;
+  if (ownClaim && invoice.processing_run_id === ownClaim) return false;
   const job = await readJob(d.db, invoice.id);
   if (job && job.run_id === invoice.processing_run_id) {
     return !isStaleRun({ now: d.now(), startedAt: invoice.processing_started_at, lastActivityAt: job.updated_at, rowUpdatedAt: invoice.updated_at });
@@ -269,7 +279,7 @@ export async function enqueueProcessing(invoiceId: string, options: EnqueueOptio
   const invoice = await readInvoice(d.db, invoiceId);
   if (!invoice) return { ok: false, httpStatus: 404, error: 'החשבונית לא נמצאה' };
 
-  const decision = canProcess({ status: invoice.status, activeRun: await hasActiveRun(d, invoice) });
+  const decision = canProcess({ status: invoice.status, activeRun: await hasActiveRun(d, invoice, options.claimToken ?? null) });
   if (!decision.ok) return { ok: false, httpStatus: decision.status, error: decision.error };
 
   if (!invoice.file_url) {
@@ -406,8 +416,15 @@ async function saveJob(d: QueueDeps, job: JobRow, patch: Partial<JobRow>): Promi
 function startHeartbeat(d: QueueDeps, job: JobRow): () => void {
   if (!d.heartbeatMs || d.heartbeatMs <= 0) return () => {};
   const lockVersion = job.lock_version;
+  const startedAt = d.now();
   const timer = setInterval(() => {
     const now = d.now();
+    // A step that hangs (a call that never returns) must not hold the job forever: after
+    // MAX_STEP_MS the beats stop, the lease runs out and another tick retries the step.
+    if (now - startedAt > MAX_STEP_MS) {
+      clearInterval(timer);
+      return;
+    }
     try {
       void Promise.resolve(
         d.db.from(JOBS)
@@ -686,7 +703,9 @@ async function extractStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
         useVision: false,
         retryHint: false,
         hint: chunkHint(state, index),
-        allowLargeRetry: state.chunks.length === 1,
+        // A response cut at max_tokens may lose every field of the part: always retried larger
+        // (a long call is fine: the lease is renewed and /process/tick answers early)
+        allowLargeRetry: true,
         fewShot,
       });
       llmCalls++;
@@ -716,7 +735,9 @@ async function extractStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
         useVision: job.mime_type.startsWith('image/') && state.chunks.length === 1,
         retryHint: true,
         hint: chunkHint(state, index),
-        allowLargeRetry: state.chunks.length === 1,
+        // A response cut at max_tokens may lose every field of the part: always retried larger
+        // (a long call is fine: the lease is renewed and /process/tick answers early)
+        allowLargeRetry: true,
         fewShot: state.few_shot ?? { examples: [], supplierVatId: null },
       });
       llmCalls++;
@@ -769,8 +790,13 @@ async function extractStep(d: QueueDeps, job: JobRow): Promise<TickResult> {
 export async function driveProcessing(invoiceId: string, budgetMs: number): Promise<TickResult> {
   const started = Date.now();
   let last: TickResult = { state: 'pending' };
-  while (Date.now() - started < budgetMs) {
+  let lastTickMs = 0;
+  // A further tick starts only if it is expected (from the previous one) to end within the budget,
+  // so the background work after a response doesn't run on long past it (the first tick always runs)
+  while (Date.now() - started + lastTickMs < budgetMs) {
+    const tickStarted = Date.now();
     last = await runProcessingTick(invoiceId);
+    lastTickMs = Date.now() - tickStarted;
     if (last.state !== 'pending') break;
   }
   return last;

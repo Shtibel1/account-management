@@ -27,6 +27,8 @@ export interface ProcessingProgress {
  */
 export const JOB_LEASE_MS = 45_000;
 export const JOB_HEARTBEAT_MS = 10_000;
+/** The heartbeat renews a step's lease for at most this long (a hung call must not hold the job forever). */
+export const MAX_STEP_MS = 5 * 60_000;
 /** Time budget of one tick for OCR batches (well under the ~28 s Amplify response limit). */
 export const TICK_OCR_BUDGET_MS = 14_000;
 /** An extraction tick goes on to validation + save (no LLM) only if its LLM call ended within this. */
