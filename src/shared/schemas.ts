@@ -25,11 +25,22 @@ export const VatIdSourcesSchema = z.object({
   web_search: z.string().nullable(),
 });
 
+export const DuplicateMatchSchema = z.object({
+  invoice_id: z.string(),
+  reason: z.enum(['same_file', 'same_number', 'fuzzy']),
+  file_name: z.string().nullable().optional(),
+  invoice_number: z.string().nullable().optional(),
+  invoice_date: z.string().nullable().optional(),
+  total_amount: z.number().nullable().optional(),
+  status: z.enum(['processing', 'review', 'approved', 'exported', 'error', 'rejected']).nullable().optional(),
+});
+
 export const ValidationResultSchema = z.object({
   math_ok: z.boolean(),
   vat_id_ok: z.boolean(),
   fields_missing: z.array(z.string()),
   duplicate_found: z.boolean(),
+  duplicate_matches: z.array(DuplicateMatchSchema).optional(),
   rule_violations: z.array(z.string()),
   warnings: z.array(z.string()),
   requires_manual_review: z.boolean(),
@@ -94,6 +105,7 @@ export const InvoiceSchema = z.object({
   ai_confidence: z.number().nullable(),
   error_message: z.string().nullable(),
   exported_at: z.string().nullable(),
+  file_hash: z.string().nullable().optional(),
   created_at: z.string(),
   updated_at: z.string(),
 });
