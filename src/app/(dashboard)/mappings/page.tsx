@@ -826,7 +826,7 @@ function AutoApproveCell({ vatId, status, historySize, busy, onToggle }: {
         <span
           className={clsx(
             'inline-block h-4 w-4 rounded-full bg-white shadow transition-transform',
-            enabled ? '-translate-x-4' : '-translate-x-0.5'
+            enabled ? '-translate-x-[18px]' : '-translate-x-0.5'
           )}
         />
       </button>

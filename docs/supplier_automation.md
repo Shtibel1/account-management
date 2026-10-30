@@ -51,8 +51,8 @@ Rules only ever write `validated_data`. `extracted_data` stays the AI output. Th
 
 It also fails closed when any of these hold:
 - the duplicate check did not run (it was skipped or its query failed);
-- the edge-case handlers had to rewrite the amounts;
-- the supplier VAT ID is missing.
+- the edge-case handlers rewrote the amounts (the before-VAT fix, or the exempt-supplier guess that fills a missing VAT amount with 0);
+- the supplier VAT ID is missing, or was not read from the invoice (filled / replaced from the supplier table or the web search) — the opt-in is keyed by it.
 
 For an opted-in supplier that still needs review, the reasons are stored in `validation_flags.auto_approve_blockers` and shown in the review form.
 

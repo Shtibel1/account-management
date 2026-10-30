@@ -55,8 +55,20 @@ export interface AutoApproveCheck {
   >;
   /** False when the duplicate check was skipped or its query failed: we can't rule out a duplicate. */
   duplicateCheckRan: boolean;
-  /** True when the edge-case handlers had to rewrite the amounts (before VAT + VAT ≠ total). */
+  /** True when the edge-case handlers rewrote the amounts (math fix or the exempt-supplier guess). */
   amountsAutoCorrected: boolean;
+  /** True when the VAT ID (the opt-in key) was not read from the invoice but filled / replaced from the supplier table or web search. */
+  vatIdAutoFilled?: boolean;
+}
+
+/** True when any amount differs between the AI output and the edge-case-corrected data. */
+export function amountsChanged(
+  before: { amount_before_vat?: number | null; vat_amount?: number | null; total_amount?: number | null },
+  after: { amount_before_vat?: number | null; vat_amount?: number | null; total_amount?: number | null }
+): boolean {
+  return (['amount_before_vat', 'vat_amount', 'total_amount'] as const).some(
+    (f) => (before[f] ?? null) !== (after[f] ?? null)
+  );
 }
 
 /** Reasons an opted-in supplier's invoice still needs manual review (empty = may auto-approve). */
@@ -65,6 +77,7 @@ export function autoApproveBlockers(check: AutoApproveCheck): string[] {
   const blockers: string[] = [];
   if (result.not_an_invoice) blockers.push('המסמך לא זוהה כחשבונית');
   if (!check.supplierVatId) blockers.push('חסר ח.פ. ספק');
+  else if (check.vatIdAutoFilled) blockers.push('ח.פ. הספק לא נקרא מהחשבונית (הושלם אוטומטית)');
   if (!result.math_ok) blockers.push('הסכומים לא מסתדרים');
   if (check.amountsAutoCorrected) blockers.push('הסכומים תוקנו אוטומטית');
   if (!result.vat_id_ok) blockers.push('ח.פ. אינו תקין');

@@ -2,7 +2,7 @@ import type { ExtractedData, SupplierRuleTrace, TenantRules, ValidationResult } 
 import { supabase } from '@/lib/supabase';
 import { fetchSupplierMappings, isAutoApproveEnabled } from '@/lib/supplierAutomation';
 import { applySupplierRule, findSupplierRule, normalizeVatId } from '@/shared/supplierRules';
-import { autoApproveBlockers } from '@/shared/autoApprove';
+import { amountsChanged, autoApproveBlockers } from '@/shared/autoApprove';
 import { searchVatIdByName } from '@/utils/businessLookup';
 import {
   allocationThreshold,
@@ -100,11 +100,10 @@ export async function validateInvoice(
   data: ExtractedData,
   rules: TenantRules
 ): Promise<{ data: ExtractedData; validationResult: ValidationResult; supplierRule: SupplierRuleTrace | null }> {
-  // Amounts the edge-case handlers will have to rewrite (blocks auto-approve)
-  const amountsAutoCorrected = !checkMath(data);
-
   // 1. Run edge cases & auto-corrections
   const { data: corrected, warnings: edgeWarnings } = runEdgeCaseHandlers(data);
+  // Amounts the edge-case handlers rewrote (math fix or exempt-supplier guess) block auto-approve
+  const amountsAutoCorrected = amountsChanged(data, corrected);
   const warnings = [...edgeWarnings];
 
   // Apply leading-zero padding to any extracted VAT ID if it has 8 digits
@@ -284,6 +283,8 @@ export async function validateInvoice(
         },
         duplicateCheckRan,
         amountsAutoCorrected,
+        // The opt-in is keyed by VAT ID, so it must come from the invoice itself
+        vatIdAutoFilled: normalizeVatId(invoiceVatId) !== supplierVatKey,
       })
     : [];
   const autoApproved = optedIn && blockers.length === 0;
