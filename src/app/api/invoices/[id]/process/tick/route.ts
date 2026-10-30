@@ -1,7 +1,7 @@
-import { after, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { requireInvoiceAccess } from '@/lib/auth';
 import { runProcessingTick, type TickResult } from '@/lib/processingQueue';
-import { TICK_RESPONSE_MS } from '@/shared/processing';
+import { TICK_HARD_LIMIT_MS, TICK_RESPONSE_MS } from '@/shared/processing';
 
 /**
  * Runs one bounded step of the invoice's queued processing run (OCR batch, boundary detection, one
@@ -10,9 +10,11 @@ import { TICK_RESPONSE_MS } from '@/shared/processing';
  * steps when no screen is open. Safe to call concurrently: a tick that finds the job leased answers
  * `busy`.
  *
- * Never held past TICK_RESPONSE_MS (Amplify cuts responses at ~28 s with a bare 504): a step that
- * runs longer (a slow LLM call) answers 202 `{ state: 'busy' }` and goes on in the background under
- * its renewed lease; its result is stored in the job, and the next tick continues from there.
+ * The step runs inside this request and ends by TICK_RESPONSE_MS (20 s): it starts only if it fits,
+ * and its calls time out before then. Nothing is left running after the response (Amplify freezes it,
+ * QA round 3). If a step overran anyway, the answer still leaves at TICK_HARD_LIMIT_MS (before
+ * Amplify's bare 504); the job's lease then runs out and the next tick redoes that step (counted as
+ * a transient interruption).
  */
 export async function POST(
   _request: Request,
@@ -22,26 +24,20 @@ export async function POST(
   const access = await requireInvoiceAccess(id);
   if (!access.ok) return access.response;
 
-  const work = runProcessingTick(id);
-  // Keeps the step alive after an early answer (and logs a late failure)
-  after(() =>
-    work.then(
-      () => undefined,
-      (err) => console.error(`[Process Tick] Background step failed for invoice ${id}:`, err)
-    )
-  );
+  const started = Date.now();
+  const work = runProcessingTick(id, { deadline: started + TICK_RESPONSE_MS });
+  // Never an unhandled rejection if the answer below leaves before the step ends
+  work.catch(() => undefined);
 
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), TICK_RESPONSE_MS);
+  const hardLimit = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), TICK_HARD_LIMIT_MS);
   });
   try {
-    const result: TickResult | null = await Promise.race([work, deadline]);
+    const result: TickResult | null = await Promise.race([work, hardLimit]);
     if (result === null) {
-      return NextResponse.json(
-        { state: 'busy', running: true, message: 'העיבוד ממשיך ברקע' },
-        { status: 202 }
-      );
+      console.warn(`[Process Tick] Step of invoice ${id} overran ${TICK_HARD_LIMIT_MS} ms; answering without it.`);
+      return NextResponse.json({ state: 'busy', message: 'העיבוד נמשך - ננסה שוב בעוד רגע' }, { status: 202 });
     }
     return NextResponse.json(result);
   } catch (err) {

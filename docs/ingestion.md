@@ -5,10 +5,12 @@ function, `ingestDocument()` in [`src/lib/ingest.ts`](../src/lib/ingest.ts), whi
 
 1. stores the file in the `raw-invoices` bucket (`<clientId>/<timestamp>_<safe name>`),
 2. creates the `invoices` row (`status = 'processing'`, `source = 'upload' | 'email' | 'whatsapp'`),
-3. queues the pipeline (see **Processing queue** below) and gives it a head start via `next/server` `after()`, so webhooks answer immediately.
+3. queues the pipeline (see **Processing queue** below), so webhooks answer immediately.
 
-The browser upload keeps its existing two-step flow (signed upload URL → `/api/invoices/upload` →
-`/api/invoices/[id]/process`); `/api/invoices/upload` now uses `registerStoredDocument()` from the same module.
+The browser upload goes signed upload URL → `/api/invoices/upload`, which registers each file with
+`registerStoredDocument()` from the same module and **queues it on the server** (`queued: true` per result).
+The browser calls `/api/invoices/[id]/process` only for a row the server could not queue (it is
+idempotent for an already-queued run); a row that stays unqueued is queued by the worker's sweep.
 
 Every channel is **off until its environment variables are set** - the endpoints answer `503` otherwise.
 No provider is configured in this repository.
@@ -25,34 +27,57 @@ The migration `20261030161000_qa_pipeline.sql` also sets the `raw-invoices` buck
 ## Processing queue
 
 Amplify cuts every HTTP response at ~28 s, so no request runs the whole pipeline
-([`src/lib/processingQueue.ts`](../src/lib/processingQueue.ts)):
+([`src/lib/processingQueue.ts`](../src/lib/processingQueue.ts)). And **nothing runs after a response**:
+Amplify SSR compute is a Lambda without `waitUntil`, so work left in `next/server` `after()` is frozen until
+a later request thaws the instance (QA round 3: leases lapsed, sockets broke, uploads took 20-50 minutes or
+failed). All processing therefore runs inside requests, in steps that end before the request's deadline;
+there is no `after()` in `src`.
 
-- `POST /api/invoices/[id]/process` only **enqueues** (status guard, new `processing_run_id`,
-  `processing_started_at`, `processing_attempts`, a `processing_jobs` row) and answers `202`.
-  Approved invoices need `{ "reopen": true }` (their reviewed values are kept); exported / rejected /
-  returned invoices and invoices with a live run get `409`.
+- Every entry point only **enqueues** (status guard, new `processing_run_id`, `processing_started_at`,
+  `processing_attempts`, a `processing_jobs` row): `/api/invoices/upload`, the email / WhatsApp webhooks,
+  `/retry`, the manual split and `POST /api/invoices/[id]/process` (`202`). Approved invoices need an
+  explicit reopen first; exported / rejected / returned invoices get `409`. For a `processing` invoice whose
+  run is already queued and live, `/process` answers `202 { alreadyQueued: true }` (not a `409` toast).
 - The work runs in short resumable **ticks**: OCR of a few pages per tick (only those pages are sent to
   Vision), then boundary detection, then **extraction in parts**: one LLM call per tick over at most 3 pages
   (a file that looks like several documents is extracted from its first document only - it can't be
   approved before it is split), then validation + save (no LLM). Every step's result is stored in
   `processing_jobs` (`extract_state`, migration `20261030180000_qa2_pipeline2.sql`) before the next one
   starts, so a killed tick re-pays only for its own call. The math retry is a step of its own.
-- A tick holds the job by a **45 s lease** that a heartbeat renews every 10 s while the step runs; a tick
-  killed by the platform frees the job within the lease, and the next tick redoes only that step
-  (3 attempts per step without progress, then a Hebrew error). The heartbeat stops after 5 minutes, so a
-  hung call can't hold a job forever.
-- `POST /api/invoices/[id]/process/tick` never waits past 20 s: a longer step answers `202 { state: 'busy' }`
-  and goes on in the background under its lease (no bare 504 from Amplify).
-- Ticks are driven by the **scheduled worker** `GET|POST /api/invoices/worker` every minute, by `after()`
-  right after enqueueing and by the review screens (`/process/tick` every few seconds while an invoice
-  shows as processing). The worker answers `202` at once (EventBridge API destinations time out after 5 s)
-  and runs the sweep + up to 4 due jobs after the response, each in bounded steps (~15 s budget).
+- Every tick has a **deadline** (20 s for `/process/tick`, the worker's budget for the worker) and starts a
+  step only if it fits (12 s left for an LLM step, 7 s for OCR, 5 s for validation + save). OCR rounds are
+  budgeted, and Vision, extraction and boundary-detection calls get timeouts that end before the deadline
+  (no SDK retries, no 16k-token "large retry"). An extraction part that times out or is cut at `max_tokens`
+  is split in two (smaller calls fit); a one-page part keeps its partial result when cut.
+- A tick holds the job by a **45 s lease** (renewed by a heartbeat while the step runs). A lease that ran
+  out without being released means the tick was interrupted: the next tick redoes only that step.
+- **Transient vs real errors**: network drops (`fetch failed`, `Connection error.`, `ECONNRESET`, socket hang
+  up...), timeouts, 429 / 5xx of Anthropic / Google / Supabase and interrupted ticks count against
+  `processing_jobs.transient_attempts` (6 in a row, backoff 5 s, 10 s, 20 s ... in `retry_at`); real errors
+  against `stage_attempts` (3); a bad file fails at once. Progress resets both. A failed run gets a Hebrew
+  `error_message` (connection problems have their own) and the technical cause in
+  `invoices.processing_error_detail` (migration `20261030191000_qa3_processing_error_detail.sql`; until it is
+  applied, transient failures count as real ones).
+- `POST /api/invoices/[id]/process/tick` runs one step inside the request and answers by 20 s (at the
+  latest 25 s, before Amplify's bare 504).
+- Ticks are driven by the **scheduled worker** `GET|POST /api/invoices/worker` and by the review screens
+  (`/process/tick` every few seconds while an invoice shows as processing). The worker does its work
+  **inside the request** and answers `200 { stuck, enqueued, driven: [{ id, state }], due, ms }` within
+  `PROCESSING_WORKER_BUDGET_MS` (default 20 s, at most 24 s): the sweep, then up to
+  `PROCESSING_WORKER_MAX_JOBS` (default 6) due jobs in parallel, a freed slot taking the next due job while
+  an LLM step still fits. Call it every minute from an AWS Lambda (timeout 60 s) that calls again while
+  `due > 0`; back-to-back and concurrent calls are safe (leases). Sizing: see
+  [`src/lib/processingWorker.ts`](../src/lib/processingWorker.ts) - 6 concurrent uploads (22- / 25-page PDFs
+  included) each get a step per call, 2-3 calls a minute.
   Auth: `PROCESSING_WORKER_SECRET` as `X-Ingest-Secret` / `X-Worker-Secret` / `X-Api-Key`,
   `Authorization: Bearer`, or Basic (secret as password); surrounding spaces / quotes in the configured value
   are ignored; 503 when unset. Schedule it every minute, e.g. with EventBridge Scheduler (API destination).
-- A queued job whose lease is free is **resumed**, however long nobody drove it. Stuck runs become `error`
-  with a Hebrew reason: rows with nothing queued and no progress for 10 minutes, or runs older than 45
-  minutes; the user can retry ("עבד מחדש" on the review screen).
+- A queued job whose lease is free is **resumed**, however long nobody drove it. A `processing` row that
+  was never queued (`processing_attempts` 0: an upload whose enqueue didn't happen, rows from before the
+  queue) is **queued** by the sweep / a tick once it is a minute old, not failed. Stuck runs become `error`
+  with a Hebrew reason: queued rows whose job is gone and that made no progress for 10 minutes (the clock
+  starts at the latest of enqueue / job activity / row update), or runs older than 45 minutes; the user can
+  retry ("עבד מחדש" on the review screen).
 - Concurrent `/process` calls start exactly one run: the claim is conditioned on the run token read, and a
   run claimed less than a minute ago counts as live even before its job row exists (the others get `409`).
   The split route queues part 1 under its own claim token (`claimToken`), which is not a competing run.
@@ -68,6 +93,8 @@ Amplify cuts every HTTP response at ~28 s, so no request runs the whole pipeline
 | Variable | Description |
 |----------|-------------|
 | `PROCESSING_WORKER_SECRET` | Secret of the scheduled worker (`openssl rand -hex 32`). Without it the worker answers 503 and runs move only while a review screen is open |
+| `PROCESSING_WORKER_BUDGET_MS` | Optional. Work time of one worker call (default 20000, 5000-24000) |
+| `PROCESSING_WORKER_MAX_JOBS` | Optional. Jobs one worker call drives in parallel (default 6, 1-12) |
 
 ---
 

@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { after, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { PDFDocument } from 'pdf-lib';
 import { saveInvoiceFileHash, sha256Hex, splitPartHash } from '@/lib/fileHash';
@@ -9,12 +9,10 @@ import { isClientStorageFileUrl, sanitizeStorageFilename } from '@/lib/ingestHel
 import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
 import { splitStatusError } from '@/shared/processing';
 import { sniffUploadMime } from '@/shared/uploadValidation';
-import { driveProcessing, enqueueProcessing } from '@/lib/processingQueue';
+import { enqueueProcessing } from '@/lib/processingQueue';
 import { downloadInvoiceFile, redactUrlForLog, storedFileUrlFor } from '@/lib/invoiceFiles';
 
 const RAW_BUCKET = 'raw-invoices';
-/** Background head start for the parts' processing (the review list / worker continue the rest). */
-const AFTER_BUDGET_MS = 20_000;
 
 const MSG_SPLIT_FAILED = 'פיצול הקובץ נכשל. יש לנסות שוב';
 
@@ -261,8 +259,9 @@ export async function POST(
     }
   }
 
-  // 6. Queue every part on the server; a short head start runs after the response
-  // (in parallel: each part is its own row, and a 20-part split must stay within the response limit)
+  // 6. Queue every part on the server (in parallel: each part is its own row, and a 20-part split
+  // must stay within the response limit). The parts are processed by the review screens' ticks and
+  // the scheduled worker - nothing is left running after this response (Amplify freezes it, QA round 3).
   const queuedIds: string[] = [];
   const queuedResults = await Promise.all(
     results.map((part) =>
@@ -276,20 +275,7 @@ export async function POST(
     if (queued.ok) queuedIds.push(results[idx].id);
     else console.error(`[Split API] Could not queue part ${results[idx].id}: ${queued.error}`);
   });
-  after(async () => {
-    const started = Date.now();
-    for (const partId of queuedIds) {
-      const left = AFTER_BUDGET_MS - (Date.now() - started);
-      if (left <= 0) break;
-      try {
-        await driveProcessing(partId, left);
-      } catch (err) {
-        console.error(`[Split API] Background tick failed for part ${partId}:`, err);
-      }
-    }
-  });
-
-  console.log(`[Split API] Split of invoice ${id} complete: ${results.length} parts.`);
+  console.log(`[Split API] Split of invoice ${id} complete: ${results.length} parts, ${queuedIds.length} queued.`);
   return NextResponse.json({
     success: true,
     invoices: results,

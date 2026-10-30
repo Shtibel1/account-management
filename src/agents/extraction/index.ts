@@ -166,6 +166,12 @@ export async function extractInvoiceData(
     hint?: string | null;
     /** Retry a response cut at max_tokens with a larger budget (one long call). Off for page chunks. */
     allowLargeRetry?: boolean;
+    /**
+     * Time limit of each model call (ms). The processing queue passes what is left of its request's
+     * deadline, so a call can never outlive the response (nothing runs after it on Amplify). No SDK
+     * retries then: the queue retries transient failures itself, with backoff.
+     */
+    timeoutMs?: number;
   } = {}
 ): Promise<{
   extractedData: ExtractedData;
@@ -173,6 +179,8 @@ export async function extractInvoiceData(
   outputTokens: number;
   /** Ids of the past invoices that were included as few-shot examples. */
   fewShotInvoiceIds: string[];
+  /** The final response was cut at max_tokens (its tool input may be incomplete). */
+  truncated: boolean;
 }> {
   const anthropic = getAnthropicClient();
   const content: Anthropic.MessageParam['content'] = [];
@@ -222,6 +230,7 @@ export async function extractInvoiceData(
     text: promptText,
   });
 
+  const requestOptions = options.timeoutMs ? { timeout: Math.max(1_000, Math.floor(options.timeoutMs)), maxRetries: 0 } : undefined;
   const callModel = (maxTokens: number) =>
     anthropic.messages.create({
       model: 'claude-sonnet-4-5-20250929',
@@ -230,7 +239,7 @@ export async function extractInvoiceData(
       tools: [TOOL_DEFINITION],
       tool_choice: { type: 'any' },
       messages: [{ role: 'user', content }],
-    });
+    }, requestOptions);
 
   // 1024 was enough for the scalar fields; up to MAX_LINE_ITEMS lines + confidences need more.
   // A tool call cut at max_tokens may lose every field (not just line_items), so retry once
@@ -296,5 +305,6 @@ export async function extractInvoiceData(
     inputTokens,
     outputTokens,
     fewShotInvoiceIds: usedInvoiceIds,
+    truncated: response.stop_reason === 'max_tokens',
   };
 }

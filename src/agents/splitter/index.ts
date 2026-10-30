@@ -32,7 +32,7 @@ export function splitterMaxTokens(pageCount: number): number {
 /** The subset of the Anthropic client the splitter uses (injectable for tests). */
 export interface SplitterLlm {
   messages: {
-    create(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message>;
+    create(params: Anthropic.MessageCreateParamsNonStreaming, options?: { timeout?: number; maxRetries?: number }): Promise<Anthropic.Message>;
   };
 }
 
@@ -115,7 +115,9 @@ export interface BoundaryDetectionResult {
  */
 export async function detectDocumentBoundaries(
   pageTexts: string[],
-  llm: SplitterLlm | null = getAnthropicClient()
+  llm: SplitterLlm | null = getAnthropicClient(),
+  /** Time limit of each model call (the processing queue's step deadline); no SDK retries then. */
+  timeoutMs?: number
 ): Promise<BoundaryDetectionResult> {
   const none: BoundaryDetectionResult = { suggestion: null, inputTokens: 0, outputTokens: 0 };
   const failed: BoundaryDetectionResult = { ...none, failed: true };
@@ -162,6 +164,9 @@ ${describeHints(precheck.hints)}
 
 ${formattedPages}`;
 
+  // With a time limit, both calls together stay within it (the retry gets what the first one left)
+  const startedAt = Date.now();
+  const requestOptions = () => (timeoutMs ? { timeout: Math.max(1_000, Math.floor(timeoutMs - (Date.now() - startedAt))), maxRetries: 0 } : undefined);
   const callModel = (maxTokens: number) =>
     anthropic.messages.create({
       model: MODEL,
@@ -171,7 +176,7 @@ ${formattedPages}`;
       tools: [TOOL_DEFINITION],
       tool_choice: { type: 'tool', name: TOOL_NAME },
       messages: [{ role: 'user', content: userText }],
-    });
+    }, requestOptions());
 
   try {
     const firstBudget = splitterMaxTokens(pageCount);
@@ -182,7 +187,8 @@ ${formattedPages}`;
     };
     // A tool call cut at max_tokens has incomplete `documents` (pages not covered) - retry once
     // with the largest budget before giving up.
-    if (response.stop_reason === 'max_tokens' && firstBudget < MAX_OUTPUT_TOKENS) {
+    const timeLeft = timeoutMs ? timeoutMs - (Date.now() - startedAt) : Infinity;
+    if (response.stop_reason === 'max_tokens' && firstBudget < MAX_OUTPUT_TOKENS && timeLeft >= 5_000) {
       console.warn(`[Splitter] Boundary response hit max_tokens (${firstBudget}) - retrying with ${MAX_OUTPUT_TOKENS}`);
       response = await callModel(MAX_OUTPUT_TOKENS);
       usage.inputTokens += response.usage?.input_tokens ?? 0;

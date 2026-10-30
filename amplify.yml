@@ -18,6 +18,9 @@ frontend:
         - echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> .env.production
         # Secret of the scheduled processing worker (/api/invoices/worker); see docs/ingestion.md
         - echo "PROCESSING_WORKER_SECRET=$PROCESSING_WORKER_SECRET" >> .env.production
+        # Optional worker sizing (src/lib/processingWorker.ts); empty = defaults
+        - echo "PROCESSING_WORKER_BUDGET_MS=$PROCESSING_WORKER_BUDGET_MS" >> .env.production
+        - echo "PROCESSING_WORKER_MAX_JOBS=$PROCESSING_WORKER_MAX_JOBS" >> .env.production
         # Encryption key for per-client integration credentials (docs/integrations.md)
         - echo "INTEGRATIONS_ENCRYPTION_KEY=$INTEGRATIONS_ENCRYPTION_KEY" >> .env.production
         - echo "FEATURE_FLAGS_DEFAULT=$FEATURE_FLAGS_DEFAULT" >> .env.production

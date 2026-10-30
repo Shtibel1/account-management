@@ -43,12 +43,37 @@ function extractWordsFromPage(pageRes: any, pageIndex: number): OcrWord[] {
   return words;
 }
 
+/** Options of one Vision call made by the processing queue. */
+export interface OcrCallOptions {
+  /** Time limit of the call (ms): it must end before its request's deadline (nothing runs after a response on Amplify). */
+  timeoutMs?: number;
+}
+
+/** POST to Vision; a failed status throws with `status` set (429 / 5xx are retried by the queue). */
+async function postVision(apiUrl: string, payload: unknown, label: string, options: OcrCallOptions): Promise<Response> {
+  const apiResponse = await fetch(apiUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    ...(options.timeoutMs ? { signal: AbortSignal.timeout(Math.max(1_000, Math.floor(options.timeoutMs))) } : {}),
+  });
+  if (!apiResponse.ok) {
+    // Raw vendor detail goes to the server log; callers map the error to Hebrew (toUserErrorMessage)
+    const errText = await apiResponse.text();
+    throw Object.assign(new Error(`Google Cloud Vision ${label} request failed: ${apiResponse.statusText}. Details: ${errText}`), {
+      status: apiResponse.status,
+    });
+  }
+  return apiResponse;
+}
+
 async function runOcrForPageRange(
   base64Data: string,
   apiKey: string,
   pages: number[],
   /** Page numbers to report for each requested page (defaults to `pages`). */
-  reportAs: number[] = pages
+  reportAs: number[] = pages,
+  options: OcrCallOptions = {}
 ): Promise<{ pageTexts: string[]; ocrWords: OcrWord[] }> {
   const apiUrl = `https://vision.googleapis.com/v1/files:annotate?key=${apiKey}`;
   const payload = {
@@ -68,20 +93,7 @@ async function runOcrForPageRange(
     ],
   };
 
-  const apiResponse = await fetch(apiUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!apiResponse.ok) {
-    // Raw vendor detail goes to the server log; callers map the error to Hebrew (toUserErrorMessage)
-    const errText = await apiResponse.text();
-    throw new Error(`Google Cloud Vision page range OCR request failed: ${apiResponse.statusText}. Details: ${errText}`);
-  }
-
+  const apiResponse = await postVision(apiUrl, payload, 'page range OCR', options);
   const data = await apiResponse.json();
   const fileResponses = data.responses?.[0]?.responses;
   if (!fileResponses || !Array.isArray(fileResponses)) {
@@ -143,21 +155,22 @@ export async function loadPdf(fileBuffer: Buffer): Promise<PDFDocument | null> {
 export async function ocrPdfPages(
   fileBuffer: Buffer,
   pdfDoc: PDFDocument | null,
-  pages: number[]
+  pages: number[],
+  options: OcrCallOptions = {}
 ): Promise<{ pageTexts: string[]; ocrWords: OcrWord[] }> {
   const apiKey = visionApiKey();
   if (!pdfDoc) {
-    return runOcrForPageRange(fileBuffer.toString('base64'), apiKey, pages);
+    return runOcrForPageRange(fileBuffer.toString('base64'), apiKey, pages, pages, options);
   }
   const subDoc = await PDFDocument.create();
   const copied = await subDoc.copyPages(pdfDoc, pages.map((p) => p - 1));
   copied.forEach((page) => subDoc.addPage(page));
   const subBytes = Buffer.from(await subDoc.save());
-  return runOcrForPageRange(subBytes.toString('base64'), apiKey, pages.map((_, i) => i + 1), pages);
+  return runOcrForPageRange(subBytes.toString('base64'), apiKey, pages.map((_, i) => i + 1), pages, options);
 }
 
 /** OCR of a single image (JPEG / PNG / WEBP...). */
-export async function ocrImage(fileBuffer: Buffer): Promise<{
+export async function ocrImage(fileBuffer: Buffer, options: OcrCallOptions = {}): Promise<{
   rawOcrText: string;
   ocrWords: OcrWord[];
   pageCount: number;
@@ -176,17 +189,7 @@ export async function ocrImage(fileBuffer: Buffer): Promise<{
     ],
   };
 
-  const apiResponse = await fetch(apiUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-
-  if (!apiResponse.ok) {
-    const errText = await apiResponse.text();
-    throw new Error(`Google Cloud Vision Image OCR request failed: ${apiResponse.statusText}. Details: ${errText}`);
-  }
-
+  const apiResponse = await postVision(apiUrl, payload, 'Image OCR', options);
   const data = await apiResponse.json();
   const imageResponse = data.responses?.[0];
   let rawOcrText = '';

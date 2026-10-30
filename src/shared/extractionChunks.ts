@@ -45,6 +45,8 @@ export interface ExtractState {
   /** Math retries done (the pipeline retries a sum mismatch once). */
   retry_count: number;
   phase: ExtractPhase;
+  /** Tokens of calls whose output was dropped (cut at max_tokens, then the part was split); counted in the cost. */
+  discarded_tokens?: { input: number; output: number };
 }
 
 function textLength(pageTexts: string[], start: number, end: number): number {
@@ -106,6 +108,19 @@ export function isValidExtractState(value: unknown, pageCount: number): value is
   if (s.chunks.length === 0 || s.chunks.length !== s.results.length) return false;
   if (!s.range || s.range.start < 1 || s.range.end > Math.max(1, pageCount)) return false;
   return s.phase === 'chunks' || s.phase === 'retry' || s.phase === 'finalize';
+}
+
+/**
+ * Replaces chunk `index` by its two halves (no results yet), for a part whose call ran out of time
+ * or of output tokens: smaller calls fit a request's deadline (QA round 3). Null for a one-page part.
+ */
+export function splitChunk(state: ExtractState, index: number): ExtractState | null {
+  const span = state.chunks[index];
+  if (!span || span.end <= span.start) return null;
+  const mid = span.start + Math.floor((span.end - span.start + 1) / 2) - 1;
+  const chunks = [...state.chunks.slice(0, index), { start: span.start, end: mid }, { start: mid + 1, end: span.end }, ...state.chunks.slice(index + 1)];
+  const results = [...state.results.slice(0, index), null, null, ...state.results.slice(index + 1)];
+  return { ...state, chunks, results };
 }
 
 export function nextChunkIndex(state: ExtractState): number | null {
@@ -209,6 +224,6 @@ export function mergeChunkResults(state: ExtractState): ExtractedData {
 export function extractionTokens(state: ExtractState): { input: number; output: number } {
   return state.results.reduce(
     (acc, r) => ({ input: acc.input + (r?.input_tokens ?? 0), output: acc.output + (r?.output_tokens ?? 0) }),
-    { input: 0, output: 0 }
+    { input: state.discarded_tokens?.input ?? 0, output: state.discarded_tokens?.output ?? 0 }
   );
 }

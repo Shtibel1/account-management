@@ -22,30 +22,49 @@ export interface ProcessingProgress {
 
 /**
  * A tick holds the job for this long. While its step runs it renews the lease every
- * JOB_HEARTBEAT_MS, so a long LLM call keeps the job, and a tick that was killed (Amplify cut the
- * request / froze the compute) frees it within this time instead of minutes later (QA round 2, N5).
+ * JOB_HEARTBEAT_MS, and a tick that was killed (Amplify cut the request / froze the compute) frees
+ * it within this time instead of minutes later (QA round 2, N5). Steps end before the deadline of
+ * their request (TICK_RESPONSE_MS / the worker budget), well inside the lease.
  */
 export const JOB_LEASE_MS = 45_000;
 export const JOB_HEARTBEAT_MS = 10_000;
 /** The heartbeat renews a step's lease for at most this long (a hung call must not hold the job forever). */
 export const MAX_STEP_MS = 5 * 60_000;
-/** Time budget of one tick for OCR batches (well under the ~28 s Amplify response limit). */
+/** Time budget of one tick for OCR batches (also bounded by the tick's deadline). */
 export const TICK_OCR_BUDGET_MS = 14_000;
-/** An extraction tick goes on to validation + save (no LLM) only if its LLM call ended within this. */
-export const TICK_FINALIZE_BUDGET_MS = 15_000;
 /**
- * /process/tick answers by then even if its step still runs (202 + state 'busy'; the step goes on
- * in the background under its lease), so the browser never gets a bare 504 (N14 / N22).
+ * Deadline of the work inside one /process/tick request. Nothing runs after a response on Amplify
+ * (Lambda, no waitUntil: code after the response is frozen until another request thaws the instance,
+ * QA round 3), so a tick only starts a step it can finish by then: OCR rounds are budgeted, LLM calls
+ * get a timeout that ends before it, and a step that can't fit is left for the next tick.
  */
 export const TICK_RESPONSE_MS = 20_000;
+/** /process/tick answers by then whatever happens (Amplify answers a bare 504 at ~28 s). */
+export const TICK_HARD_LIMIT_MS = 25_000;
+/** Time kept after a step's last external call for saving its result before the deadline. */
+export const STEP_SAVE_MARGIN_MS = 2_500;
+/** One LLM call never runs longer than this (also when a request's deadline is further away). */
+export const MAX_LLM_CALL_MS = 22_000;
+/** A step with an LLM call (boundary detection, an extraction part) starts only with this much time left. */
+export const MIN_LLM_STEP_MS = 12_000;
+/** An OCR step (download + at least one batch of pages) starts only with this much time left. */
+export const MIN_OCR_STEP_MS = 7_000;
+/** Validation + save (no LLM) starts only with this much time left. */
+export const MIN_FINALIZE_STEP_MS = 5_000;
 /** A run claimed this recently whose job row isn't written yet is still starting (N11). */
 export const ENQUEUE_GRACE_MS = 60_000;
 /** Pages sent to Google Vision in one files:annotate call (Vision's own maximum is 5). */
 export const OCR_PAGES_PER_REQUEST = 5;
 /** OCR requests run in parallel within a tick. */
 export const OCR_PARALLEL_REQUESTS = 2;
-/** A stage claimed this many times without progress fails the run (killed / timed-out ticks). */
+/** A stage that failed this many times without progress with a real (not transient) error fails the run. */
 export const MAX_STAGE_ATTEMPTS = 3;
+/**
+ * Transient failures (network drops, timeouts, 429 / 5xx, a tick interrupted with its lease held)
+ * have a budget of their own, with backoff (transientBackoffMs), so they don't burn
+ * MAX_STAGE_ATTEMPTS: a run fails on them only after this many in a row without progress (QA round 3).
+ */
+export const MAX_TRANSIENT_ATTEMPTS = 6;
 /** No job activity for this long while 'processing' and nothing queued → the run is stuck. */
 export const STALE_PROCESSING_MS = 10 * 60_000;
 /** A run older than this is stuck even if it keeps heart-beating. */
@@ -151,13 +170,53 @@ export function isRunTooOld(startedAt: string | null | undefined, now: number): 
 export function isStaleRun(input: StaleCheckInput): boolean {
   const started = ts(input.startedAt);
   if (started !== null && input.now - started > MAX_RUN_MS) return true;
-  const last = ts(input.lastActivityAt) ?? started ?? ts(input.rowUpdatedAt);
-  if (last === null) return false;
-  return input.now - last > STALE_PROCESSING_MS;
+  // The latest thing known starts the clock: a run queued late (an old processing_started_at or row
+  // date, but a fresh enqueue / job) is not stale (QA round 3)
+  const known = [ts(input.lastActivityAt), started, ts(input.rowUpdatedAt)].filter((n): n is number => n !== null);
+  if (known.length === 0) return false;
+  return input.now - Math.max(...known) > STALE_PROCESSING_MS;
+}
+
+export type OrphanRunAction = 'enqueue' | 'fail' | 'wait';
+
+export interface OrphanRunInput {
+  now: number;
+  /** invoices.processing_attempts: 0 / null = this row was never queued. */
+  attempts: number | null | undefined;
+  processingStage: string | null | undefined;
+  startedAt: string | null | undefined;
+  rowUpdatedAt: string | null | undefined;
+}
+
+/**
+ * What to do with a 'processing' row that has no job of its current run. A row that was never
+ * queued (processing_attempts 0: an upload whose enqueue didn't happen, rows from before the queue)
+ * is queued once it is ENQUEUE_GRACE_MS old (a split creating its parts queues them itself moments
+ * later), not failed as stuck (QA round 3). A manual split in progress ('splitting') and a run that
+ * was queued but lost its job fail only when stale, so the user can retry.
+ */
+export function orphanRunAction(input: OrphanRunInput): OrphanRunAction {
+  const stale = isStaleRun({ now: input.now, startedAt: input.startedAt, lastActivityAt: null, rowUpdatedAt: input.rowUpdatedAt });
+  if (input.processingStage === 'splitting') return stale ? 'fail' : 'wait';
+  if (!input.attempts) {
+    const known = [ts(input.startedAt), ts(input.rowUpdatedAt)].filter((n): n is number => n !== null);
+    return known.length === 0 || input.now - Math.max(...known) >= ENQUEUE_GRACE_MS ? 'enqueue' : 'wait';
+  }
+  return stale ? 'fail' : 'wait';
 }
 
 export const STUCK_RUN_MESSAGE = 'העיבוד נקטע ולא הסתיים. ניתן לנסות שוב ("עבד מחדש"), ואם הקובץ גדול - לפצל אותו לחלקים קטנים יותר';
 export const TOO_MANY_ATTEMPTS_MESSAGE = 'העיבוד נכשל שוב ושוב בשלב זה. ניתן לנסות שוב ("עבד מחדש"), ואם הקובץ גדול - לפצל אותו לחלקים קטנים יותר';
+export const CONNECTION_ERROR_MESSAGE = 'החיבור לשירותי העיבוד נקטע שוב ושוב. ניתן לנסות שוב ("עבד מחדש") בעוד כמה דקות';
+export const TRANSIENT_EXHAUSTED_MESSAGE = 'העיבוד נקטע שוב ושוב בגלל תקלה זמנית. ניתן לנסות שוב ("עבד מחדש") בעוד כמה דקות';
+/** last_error of a job whose previous tick was interrupted (its lease ran out while the step ran). */
+export const INTERRUPTED_STEP_ERROR = 'Step interrupted: the lease expired before the step finished';
+
+/** Wait before retrying a step after its n-th transient failure in a row (5 s, 10 s, 20 s ... at most 2 min). */
+export function transientBackoffMs(n: number): number {
+  const k = Math.max(1, Math.floor(n));
+  return Math.min(120_000, 5_000 * 2 ** (k - 1));
+}
 
 // ── OCR batching ──────────────────────────────────────────────────────────────
 
@@ -191,9 +250,117 @@ export class UserFacingError extends Error {
 
 const HEBREW = /[֐-׿]/;
 
+/** Error codes of dropped / refused / timed-out connections (Node, undici). */
+const TRANSIENT_CODES = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'ENETUNREACH', 'ENETDOWN',
+  'EHOSTUNREACH', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_CLOSED', 'UND_ERR_ABORTED',
+]);
+const TIMEOUT_CODES = new Set(['ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
+/** Error class names (Anthropic SDK, fetch / AbortSignal) of connection problems, timeouts and retryable statuses. */
+const TRANSIENT_NAMES = new Set([
+  'APIConnectionError', 'APIConnectionTimeoutError', 'RateLimitError', 'InternalServerError', 'TimeoutError', 'AbortError',
+]);
+const CONNECTION_TEXT = [
+  'fetch failed', 'connection error', 'socket hang up', 'econnreset', 'econnrefused', 'network error',
+  'network socket disconnected', 'other side closed', 'eai_again', 'und_err_socket', 'und_err_closed',
+];
+const TRANSIENT_TEXT = [
+  ...CONNECTION_TEXT, 'timed out', 'timeout', 'etimedout', 'aborted', 'overloaded', 'rate limit', 'rate_limit',
+  'too many requests', 'resource_exhausted', 'service unavailable', 'bad gateway', 'internal server error',
+  'deadline_exceeded', 'lease expired', 'step interrupted',
+];
+
+function httpStatusOf(err: unknown): number | null {
+  const status = (err as { status?: unknown } | null)?.status;
+  return typeof status === 'number' ? status : null;
+}
+
+function codeOf(err: unknown): string | null {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? code.toUpperCase() : null;
+}
+
+/** The error and its causes (fetch wraps the socket error as `cause`), a few levels deep. */
+function errorChain(err: unknown): unknown[] {
+  const chain: unknown[] = [];
+  let current: unknown = err;
+  while (current !== null && current !== undefined && chain.length < 5 && !chain.includes(current)) {
+    chain.push(current);
+    current = typeof current === 'object' ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return chain;
+}
+
+function chainText(err: unknown): string {
+  return errorChain(err)
+    .map((e) => (e instanceof Error ? `${e.name} ${e.message} ${codeOf(e) ?? ''}` : String(e ?? '')))
+    .join(' | ')
+    .toLowerCase();
+}
+
+/** True for a dropped / refused connection ('fetch failed', the SDK's 'Connection error.', ECONNRESET...). */
+export function isConnectionError(err: unknown): boolean {
+  for (const e of errorChain(err)) {
+    const code = codeOf(e);
+    if (code && TRANSIENT_CODES.has(code) && !TIMEOUT_CODES.has(code)) return true;
+    if (e instanceof Error && e.name === 'APIConnectionError') return true;
+  }
+  const text = chainText(err);
+  return CONNECTION_TEXT.some((t) => text.includes(t));
+}
+
+/** True for a call that ran out of time (a step's deadline, the SDK's request timeout, ETIMEDOUT). */
+export function isTimeoutError(err: unknown): boolean {
+  for (const e of errorChain(err)) {
+    if (e instanceof Error && (e.name === 'APIConnectionTimeoutError' || e.name === 'TimeoutError')) return true;
+    const code = codeOf(e);
+    if (code && TIMEOUT_CODES.has(code)) return true;
+  }
+  const text = chainText(err);
+  return text.includes('timed out') || text.includes('timeout') || text.includes('deadline_exceeded');
+}
+
+/**
+ * True for errors that say nothing about the document: network drops and interruptions, timeouts,
+ * rate limits and 5xx of Anthropic / Google / Supabase. They get MAX_TRANSIENT_ATTEMPTS with backoff
+ * instead of the MAX_STAGE_ATTEMPTS of real errors (QA round 3: a frozen compute broke its sockets,
+ * and the resulting 'fetch failed' / 'Connection error.' ended runs as a generic failure).
+ */
+export function isTransientError(err: unknown): boolean {
+  if (err instanceof UserFacingError || isPermanentError(err)) return false;
+  const status = httpStatusOf(err);
+  if (status !== null) {
+    if (status === 408 || status === 409 || status === 425 || status === 429 || status >= 500) return true;
+    if (status >= 400) return false;
+  }
+  for (const e of errorChain(err)) {
+    if (e instanceof Error && TRANSIENT_NAMES.has(e.name)) return true;
+    const code = codeOf(e);
+    if (code && TRANSIENT_CODES.has(code)) return true;
+  }
+  const text = chainText(err);
+  return TRANSIENT_TEXT.some((t) => text.includes(t));
+}
+
+/** The technical cause kept on the invoice when a run fails (processing_error_detail); never shown as is. */
+export function errorDetail(err: unknown): string {
+  return errorChain(err)
+    .map((e) => {
+      if (!(e instanceof Error)) return String(e ?? '');
+      const code = codeOf(e);
+      const status = httpStatusOf(e);
+      return `${e.name}: ${e.message}${code ? ` [${code}]` : ''}${status !== null ? ` (status ${status})` : ''}`;
+    })
+    .filter(Boolean)
+    .join(' <- ')
+    .slice(0, 2000);
+}
+
 /**
  * True for errors a retry can't fix (bad / empty / unsupported file, vendor 400). Transient ones
- * (rate limits, 5xx, timeouts, network) are retried by the next tick, up to MAX_STAGE_ATTEMPTS.
+ * (isTransientError) are retried with backoff up to MAX_TRANSIENT_ATTEMPTS, other errors up to
+ * MAX_STAGE_ATTEMPTS.
  */
 export function isPermanentError(err: unknown): boolean {
   if (err instanceof UserFacingError) return true;
@@ -244,6 +411,16 @@ export function toUserErrorMessage(err: unknown): string {
   if (text.includes('timed out') || text.includes('timeout') || text.includes('etimedout') || text.includes('aborted')) {
     return 'העיבוד ארך זמן רב מדי. ניתן לנסות שוב, ואם הקובץ גדול - לפצל אותו';
   }
+  if (text.includes('lease expired') || text.includes('step interrupted')) {
+    return STUCK_RUN_MESSAGE;
+  }
+  // 'fetch failed', the Anthropic SDK's 'Connection error.', ECONNRESET, socket hang up...
+  if (isConnectionError(err)) {
+    return CONNECTION_ERROR_MESSAGE;
+  }
+  if (text.includes('service unavailable') || text.includes('bad gateway') || text.includes('internal server error')) {
+    return 'שירות הניתוח החזיר שגיאה. יש לנסות שוב בעוד כמה דקות';
+  }
   if (text.includes('download') || text.includes('retrieve invoice file') || text.includes('object not found')) {
     return 'לא ניתן היה לקרוא את הקובץ מהאחסון. יש להעלות אותו מחדש';
   }
@@ -255,5 +432,13 @@ export function toUserErrorMessage(err: unknown): string {
   }
   // Short Hebrew messages from our own code (e.g. 'המודל לא החזיר נתוני חשבונית') pass through
   if (raw && HEBREW.test(raw) && raw.length <= 200 && !raw.includes('{')) return raw;
-  return 'העיבוד נכשל. ניתן לנסות שוב ("עבד מחדש")';
+  return GENERIC_FAILURE_MESSAGE;
+}
+
+const GENERIC_FAILURE_MESSAGE = 'העיבוד נכשל. ניתן לנסות שוב ("עבד מחדש")';
+
+/** Message of a run that ran out of transient attempts: its cause when known, never the generic one. */
+export function transientFailureMessage(err: unknown): string {
+  const message = toUserErrorMessage(err);
+  return message === GENERIC_FAILURE_MESSAGE ? TRANSIENT_EXHAUSTED_MESSAGE : message;
 }

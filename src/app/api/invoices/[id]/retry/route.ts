@@ -4,6 +4,7 @@ import { requireInvoiceAccess } from '@/lib/auth';
 import { dbErrorResponse, readJsonObject, transitionInvoice } from '@/lib/invoiceTransitions';
 import { isClientStorageFileUrl } from '@/lib/ingestHelpers';
 import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
+import { schedulePipeline } from '@/lib/ingest';
 import { RETRYABLE_STATUSES, transitionRefusedMessage } from '@/shared/invoiceStatus';
 import type { InvoiceStatus } from '@/shared/types';
 
@@ -11,9 +12,9 @@ export const dynamic = 'force-dynamic';
 
 /**
  * "עבד מחדש" for a failed document: moves it from 'error' back to 'processing' (clearing the old
- * error and AI output). The browser then starts the pipeline with POST /api/invoices/[id]/process,
- * exactly as after an upload.
- * → 200 { success, status: 'processing' } · 400 no usable stored file · 409 not in 'error'
+ * error and AI output) and queues the run on the server (`queued: true`), so it doesn't depend on the
+ * browser's POST /api/invoices/[id]/process (still accepted: idempotent for the queued run).
+ * → 200 { success, status: 'processing', queued } · 400 no usable stored file · 409 not in 'error'
  */
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -55,7 +56,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       }
       return dbErrorResponse(outcome.error, 'שגיאה בהפעלת העיבוד מחדש');
     }
-    return NextResponse.json({ success: true, status: 'processing' });
+    const queued = await schedulePipeline(id);
+    return NextResponse.json({ success: true, status: 'processing', queued });
   } catch (err) {
     console.error(`[invoices/retry] Failed to reset invoice ${id} for reprocessing:`, err);
     return NextResponse.json({ error: 'שגיאה בהפעלת העיבוד מחדש' }, { status: 500 });
