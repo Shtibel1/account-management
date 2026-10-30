@@ -5,7 +5,7 @@ import { extractInvoiceData } from '../extraction';
 import { validateInvoice } from '../validation';
 import { approvalNode } from '../approval';
 import { detectDocumentBoundaries } from '../splitter';
-import { isMultiDocument, shouldAutoSplit, type SplitSuggestion } from '@/shared/documentSplit';
+import { isMultiDocument, shouldAutoSplit, usableSuggestion, type SplitSuggestion } from '@/shared/documentSplit';
 import { supabase } from '@/lib/supabase';
 import { PDFDocument } from 'pdf-lib';
 
@@ -305,7 +305,8 @@ const graph = new StateGraph<any>({
       default: () => ({ ocrOpCount: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 }),
     },
     useVisionFallback: { value: (a: boolean, b: boolean) => b ?? a, default: () => false },
-    splitSuggestion:  { value: (a: any, b: any) => b ?? a, default: () => null },
+    // null must overwrite: a re-run on the same thread (e.g. after a manual split) must not keep the old suggestion
+    splitSuggestion:  { value: (a: any, b: any) => (b === undefined ? a : b), default: () => null },
   },
 })
   // 1. Initialize Rules node
@@ -544,8 +545,9 @@ const graph = new StateGraph<any>({
     );
     // A file that holds several invoices must not be auto-approved as one: force review and
     // store the suggestion so the review screen can pre-fill the split dialog.
-    const splitSuggestion = state.splitSuggestion ?? null;
-    if (isMultiDocument(splitSuggestion)) {
+    // Only a suggestion that still matches this file's page count (stale ones are dropped)
+    const splitSuggestion = usableSuggestion(state.splitSuggestion, state.ocrMetadata?.pageCount ?? null);
+    if (splitSuggestion) {
       const warning = `נראה שהקובץ מכיל ${splitSuggestion.documents.length} מסמכים נפרדים — מומלץ לפצל לפני אישור`;
       if (!validationResult.warnings.includes(warning)) validationResult.warnings.push(warning);
       validationResult.requires_manual_review = true;

@@ -116,10 +116,10 @@ export interface PageMarker {
 }
 
 // "עמוד 2 מתוך 3", "דף 2/3", "Page 2 of 3". Requires the עמוד/דף/page prefix so that
-// "1 מתוך 3 תשלומים" (installments) doesn't count.
+// "1 מתוך 3 תשלומים" (installments) doesn't count; the trailing lookahead rejects dates like "דף 1/12/2025".
 const PAGE_MARKER_PATTERNS: RegExp[] = [
-  /(?:עמוד|עמ['׳]|דף)\s*(\d{1,3})\s*(?:מתוך|מ-|\/)\s*(\d{1,3})/g,
-  /page\s*(\d{1,3})\s*(?:of|\/)\s*(\d{1,3})/gi,
+  /(?:עמוד|עמ['׳]|דף)\s*(\d{1,3})\s*(?:מתוך|מ-|\/)\s*(\d{1,3})(?!\d|[/.]\d)/g,
+  /page\s*(\d{1,3})\s*(?:of|\/)\s*(\d{1,3})(?!\d|[/.]\d)/gi,
 ];
 
 /** First plausible "page X of N" marker on the page, or null. */

@@ -32,7 +32,7 @@ export async function POST(
     const { splits: requestedSplits } = body as { splits: unknown };
 
     if (!requestedSplits || !Array.isArray(requestedSplits) || requestedSplits.length === 0) {
-      return NextResponse.json({ error: 'Missing or invalid splits parameter' }, { status: 400 });
+      return NextResponse.json({ error: 'לא התקבלו טווחי עמודים לפיצול' }, { status: 400 });
     }
 
     // 1. Fetch current invoice record
