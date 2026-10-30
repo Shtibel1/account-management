@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { searchVatIdByName } from '@/utils/businessLookup';
+import { lookupVatIdByName } from '@/utils/businessLookup';
 import { requireUser } from '@/lib/auth';
 import { isSpecificSupplierName } from '@/shared/supplierNameMatch';
 
@@ -21,8 +21,12 @@ export async function GET(request: Request) {
   }
 
   try {
-    const vatId = await searchVatIdByName(name);
-    return NextResponse.json({ vatId });
+    const lookup = await lookupVatIdByName(name);
+    // The registrar didn't answer (after a retry): not "no match" (QA round 4)
+    if (lookup.status === 'unavailable') {
+      return NextResponse.json({ error: 'מאגר רשם החברות אינו זמין כרגע, נסו שוב מאוחר יותר', status: lookup.status }, { status: 503 });
+    }
+    return NextResponse.json({ vatId: lookup.vatId, status: lookup.status });
   } catch (err) {
     console.error('[suppliers/search-vat] Registrar lookup failed:', err);
     return NextResponse.json({ error: 'החיפוש במאגר רשם החברות נכשל, נסו שוב מאוחר יותר' }, { status: 502 });

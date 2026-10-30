@@ -5,24 +5,26 @@ import { isClientStorageFileUrl } from '@/lib/ingestHelpers';
 import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
 import type { ExtractedData, FewShotLookupState, OcrWord } from '@/shared/types';
 import type { SplitSuggestion } from '@/shared/documentSplit';
-import { checkStoredBytes, mimeFromFileName } from '@/shared/uploadValidation';
+import { DAMAGED_PDF_MESSAGE, checkStoredBytes, mimeFromFileName, readPdfPageCount } from '@/shared/uploadValidation';
 import {
+  DUE_SOON_MS,
   ENQUEUE_GRACE_MS,
   INTERRUPTED_STEP_ERROR,
   JOB_HEARTBEAT_MS,
   JOB_LEASE_MS,
   LLM_FULL_WINDOW_MS,
   MAX_LLM_CALL_MS,
+  MAX_LOST_JOB_REQUEUES,
   MAX_STAGE_ATTEMPTS,
   MAX_STEP_MS,
   MAX_TRANSIENT_ATTEMPTS,
   MIN_FINALIZE_STEP_MS,
   MIN_LLM_STEP_MS,
   MIN_OCR_STEP_MS,
+  NEXT_DUE_HORIZON_MS,
   OPTIONAL_STEP_TRANSIENT_RETRIES,
   STALE_PROCESSING_MS,
   STEP_SAVE_MARGIN_MS,
-  STUCK_RUN_MESSAGE,
   TICK_OCR_BUDGET_MS,
   TICK_RESPONSE_MS,
   TOO_MANY_ATTEMPTS_MESSAGE,
@@ -36,6 +38,7 @@ import {
   isTransientError,
   nextOcrBatches,
   orphanRunAction,
+  stuckRunMessage,
   toUserErrorMessage,
   transientBackoffMs,
   transientFailureMessage,
@@ -100,6 +103,7 @@ interface InvoiceRow {
   processing_started_at?: string | null;
   processing_attempts?: number | null;
   processing_stage?: string | null;
+  processing_progress?: ProcessingProgress | null;
   updated_at?: string | null;
   created_at?: string | null;
 }
@@ -259,7 +263,7 @@ async function deps(): Promise<QueueDeps> {
 const iso = (ms: number) => new Date(ms).toISOString();
 
 const INVOICE_COLUMNS =
-  'id, client_id, file_url, file_name, status, processing_run_id, processing_started_at, processing_attempts, processing_stage, updated_at, created_at';
+  'id, client_id, file_url, file_name, status, processing_run_id, processing_started_at, processing_attempts, processing_stage, processing_progress, updated_at, created_at';
 
 async function readInvoice(db: SupabaseClient, invoiceId: string): Promise<InvoiceRow | null> {
   const { data, error } = await db
@@ -362,6 +366,11 @@ export interface EnqueueOptions {
    * the upload / retry itself (QA round 3); a stuck run is still replaced.
    */
   reuseActiveRun?: boolean;
+  /**
+   * The run replaces one that lost its job row before any step ran (QA round 4): stored in
+   * processing_progress.requeues, which caps how often that happens in a row.
+   */
+  requeues?: number;
 }
 
 /**
@@ -429,7 +438,11 @@ export async function enqueueProcessing(invoiceId: string, options: EnqueueOptio
       processing_started_at: iso(now),
       processing_attempts: (invoice.processing_attempts ?? 0) + 1,
       processing_stage: 'queued' satisfies ProcessingStage,
-      processing_progress: { pages_done: 0, pages_total: null } satisfies ProcessingProgress,
+      processing_progress: {
+        pages_done: 0,
+        pages_total: null,
+        ...(options.requeues ? { requeues: options.requeues } : {}),
+      } satisfies ProcessingProgress,
       error_message: null,
       updated_at: iso(now),
     })
@@ -697,7 +710,7 @@ export async function runProcessingTick(invoiceId: string, options: TickOptions 
   // it" is not a failure). Failing ticks are bounded by the attempt budgets, endless runs by MAX_RUN_MS.
   if (isRunTooOld(invoice.processing_started_at, now)) {
     console.warn(`[Queue] Run ${job.run_id} of invoice ${invoiceId} ran too long; marking as error.`);
-    await failRun(d, invoiceId, job.run_id, STUCK_RUN_MESSAGE, stepDetail(job, 'run older than MAX_RUN_MS', job.last_error ?? 'no error recorded'));
+    await failRun(d, invoiceId, job.run_id, stuckRunMessage('too_long', job.page_count), stepDetail(job, 'run older than MAX_RUN_MS', job.last_error ?? 'no error recorded'));
     return { state: 'failed' };
   }
 
@@ -804,30 +817,59 @@ async function handleStepError(d: QueueDeps, job: JobRow, err: unknown): Promise
   return { state: 'pending', stage: job.stage };
 }
 
-/** A 'processing' row without a job of its run: queue it (never queued), fail it (stuck) or wait. */
-async function handleOrphanRun(d: QueueDeps, invoice: InvoiceRow): Promise<TickResult> {
+/** 'already': another request queued it meanwhile. */
+type OrphanOutcome = 'queued' | 'already' | 'failed' | 'waiting';
+
+/** Requeues of the current run (processing_progress.requeues, set only while it is 'queued'). */
+function requeuesOf(invoice: InvoiceRow): number {
+  const n = invoice.processing_progress?.requeues;
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/**
+ * A 'processing' row without a job of its run (tick and sweep): queue it (never queued, or queued
+ * but its job vanished before any step ran), fail it (stuck) or wait. `via` only labels the log.
+ */
+async function resolveOrphanRun(d: QueueDeps, invoice: InvoiceRow, via: 'tick' | 'sweep'): Promise<OrphanOutcome> {
+  const requeues = requeuesOf(invoice);
   const action = orphanRunAction({
     now: d.now(),
     attempts: invoice.processing_attempts,
     processingStage: invoice.processing_stage,
     startedAt: invoice.processing_started_at,
     rowUpdatedAt: invoice.updated_at ?? invoice.created_at,
+    requeues,
   });
-  if (action === 'enqueue') {
-    const queued = await enqueueProcessing(invoice.id, { reuseActiveRun: true });
+  if (action === 'enqueue' || action === 'requeue') {
+    const queued = await enqueueProcessing(invoice.id, { reuseActiveRun: true, ...(action === 'requeue' ? { requeues: requeues + 1 } : {}) });
     if (queued.ok) {
-      if (!queued.alreadyQueued) console.log(`[Queue] Invoice ${invoice.id} was never queued; queued it now.`);
-      return { state: 'pending', stage: 'queued' };
+      if (queued.alreadyQueued) return 'already';
+      console.log(action === 'enqueue'
+        ? `[Queue] Invoice ${invoice.id} was never queued; queued it now (${via}).`
+        : `[Queue] The queued job of invoice ${invoice.id} (run ${invoice.processing_run_id ?? '-'}) vanished before it started; queued it again (${requeues + 1}/${MAX_LOST_JOB_REQUEUES}, ${via}).`);
+      return 'queued';
     }
-    console.warn(`[Queue] Could not queue never-queued invoice ${invoice.id}: ${queued.error}`);
-    return { state: 'waiting', stage: 'queued' };
+    console.warn(`[Queue] Could not queue invoice ${invoice.id} without a job (${via}): ${queued.error}`);
+    return 'waiting';
   }
   if (action === 'fail') {
-    // Queued once but its job is gone, or a split that never finished: give up so it can be retried
-    await failRun(d, invoice.id, invoice.processing_run_id ?? null, STUCK_RUN_MESSAGE,
-      `no job of run ${invoice.processing_run_id ?? '-'} for ${Math.round(STALE_PROCESSING_MS / 60_000)} min (stage ${invoice.processing_stage ?? '-'})`);
-    return { state: 'failed' };
+    // Queued but its job is gone (requeues used up, or lost mid-way and stale), or a split that
+    // never finished: give up so it can be retried
+    const lostBeforeStart = invoice.processing_stage === 'queued';
+    const detail = lostBeforeStart
+      ? `job of run ${invoice.processing_run_id ?? '-'} vanished before any step ran, ${requeues} requeue(s) already (${via})`
+      : `no job of run ${invoice.processing_run_id ?? '-'} for ${Math.round(STALE_PROCESSING_MS / 60_000)} min (${via}, stage ${invoice.processing_stage ?? '-'})`;
+    const message = lostBeforeStart ? stuckRunMessage('lost_job') : stuckRunMessage('no_progress');
+    await failRun(d, invoice.id, invoice.processing_run_id ?? null, message, detail);
+    return 'failed';
   }
+  return 'waiting';
+}
+
+async function handleOrphanRun(d: QueueDeps, invoice: InvoiceRow): Promise<TickResult> {
+  const outcome = await resolveOrphanRun(d, invoice, 'tick');
+  if (outcome === 'queued' || outcome === 'already') return { state: 'pending', stage: 'queued' };
+  if (outcome === 'failed') return { state: 'failed' };
   return { state: 'waiting', stage: 'queued' };
 }
 
@@ -851,7 +893,11 @@ async function ocrStep(d: QueueDeps, job: JobRow, deadline: number): Promise<Tic
   }
 
   const pdf = await d.loadPdf(file);
-  const pageCount = pdf ? pdf.getPageCount() : 1;
+  // pdf-lib loads some damaged files without throwing and fails only on their page tree (QA round 4):
+  // that file can't be read by anyone, so the run fails at once instead of being retried
+  const counted = pdf ? readPdfPageCount(pdf) : 1;
+  if (counted === null) throw new UserFacingError(DAMAGED_PDF_MESSAGE);
+  const pageCount = counted;
   if (pageCount < 1) throw new UserFacingError('קובץ ה-PDF אינו מכיל עמודים');
   if (job.page_count !== pageCount) {
     await saveJob(d, job, { page_count: pageCount, mime_type: 'application/pdf' });
@@ -1181,8 +1227,9 @@ export interface SweepResult {
 
 /**
  * Looks at 'processing' invoices with no fresh activity: a row without a job of its run is queued
- * when it was never queued (processing_attempts 0) and marked as error (retry allowed) when it was
- * queued but made no progress for STALE_PROCESSING_MS; a run older than MAX_RUN_MS is marked as
+ * when it was never queued (processing_attempts 0) or lost its job before any step ran (still
+ * 'queued', up to MAX_LOST_JOB_REQUEUES times, QA round 4), and marked as error (retry allowed) when
+ * it was queued but made no progress for STALE_PROCESSING_MS; a run older than MAX_RUN_MS is marked as
  * error too. A run with a queued job is left to the ticks, which resume it. `clientIds` limits the
  * sweep (null = all, for the scheduled worker).
  */
@@ -1191,37 +1238,43 @@ export async function sweepStaleProcessing(clientIds: string[] | null = null, li
   const result: SweepResult = { failed: [], enqueued: [] };
   if (clientIds && clientIds.length === 0) return result;
   // Only rows that may need action, so a long queue of live jobs can't crowd them out (QA round 3
-  // review): never-queued rows past the enqueue grace, and rows without any change for
-  // STALE_PROCESSING_MS (a stale run has an old updated_at; a live job's steps keep bumping it).
-  const candidates = (cutoffMs: number, neverQueued: boolean) => {
+  // review): never-queued and still-'queued' rows past the enqueue grace, and rows without any change
+  // for STALE_PROCESSING_MS (a stale run has an old updated_at; a live job's steps keep bumping it).
+  const candidates = (cutoffMs: number, kind: 'never-queued' | 'queued' | 'stale') => {
     let query = d.db
       .from('invoices')
       .select(INVOICE_COLUMNS)
       .eq('status', 'processing')
       .lt('updated_at', iso(d.now() - cutoffMs));
-    if (neverQueued) query = query.or('processing_attempts.is.null,processing_attempts.eq.0');
+    if (kind === 'never-queued') query = query.or('processing_attempts.is.null,processing_attempts.eq.0');
+    if (kind === 'queued') query = query.eq('processing_stage', 'queued' satisfies ProcessingStage);
     if (clientIds) query = query.in('client_id', clientIds);
     return query.order('updated_at', { ascending: true }).limit(limit);
   };
-  const [fresh, stale] = await Promise.all([candidates(ENQUEUE_GRACE_MS, true), candidates(STALE_PROCESSING_MS, false)]);
-  if (fresh.error || stale.error) {
-    console.error('[Queue] Stale sweep query failed:', fresh.error ?? stale.error);
+  const lists = await Promise.all([
+    candidates(ENQUEUE_GRACE_MS, 'never-queued'),
+    candidates(ENQUEUE_GRACE_MS, 'queued'),
+    candidates(STALE_PROCESSING_MS, 'stale'),
+  ]);
+  const failedList = lists.find((l) => l.error);
+  if (failedList) {
+    console.error('[Queue] Stale sweep query failed:', failedList.error);
     return result;
   }
   const byId = new Map<string, InvoiceRow>();
-  for (const row of [...(fresh.data ?? []), ...(stale.data ?? [])] as unknown as InvoiceRow[]) byId.set(row.id, row);
+  for (const row of lists.flatMap((l) => l.data ?? []) as unknown as InvoiceRow[]) byId.set(row.id, row);
   const invoices = [...byId.values()];
   if (invoices.length === 0) return result;
 
   const { data: jobRows, error: jobsErr } = await d.db
     .from(JOBS)
-    .select('invoice_id, run_id, locked_until')
+    .select('invoice_id, run_id, locked_until, page_count')
     .in('invoice_id', invoices.map((i) => i.id));
   if (jobsErr) {
     console.error('[Queue] Stale sweep job query failed:', jobsErr);
     return result;
   }
-  const jobs = new Map(((jobRows ?? []) as Pick<JobRow, 'invoice_id' | 'run_id' | 'locked_until'>[]).map((j) => [j.invoice_id, j]));
+  const jobs = new Map(((jobRows ?? []) as Pick<JobRow, 'invoice_id' | 'run_id' | 'locked_until' | 'page_count'>[]).map((j) => [j.invoice_id, j]));
 
   for (const invoice of invoices) {
     const job = jobs.get(invoice.id);
@@ -1229,30 +1282,18 @@ export async function sweepStaleProcessing(clientIds: string[] | null = null, li
     if (current) {
       const locked = current.locked_until ? Date.parse(current.locked_until) > d.now() : false;
       if (!locked && isRunTooOld(invoice.processing_started_at, d.now())) {
-        await failRun(d, invoice.id, invoice.processing_run_id ?? null, STUCK_RUN_MESSAGE, 'run older than MAX_RUN_MS (sweep)');
+        await failRun(d, invoice.id, invoice.processing_run_id ?? null,
+          stuckRunMessage('too_long', current.page_count ?? invoice.processing_progress?.pages_total), 'run older than MAX_RUN_MS (sweep)');
         result.failed.push(invoice.id);
       }
       continue;
     }
-    const action = orphanRunAction({
-      now: d.now(),
-      attempts: invoice.processing_attempts,
-      processingStage: invoice.processing_stage,
-      startedAt: invoice.processing_started_at,
-      rowUpdatedAt: invoice.updated_at ?? invoice.created_at,
-    });
-    if (action === 'enqueue') {
-      const queued = await enqueueProcessing(invoice.id, { reuseActiveRun: true });
-      if (queued.ok && !queued.alreadyQueued) result.enqueued.push(invoice.id);
-      else if (!queued.ok) console.warn(`[Queue] Could not queue never-queued invoice ${invoice.id}: ${queued.error}`);
-    } else if (action === 'fail') {
-      await failRun(d, invoice.id, invoice.processing_run_id ?? null, STUCK_RUN_MESSAGE,
-        `no job of run ${invoice.processing_run_id ?? '-'} for ${Math.round(STALE_PROCESSING_MS / 60_000)} min (sweep, stage ${invoice.processing_stage ?? '-'})`);
-      result.failed.push(invoice.id);
-    }
+    const outcome = await resolveOrphanRun(d, invoice, 'sweep');
+    if (outcome === 'queued') result.enqueued.push(invoice.id);
+    else if (outcome === 'failed') result.failed.push(invoice.id);
   }
   if (result.failed.length > 0) console.warn(`[Queue] Marked ${result.failed.length} stuck invoices as error: ${result.failed.join(', ')}`);
-  if (result.enqueued.length > 0) console.log(`[Queue] Queued ${result.enqueued.length} never-queued invoices: ${result.enqueued.join(', ')}`);
+  if (result.enqueued.length > 0) console.log(`[Queue] Queued ${result.enqueued.length} invoices without a job: ${result.enqueued.join(', ')}`);
   return result;
 }
 
@@ -1261,9 +1302,28 @@ export interface DueJobs {
   ids: string[];
   /** All jobs a tick can take now (lease free, no retry backoff pending). */
   total: number;
+  /** Jobs not due yet that become due within DUE_SOON_MS (a short retry backoff, a lapsing lease). */
+  soon?: number;
+  /** Wait until the next job that isn't due yet becomes due, when that is within NEXT_DUE_HORIZON_MS. */
+  nextDueInMs?: number | null;
 }
 
-/** Jobs whose lease is free and whose retry backoff (if any) is over, oldest activity first (scheduled worker). */
+/**
+ * When a job can be taken next (epoch ms): after its lease and its retry backoff. A live tick renews
+ * its lease to JOB_LEASE_MS ahead, so a running job is never "soon"; a lease that lapses (killed
+ * tick) is.
+ */
+function jobReadyAt(job: { locked_until: string | null; retry_at?: string | null }): number {
+  const lease = job.locked_until ? Date.parse(job.locked_until) : NaN;
+  const retry = job.retry_at ? Date.parse(job.retry_at) : NaN;
+  return Math.max(Number.isFinite(lease) ? lease : 0, Number.isFinite(retry) ? retry : 0);
+}
+
+/**
+ * Jobs whose lease is free and whose retry backoff (if any) is over, oldest activity first (scheduled
+ * worker), plus how many become due shortly and when the next one does (QA round 4: a job in a 5 s
+ * backoff used to report due = 0, and the caller waited for the next minute).
+ */
 export async function dueJobs(limit = 5): Promise<DueJobs> {
   const d = await deps();
   const select = (cols: string) => d.db.from(JOBS).select(cols).order('updated_at', { ascending: true }).limit(200);
@@ -1274,11 +1334,20 @@ export async function dueJobs(limit = 5): Promise<DueJobs> {
   }
   if (error) {
     console.error('[Queue] Due jobs query failed:', error);
-    return { ids: [], total: 0 };
+    return { ids: [], total: 0, soon: 0, nextDueInMs: null };
   }
   const now = d.now();
-  const due = ((data ?? []) as unknown as { invoice_id: string; locked_until: string | null; retry_at?: string | null }[])
-    .filter((j) => (!j.locked_until || Date.parse(j.locked_until) <= now) && (!j.retry_at || Date.parse(j.retry_at) <= now))
-    .map((j) => j.invoice_id);
-  return { ids: due.slice(0, limit), total: due.length };
+  const due: string[] = [];
+  let soon = 0;
+  let nextDueInMs: number | null = null;
+  for (const j of (data ?? []) as unknown as { invoice_id: string; locked_until: string | null; retry_at?: string | null }[]) {
+    const wait = jobReadyAt(j) - now;
+    if (wait <= 0) {
+      due.push(j.invoice_id);
+      continue;
+    }
+    if (wait <= DUE_SOON_MS) soon++;
+    if (wait <= NEXT_DUE_HORIZON_MS && (nextDueInMs === null || wait < nextDueInMs)) nextDueInMs = wait;
+  }
+  return { ids: due.slice(0, limit), total: due.length, soon, nextDueInMs };
 }

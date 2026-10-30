@@ -18,6 +18,8 @@ export interface ProcessingProgress {
   /** Extraction of a long document runs in parts (src/shared/extractionChunks.ts). */
   parts_done?: number;
   parts_total?: number;
+  /** Set while 'queued': how often this run was queued again after its job row vanished (QA round 4). */
+  requeues?: number;
 }
 
 /**
@@ -91,6 +93,20 @@ export const MAX_TRANSIENT_ATTEMPTS = 6;
 export const STALE_PROCESSING_MS = 10 * 60_000;
 /** A run older than this is stuck even if it keeps heart-beating. */
 export const MAX_RUN_MS = 45 * 60_000;
+/**
+ * A run whose job row disappeared before any step ran (still 'queued') is queued again after
+ * ENQUEUE_GRACE_MS, at most this many times in a row; then it fails (QA round 4).
+ */
+export const MAX_LOST_JOB_REQUEUES = 2;
+/** Documents with at least this many pages get the "split it" hint when a run runs out of time. */
+export const LONG_DOCUMENT_PAGES = 10;
+/**
+ * The worker reports jobs that become due within this long as `soon` (a job in a short transient
+ * backoff), so its caller calls again instead of waiting for the next minute (QA round 4).
+ */
+export const DUE_SOON_MS = 15_000;
+/** `next_due_in_ms` of the worker looks this far ahead (null beyond). */
+export const NEXT_DUE_HORIZON_MS = 20_000;
 
 export const STAGE_LABELS: Record<ProcessingStage, string> = {
   queued: 'ממתין לעיבוד',
@@ -199,7 +215,11 @@ export function isStaleRun(input: StaleCheckInput): boolean {
   return input.now - Math.max(...known) > STALE_PROCESSING_MS;
 }
 
-export type OrphanRunAction = 'enqueue' | 'fail' | 'wait';
+/**
+ * 'enqueue': never queued, queue it. 'requeue': queued, but its job row vanished before any step ran;
+ * queue it again. 'fail': give up (stuck). 'wait': not yet.
+ */
+export type OrphanRunAction = 'enqueue' | 'requeue' | 'fail' | 'wait';
 
 export interface OrphanRunInput {
   now: number;
@@ -208,26 +228,52 @@ export interface OrphanRunInput {
   processingStage: string | null | undefined;
   startedAt: string | null | undefined;
   rowUpdatedAt: string | null | undefined;
+  /** How often this run was already queued again after losing its job (processing_progress.requeues). */
+  requeues?: number | null;
+}
+
+function pastGrace(input: OrphanRunInput): boolean {
+  const known = [ts(input.startedAt), ts(input.rowUpdatedAt)].filter((n): n is number => n !== null);
+  return known.length === 0 || input.now - Math.max(...known) >= ENQUEUE_GRACE_MS;
 }
 
 /**
  * What to do with a 'processing' row that has no job of its current run. A row that was never
  * queued (processing_attempts 0: an upload whose enqueue didn't happen, rows from before the queue)
  * is queued once it is ENQUEUE_GRACE_MS old (a split creating its parts queues them itself moments
- * later), not failed as stuck (QA round 3). A manual split in progress ('splitting') and a run that
- * was queued but lost its job fail only when stale, so the user can retry.
+ * later), not failed as stuck (QA round 3). A run that was queued but lost its job before any step
+ * ran (still 'queued': nothing to resume, nothing lost) is queued again after the same grace, at
+ * most MAX_LOST_JOB_REQUEUES times, then failed (QA round 4). A manual split in progress
+ * ('splitting') and a run that lost its job mid-way fail only when stale, so the user can retry.
  */
 export function orphanRunAction(input: OrphanRunInput): OrphanRunAction {
   const stale = isStaleRun({ now: input.now, startedAt: input.startedAt, lastActivityAt: null, rowUpdatedAt: input.rowUpdatedAt });
   if (input.processingStage === 'splitting') return stale ? 'fail' : 'wait';
-  if (!input.attempts) {
-    const known = [ts(input.startedAt), ts(input.rowUpdatedAt)].filter((n): n is number => n !== null);
-    return known.length === 0 || input.now - Math.max(...known) >= ENQUEUE_GRACE_MS ? 'enqueue' : 'wait';
+  if (!input.attempts) return pastGrace(input) ? 'enqueue' : 'wait';
+  if (input.processingStage === 'queued') {
+    if (!pastGrace(input)) return 'wait';
+    return (input.requeues ?? 0) < MAX_LOST_JOB_REQUEUES ? 'requeue' : 'fail';
   }
   return stale ? 'fail' : 'wait';
 }
 
-export const STUCK_RUN_MESSAGE = 'העיבוד נקטע ולא הסתיים. ניתן לנסות שוב ("עבד מחדש"), ואם הקובץ גדול - לפצל אותו לחלקים קטנים יותר';
+/** Why a run is given up as stuck (the message depends on it). */
+export type StuckCause = 'too_long' | 'no_progress' | 'lost_job';
+
+/**
+ * Hebrew message of a run given up as stuck. Splitting the file is suggested only for a long
+ * multi-page document that ran out of time; a one-page image or a lost queue job just gets "retry"
+ * (QA round 4).
+ */
+export function stuckRunMessage(cause: StuckCause, pageCount: number | null | undefined = null): string {
+  if (cause === 'lost_job') return LOST_JOB_MESSAGE;
+  if (cause === 'too_long' && typeof pageCount === 'number' && pageCount >= LONG_DOCUMENT_PAGES) return STUCK_LONG_RUN_MESSAGE;
+  return STUCK_RUN_MESSAGE;
+}
+
+export const STUCK_RUN_MESSAGE = 'העיבוד נקטע ולא הסתיים. ניתן לנסות שוב ("עבד מחדש")';
+export const STUCK_LONG_RUN_MESSAGE = 'עיבוד המסמך הארוך לא הסתיים בזמן. ניתן לנסות שוב ("עבד מחדש"), או לפצל אותו לחלקים קטנים יותר';
+export const LOST_JOB_MESSAGE = 'העיבוד לא התחיל (המשימה בתור אבדה). ניתן לנסות שוב ("עבד מחדש")';
 export const TOO_MANY_ATTEMPTS_MESSAGE = 'העיבוד נכשל שוב ושוב בשלב זה. ניתן לנסות שוב ("עבד מחדש"), ואם הקובץ גדול - לפצל אותו לחלקים קטנים יותר';
 export const CONNECTION_ERROR_MESSAGE = 'החיבור לשירותי העיבוד נקטע שוב ושוב. ניתן לנסות שוב ("עבד מחדש") בעוד כמה דקות';
 export const TRANSIENT_EXHAUSTED_MESSAGE = 'העיבוד נקטע שוב ושוב בגלל תקלה זמנית. ניתן לנסות שוב ("עבד מחדש") בעוד כמה דקות';

@@ -8,7 +8,7 @@ import { requireInvoiceAccess } from '@/lib/auth';
 import { isClientStorageFileUrl, sanitizeStorageFilename } from '@/lib/ingestHelpers';
 import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
 import { splitStatusError } from '@/shared/processing';
-import { sniffUploadMime } from '@/shared/uploadValidation';
+import { readPdfPageCount, sniffUploadMime } from '@/shared/uploadValidation';
 import { enqueueProcessing } from '@/lib/processingQueue';
 import { downloadInvoiceFile, redactUrlForLog, storedFileUrlFor } from '@/lib/invoiceFiles';
 
@@ -119,7 +119,10 @@ export async function POST(
   }
 
   // Ranges must be 1-based, contiguous, non-overlapping and cover every page of this file
-  const rangeCheck = validateSplitRanges(requestedSplits, originalDoc.getPageCount());
+  // pdf-lib loads some damaged files and fails only on their page tree (QA round 4)
+  const originalPages = readPdfPageCount(originalDoc);
+  if (originalPages === null) return badRequest('קובץ ה-PDF פגום ולא ניתן לפצל אותו');
+  const rangeCheck = validateSplitRanges(requestedSplits, originalPages);
   if (!rangeCheck.ok) return badRequest(rangeCheck.error);
   if (rangeCheck.ranges.length < 2) return badRequest('נדרשים לפחות שני חלקים כדי לפצל את המסמך');
   const splits = rangeCheck.ranges.map((r) => ({ startPage: r.start_page, endPage: r.end_page }));

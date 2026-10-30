@@ -29,6 +29,11 @@ export const WORKER_MAX_JOBS = 6;
  * pass redoes it as a transient interruption, instead of Amplify answering a bare 504.
  */
 export const WORKER_HARD_LIMIT_SLACK_MS = 3_000;
+/**
+ * When nothing is due but a job becomes due before the budget ends (a short retry backoff), the pass
+ * waits for it at most this many times (QA round 4).
+ */
+export const WORKER_MAX_WAIT_ROUNDS = 3;
 
 export interface WorkerConfig {
   budgetMs: number;
@@ -66,6 +71,13 @@ export interface WorkerSummary {
   driven: { id: string; state: TickResult['state'] | 'error' }[];
   /** Jobs still due after this pass (the caller calls again while > 0). */
   due: number;
+  /**
+   * Jobs not due yet that become due within DUE_SOON_MS (a short retry backoff): the caller calls
+   * again after `next_due_in_ms` instead of waiting for the next minute (QA round 4).
+   */
+  soon: number;
+  /** Wait until the next job becomes due when that is within NEXT_DUE_HORIZON_MS, else null. */
+  next_due_in_ms: number | null;
   ms: number;
   /** Jobs whose step was still running at the hard limit (answered without them). */
   overran?: string[];
@@ -152,7 +164,31 @@ export async function runWorkerPass(deps: WorkerDeps, config: WorkerConfig): Pro
       }
     }
   };
-  const work = Promise.all([sweep, ...Array.from({ length: config.maxJobs }, slot)]).then(() => true);
+  const runSlots = () => Promise.all(Array.from({ length: config.maxJobs }, slot));
+  const work = (async () => {
+    await runSlots();
+    // QA round 4: a job in a short retry backoff (5 s) isn't due when the slots run out of jobs. When
+    // it becomes due while a step still fits, this pass waits for it and drives it, instead of the
+    // run moving one step per minute.
+    for (let round = 0; round < WORKER_MAX_WAIT_ROUNDS; round++) {
+      let peek: DueJobs;
+      try {
+        peek = await deps.dueJobs(0);
+      } catch {
+        break;
+      }
+      const waitMs = peek.nextDueInMs;
+      if (peek.total > 0 || waitMs === null || waitMs === undefined) break;
+      if (deps.now() + waitMs + MIN_OCR_STEP_MS > deadline) break;
+      await wait(waitMs);
+      seen.clear();
+      queue.length = 0;
+      exhausted = false;
+      await runSlots();
+    }
+    await sweep;
+    return true;
+  })();
   const finished = await Promise.race([work, wait(hardLimitMs - (deps.now() - started)).then(() => false)]);
 
   let overran: string[] | undefined;
@@ -160,11 +196,25 @@ export async function runWorkerPass(deps: WorkerDeps, config: WorkerConfig): Pro
     overran = [...inFlight];
     console.warn(`[Processing Worker] Hard limit (${hardLimitMs} ms) reached; answering without ${overran.length} running step(s): ${overran.join(', ')}`);
   }
-  const count = deps.dueJobs(0).then((r) => r.total, (err) => {
-    console.error('[Processing Worker] Due count failed:', err);
-    return 0;
-  });
+  const count = deps.dueJobs(0).then(
+    (r) => ({ due: r.total, soon: r.soon ?? 0, next: r.nextDueInMs ?? null }),
+    (err) => {
+      console.error('[Processing Worker] Due count failed:', err);
+      return { due: 0, soon: 0, next: null };
+    }
+  );
   // After the hard limit only a short wait for the count (the answer must leave); unknown -> call again
-  const due = finished ? await count : (await Promise.race([count, wait(1_000).then(() => null)])) ?? 1;
-  return { stuck, enqueued, driven: [...driven], due, ms: deps.now() - started, ...(overran ? { overran } : {}) };
+  const counted = finished
+    ? await count
+    : (await Promise.race([count, wait(1_000).then(() => null)])) ?? { due: 1, soon: 0, next: null };
+  return {
+    stuck,
+    enqueued,
+    driven: [...driven],
+    due: counted.due,
+    soon: counted.soon,
+    next_due_in_ms: counted.next,
+    ms: deps.now() - started,
+    ...(overran ? { overran } : {}),
+  };
 }

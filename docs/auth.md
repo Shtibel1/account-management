@@ -38,7 +38,13 @@ auth.users ──< memberships (role owner|member) >── organizations ──<
 - `authenticated`:
   - `organizations`: select where `is_org_member(id)`; `memberships`: select own rows and rows of your orgs;
     `org_invitations`: select for owners. Writes only via the server (service role) / the trigger.
-  - `clients`: all operations where `is_org_member(org_id)` (insert/update also *with check*).
+  - `clients`: select / insert / update where `is_org_member(org_id)` (insert/update also *with check*); delete for
+    office **owners** only, and only while the client has nothing to keep (migration
+    `20261031101000_qa4_client_delete_guard.sql`, trigger `clients_delete_guard`): every invoice is `error` or
+    `review`, none was ever exported (`exported_at`, `invoice_exports`) and none has `invoice_status_events`;
+    otherwise `client_delete_blocked: <reason>`. The app's way is `DELETE /api/clients/[id]` (owner, same rule via
+    `delete_client_guarded()`, then removes `raw-invoices/<client_id>/*` through the Storage API). The service role
+    is not blocked (ops / QA cleanup); audit events keep `client_id` and survive with `invoice_id = null`.
   - `invoices`, `account_mappings`, `supplier_automation`, `client_contacts`: `client_id in (select accessible_client_ids())`.
   - `duplicate_dismissals`, `bank_transactions`: same, plus the referenced invoices must belong to the same client.
   - `invoice_corrections`: through the invoice.
