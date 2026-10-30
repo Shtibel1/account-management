@@ -50,7 +50,7 @@ Each agent lives in `src/agents/<name>/` with its prompt/spec in `agent.md` and 
 
 Everything except the marketing pages, `/login`, `/signup`, `/auth/*`, `/api/lead` and the ingestion webhooks requires a signed-in user (`src/proxy.ts`); each API route also checks that the client / invoice / bank line belongs to one of the user's offices (`src/lib/auth.ts`). Data is isolated per office (organization) by Supabase RLS - see [docs/auth.md](docs/auth.md).
 
-API routes under `src/app/api/`: `me` (current user + offices), `org/members` (owner-only add/invite/remove members), `invoices` (upload, upload-url, process, split, approve, duplicates/dismiss), `ingest/email` and `ingest/whatsapp` (inbound channels, see [docs/ingestion.md](docs/ingestion.md)), `clients` (channels, contacts), `suppliers` (search-vat, automation, rules/apply), `export`, `lead`, `bank` (overview, import, match, transactions/[id]).
+API routes under `src/app/api/`: `me` (current user + offices), `org/members` (owner-only add/invite/remove members), `invoices` (upload, upload-url, process, split, approve, duplicates/dismiss), `ingest/email` and `ingest/whatsapp` (inbound channels, see [docs/ingestion.md](docs/ingestion.md)), `clients` (channels, contacts), `suppliers` (search-vat, automation, rules/apply), `export`, `lead`, `bank` (overview, import, match, transactions/[id]), `integrations` (plugins, export, exports, logs) and `clients/[id]/integrations` (per-client export plugin settings + connection test, see [docs/integrations.md](docs/integrations.md)).
 
 ## Local setup
 
@@ -65,6 +65,7 @@ Environment variables (names only):
 - `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`; required - anon has no table access), optional `NEXT_PUBLIC_SITE_URL`
 - `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_API_KEY`
 - `AWS_REGION` / `AWS_SES_REGION`, `CONTACT_FROM_EMAIL`, `CONTACT_TO_EMAIL`
+- `INTEGRATIONS_ENCRYPTION_KEY` - 32 random bytes, base64 (`openssl rand -base64 32`); encrypts per-client bookkeeping credentials (export plugins, see [docs/integrations.md](docs/integrations.md))
 - Optional ingestion channels: `INGEST_EMAIL_SECRET`, `INBOUND_EMAIL_DOMAIN`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WEBHOOK_URL`, `TWILIO_WHATSAPP_NUMBER` - see [docs/ingestion.md](docs/ingestion.md)
 
 A mock Supabase client (`src/utils/supabase/mockClient.ts`) allows running the UI without a database; in that local mock mode there is no login. In production a missing Supabase config fails closed (503).

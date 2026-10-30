@@ -7,7 +7,8 @@ import { StatusBadge } from '@/components/ui/Badge';
 import { exportInvoices, MissingMappingsError } from '@/lib/api';
 import { useToast } from '@/components/ui/Toast';
 import { format } from 'date-fns';
-import { AlertTriangle, ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Loader2, X } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Loader2, Plug, X } from 'lucide-react';
+import { IntegrationExportDialog } from '@/components/Integrations/IntegrationExportDialog';
 
 interface Props {
   invoices: Invoice[];
@@ -41,6 +42,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
   const [missingMappings, setMissingMappings] = useState<string[] | null>(null);
   const [clientFilter, setClientFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [integrationExport, setIntegrationExport] = useState<{ clientId: string; invoices: Invoice[] } | null>(null);
   const { toast } = useToast();
 
   const [currentPage, setCurrentPage] = useState(1);
@@ -103,6 +105,16 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
     }
   };
 
+  const handleIntegrationExport = () => {
+    const chosen = invoices.filter((i) => selected.has(i.id));
+    const clientIds = [...new Set(chosen.map((i) => i.client_id))];
+    if (clientIds.length !== 1) {
+      toast('יש לבחור חשבוניות של לקוח אחד בכל פעם', 'error');
+      return;
+    }
+    setIntegrationExport({ clientId: clientIds[0], invoices: chosen });
+  };
+
   if (invoices.length === 0) {
     return (
       <div className="card flex flex-col items-center justify-center py-20 text-center">
@@ -131,10 +143,27 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
             {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
             {exporting ? 'מייצא...' : 'ייצא ל-Move-in'}
           </button>
+          <button
+            onClick={handleIntegrationExport}
+            className="flex items-center gap-2 bg-blue-500 hover:bg-blue-400 text-white px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors"
+          >
+            <Plug className="h-4 w-4" />
+            ייצוא להנהלת חשבונות
+          </button>
           <button onClick={() => setSelected(new Set())} className="text-white/70 hover:text-white text-sm">
             בטל בחירה
           </button>
         </div>
+      )}
+
+      {integrationExport && (
+        <IntegrationExportDialog
+          clientId={integrationExport.clientId}
+          clientName={clients[integrationExport.clientId]}
+          invoices={integrationExport.invoices}
+          onClose={() => setIntegrationExport(null)}
+          onExported={() => { setSelected(new Set()); onExported?.(); }}
+        />
       )}
 
       {/* Missing mappings banner */}

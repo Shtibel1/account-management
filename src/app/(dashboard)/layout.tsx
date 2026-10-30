@@ -6,7 +6,7 @@ import { useState } from 'react';
 import clsx from 'clsx';
 import { Logo } from '@/components/ui/Logo';
 import {
-  Upload, ClipboardCheck, Users, BookOpen, LayoutDashboard, Landmark, LogOut, Building2, FlaskConical,
+  Upload, ClipboardCheck, Users, BookOpen, LayoutDashboard, Landmark, LogOut, Building2, FlaskConical, Plug, ScrollText,
 } from 'lucide-react';
 import versionData from '@/shared/version.json';
 import { SessionProvider, useSession } from '@/components/Auth/SessionContext';
@@ -18,6 +18,8 @@ const navItems = [
   { href: '/review',   label: 'בדיקה ואישור',     icon: ClipboardCheck },
   { href: '/mappings', label: 'מיפוי חשבונות',    icon: BookOpen },
   { href: '/bank',     label: 'התאמות בנק',       icon: Landmark },
+  { href: '/integrations',     label: 'חיבור להנהלת חשבונות', icon: Plug },
+  { href: '/integration-logs', label: 'יומן אינטגרציות',      icon: ScrollText },
 ];
 
 /** Shown only to office owners (and in local mock mode, where the page explains the env default). */
