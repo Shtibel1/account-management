@@ -1,5 +1,5 @@
 import { StateGraph, END, MemorySaver } from '@langchain/langgraph';
-import type { PipelineState, TenantRules, ExtractedData, OcrWord, OcrMetadata, BboxMap, FieldBbox } from '@/shared/types';
+import type { PipelineState, TenantRules, ExtractedData, OcrWord, OcrMetadata, BboxMap, FieldBbox, ValidationResult, SupplierRuleTrace, CostMetrics } from '@/shared/types';
 import { preprocessInvoice } from '../preprocessor';
 import { extractInvoiceData } from '../extraction';
 import { validateInvoice } from '../validation';
@@ -10,7 +10,7 @@ import { supabase } from '@/lib/supabase';
 import { withSupplierRule } from '@/shared/supplierRules';
 import { loadFewShotExamples, saveExtractionContext } from '@/lib/fewshot';
 import { saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
-import { linkResubmission } from '@/lib/returns';
+import { linkResubmission, linkReturnedToResubmission, planResubmissionLink, unlinkReturnedFromResubmission } from '@/lib/returns';
 import { computeConfidence } from '@/shared/confidence';
 import { PDFDocument } from 'pdf-lib';
 import { PIPELINE_URL_TTL_SECONDS, signedInvoiceFileUrl, signObjectPath, storedFileUrlFor } from '@/lib/invoiceFiles';
@@ -355,6 +355,249 @@ async function saveRunContext(state: PipelineState): Promise<void> {
   });
 }
 
+export interface RunValidationInput {
+  invoiceId: string;
+  tenantId: string;
+  extractedData: ExtractedData;
+  tenantRules: TenantRules;
+  rawOcrText: string | null;
+  splitSuggestion: SplitSuggestion | null;
+  /** Page count of the file (a split suggestion for another page count is stale). */
+  pageCount: number | null;
+  splitDetectionFailed: boolean;
+}
+
+export interface RunValidationOutput {
+  extractedData: ExtractedData;
+  validationResult: ValidationResult;
+  supplierRule: SupplierRuleTrace | null;
+  error: string | null;
+}
+
+/** Deterministic validation of a run's extraction, plus the multi-document review rules. */
+export async function applyRunValidation(input: RunValidationInput): Promise<RunValidationOutput> {
+  const { data: validated, validationResult, supplierRule } = await validateInvoice(
+    input.invoiceId,
+    input.tenantId,
+    input.extractedData,
+    input.tenantRules,
+    { ocrText: input.rawOcrText }
+  );
+  // A file that holds several invoices must not be auto-approved as one: force review and
+  // store the suggestion so the review screen can pre-fill the split dialog.
+  // Only a suggestion that still matches this file's page count (stale ones are dropped)
+  const splitSuggestion = usableSuggestion(input.splitSuggestion, input.pageCount);
+  if (splitSuggestion) {
+    const warning = `נראה שהקובץ מכיל ${splitSuggestion.documents.length} מסמכים נפרדים — מומלץ לפצל לפני אישור`;
+    if (!validationResult.warnings.includes(warning)) validationResult.warnings.push(warning);
+    validationResult.requires_manual_review = true;
+    // An opted-in supplier's invoice that passed every check still needs review here
+    if (validationResult.auto_approved) {
+      validationResult.auto_approved = false;
+      validationResult.auto_approve_blockers = [
+        ...(validationResult.auto_approve_blockers ?? []),
+        'הקובץ נראה כמכיל כמה מסמכים — יש לפצל לפני אישור',
+      ];
+    }
+    validated.validation_flags = validationResult;
+  }
+  validated.split_suggestion = splitSuggestion;
+  // Detection was needed but failed (e.g. the model's answer was cut off): the file may hold
+  // several invoices, so a reviewer has to look before it can be approved.
+  if (!splitSuggestion && input.splitDetectionFailed) {
+    if (!validationResult.warnings.includes(SPLIT_DETECTION_FAILED_WARNING)) {
+      validationResult.warnings.push(SPLIT_DETECTION_FAILED_WARNING);
+    }
+    validationResult.requires_manual_review = true;
+    if (validationResult.auto_approved) {
+      validationResult.auto_approved = false;
+      validationResult.auto_approve_blockers = [
+        ...(validationResult.auto_approve_blockers ?? []),
+        'לא ניתן היה לוודא שהקובץ מכיל מסמך אחד בלבד',
+      ];
+    }
+    validated.validation_flags = validationResult;
+  }
+
+  const errorMsg = validationResult.not_an_invoice ? 'המסמך לא זוהה כחשבונית' : null;
+  return { extractedData: validated, validationResult, supplierRule, error: errorMsg };
+}
+
+export type ValidationRoute = 'retry' | 'save_review' | 'save_success' | 'save_error';
+
+/** Where a run goes after validation: one math retry, then review / auto-approve / error. */
+export function routeAfterValidation(result: ValidationResult | null | undefined, retryCount: number): ValidationRoute {
+  if (!result) return 'save_error';
+  // Route to exception/error if not an invoice
+  if (result.not_an_invoice) return 'save_error';
+  // Mathematical retry loop
+  if (!result.math_ok && retryCount < 1) return 'retry';
+  // HITL vs Auto-approve route
+  if (result.requires_manual_review) return 'save_review';
+  return 'save_success';
+}
+
+/**
+ * Saves a run's outcome ('review' / 'approved' / 'error'), only while the run still owns the row.
+ * A corrected document for an invoice the accountant returned is linked in the same write as its
+ * status (QA round 2, N20): the returned invoice is pointed at it first, then the document is saved
+ * with resubmission_of, the return warning and the duplicate flag dismissed - so nobody reading it
+ * once it left 'processing' sees it unlinked. If that save doesn't happen (superseded run), the
+ * returned invoice is unlinked again. Returns true when saved.
+ */
+export async function saveRunOutcome(state: PipelineState, kind: 'review' | 'approved' | 'error'): Promise<boolean> {
+  if (kind === 'error') {
+    console.error(`[Supervisor] ❌ Saving state: ERROR (Total Cost: $${state.costMetrics.estimatedCostUsd}). Details: ${state.error}`);
+    const updateData: Record<string, unknown> = {
+      status: 'error',
+      error_message: state.error ? toUserErrorMessage(state.error) : 'העיבוד נכשל. ניתן לנסות שוב ("עבד מחדש")',
+    };
+    if (state.extractedData) {
+      updateData.extracted_data = state.extractedData;
+      updateData.validated_data = state.extractedData;
+    }
+    const saved = await writeRunResult(state, updateData);
+    if (saved) await saveRunContext(state);
+    return saved;
+  }
+
+  const data = state.extractedData;
+  const validatedData = data ? withSupplierRule(data, state.supplierRule) : data;
+  // Scored on what the reviewer sees (supplier-rule defaults applied)
+  const confidence = computeConfidence(validatedData);
+  console.log(
+    kind === 'review'
+      ? `[Supervisor] 💾 Saving state: REQUIRES MANUAL REVIEW (Total Cost: $${state.costMetrics.estimatedCostUsd})`
+      : `[Supervisor] ✅ Saving state: AUTO-APPROVED (Total Cost: $${state.costMetrics.estimatedCostUsd})`
+  );
+
+  // extracted_data stays the AI output; supplier-rule defaults go into validated_data only.
+  // No reviewed_at on auto-approve: those don't count toward accuracy / auto-approve eligibility.
+  // (An invoice a human already reviewed is never auto-approved by a re-run: see writeRunResult.)
+  const update: Record<string, unknown> = {
+    extracted_data: data,
+    validated_data: validatedData,
+    status: kind,
+    ai_confidence: confidence,
+    error_message: null,
+  };
+
+  // limit(1), not maybeSingle(): the local mock DB client doesn't implement maybeSingle
+  const { data: rows } = await supabase
+    .from('invoices')
+    .select('id, client_id, reviewed_at, resubmission_of, processing_run_id')
+    .eq('id', state.invoiceId)
+    .limit(1);
+  const current = ((Array.isArray(rows) ? rows[0] : null) ?? null) as {
+    client_id?: string;
+    reviewed_at?: string | null;
+    resubmission_of?: string | null;
+    processing_run_id?: string | null;
+  } | null;
+  const runId = (state as PipelineRunState).runId ?? null;
+  const owned = !!current && (!runId || current.processing_run_id === runId);
+
+  let linkedTo: string | null = null;
+  if (owned && current && !current.reviewed_at && !current.resubmission_of) {
+    const plan = await planResubmissionLink(
+      { id: state.invoiceId, client_id: current.client_id ?? state.tenantId, resubmission_of: null },
+      validatedData ?? null,
+      data ?? null
+    );
+    if (plan && (await linkReturnedToResubmission(plan.returnedId, state.invoiceId))) {
+      linkedTo = plan.returnedId;
+      update.resubmission_of = plan.returnedId;
+      update.validated_data = plan.validated;
+      console.log(`[Supervisor] Invoice ${state.invoiceId} is the corrected document of returned invoice ${plan.returnedId}`);
+    }
+  }
+
+  const saved = await writeRunResult(state, update);
+  if (!saved) {
+    if (linkedTo) await unlinkReturnedFromResubmission(linkedTo, state.invoiceId);
+    return false;
+  }
+  await saveRunContext(state);
+  // A reviewed invoice keeps its validated_data (writeRunResult), so it is linked on what is stored
+  if (current?.reviewed_at && !current.resubmission_of) await linkResubmission(state.invoiceId);
+  return true;
+}
+
+export interface QueuedExtractionInput {
+  invoiceId: string;
+  runId: string;
+  tenantId: string;
+  fileUrl: string;
+  mimeType: string;
+  /** Extraction merged from the run's page chunks (src/shared/extractionChunks.ts). */
+  extractedData: ExtractedData;
+  retryCount: number;
+  /** OCR text of the whole file (stored as few-shot context). */
+  rawOcrText: string;
+  ocrMetadata: OcrMetadata;
+  /** OCR words of the extracted pages (boxes are snapped to them). */
+  ocrWords: OcrWord[];
+  splitSuggestion: SplitSuggestion | null;
+  splitDetectionFailed: boolean;
+  fewShotExampleIds: string[];
+  costMetrics: CostMetrics;
+}
+
+export type QueuedExtractionOutcome =
+  | { outcome: 'retry' }
+  | { outcome: 'saved'; status: 'review' | 'approved' | 'error'; saved: boolean };
+
+/**
+ * The processing queue's last step (src/lib/processingQueue.ts): bbox snapping, validation and the
+ * save, with the same rules as the graph's validate / save nodes. No LLM call, so it is short.
+ * Returns 'retry' when the sums don't match and the one math retry is still due (the queue then
+ * runs another extraction call in its own tick).
+ */
+export async function finalizeQueuedExtraction(input: QueuedExtractionInput): Promise<QueuedExtractionOutcome> {
+  const tenantRules = await getTenantRules(input.tenantId);
+  const extracted: ExtractedData = { ...input.extractedData };
+  if (input.ocrWords.length > 0) extracted.bboxes = matchBboxesWithOcr(extracted, input.ocrWords);
+
+  const validation = await applyRunValidation({
+    invoiceId: input.invoiceId,
+    tenantId: input.tenantId,
+    extractedData: extracted,
+    tenantRules,
+    rawOcrText: input.rawOcrText,
+    splitSuggestion: input.splitSuggestion,
+    pageCount: input.ocrMetadata.pageCount ?? null,
+    splitDetectionFailed: input.splitDetectionFailed,
+  });
+  const route = routeAfterValidation(validation.validationResult, input.retryCount);
+  if (route === 'retry') return { outcome: 'retry' };
+
+  const state: PipelineRunState = {
+    invoiceId: input.invoiceId,
+    fileUrl: input.fileUrl,
+    mimeType: input.mimeType,
+    tenantId: input.tenantId,
+    tenantRules,
+    rawOcrText: input.rawOcrText,
+    ocrMetadata: input.ocrMetadata,
+    ocrWords: input.ocrWords,
+    extractedData: validation.extractedData,
+    validationResult: validation.validationResult,
+    supplierRule: validation.supplierRule,
+    retryCount: input.retryCount,
+    status: 'processing',
+    error: validation.error,
+    costMetrics: input.costMetrics,
+    useVisionFallback: false,
+    splitSuggestion: input.splitSuggestion,
+    fewShotExampleIds: input.fewShotExampleIds,
+    runId: input.runId,
+    splitDetectionFailed: input.splitDetectionFailed,
+  };
+  const status = route === 'save_error' ? 'error' : route === 'save_review' ? 'review' : 'approved';
+  const saved = await saveRunOutcome(state, status);
+  return { outcome: 'saved', status, saved };
+}
+
 // Define the StateGraph channels as any to bypass LangGraph's internal TS engine issues
 const graph = new StateGraph<any>({
   channels: {
@@ -657,75 +900,21 @@ const graph = new StateGraph<any>({
     if (!state.extractedData || !state.tenantRules) {
       throw new Error('Missing extraction data or rules for validation');
     }
-    const { data: validated, validationResult, supplierRule } = await validateInvoice(
-      state.invoiceId,
-      state.tenantId,
-      state.extractedData,
-      state.tenantRules,
-      { ocrText: state.rawOcrText }
-    );
-    // A file that holds several invoices must not be auto-approved as one: force review and
-    // store the suggestion so the review screen can pre-fill the split dialog.
-    // Only a suggestion that still matches this file's page count (stale ones are dropped)
-    const splitSuggestion = usableSuggestion(state.splitSuggestion, state.ocrMetadata?.pageCount ?? null);
-    if (splitSuggestion) {
-      const warning = `נראה שהקובץ מכיל ${splitSuggestion.documents.length} מסמכים נפרדים — מומלץ לפצל לפני אישור`;
-      if (!validationResult.warnings.includes(warning)) validationResult.warnings.push(warning);
-      validationResult.requires_manual_review = true;
-      // An opted-in supplier's invoice that passed every check still needs review here
-      if (validationResult.auto_approved) {
-        validationResult.auto_approved = false;
-        validationResult.auto_approve_blockers = [
-          ...(validationResult.auto_approve_blockers ?? []),
-          'הקובץ נראה כמכיל כמה מסמכים — יש לפצל לפני אישור',
-        ];
-      }
-      validated.validation_flags = validationResult;
-    }
-    validated.split_suggestion = splitSuggestion;
-    // Detection was needed but failed (e.g. the model's answer was cut off): the file may hold
-    // several invoices, so a reviewer has to look before it can be approved.
-    if (!splitSuggestion && (state as PipelineRunState).splitDetectionFailed) {
-      if (!validationResult.warnings.includes(SPLIT_DETECTION_FAILED_WARNING)) {
-        validationResult.warnings.push(SPLIT_DETECTION_FAILED_WARNING);
-      }
-      validationResult.requires_manual_review = true;
-      if (validationResult.auto_approved) {
-        validationResult.auto_approved = false;
-        validationResult.auto_approve_blockers = [
-          ...(validationResult.auto_approve_blockers ?? []),
-          'לא ניתן היה לוודא שהקובץ מכיל מסמך אחד בלבד',
-        ];
-      }
-      validated.validation_flags = validationResult;
-    }
-
-    const errorMsg = validationResult.not_an_invoice ? 'המסמך לא זוהה כחשבונית' : null;
-    return { extractedData: validated, validationResult, supplierRule, error: errorMsg };
+    return applyRunValidation({
+      invoiceId: state.invoiceId,
+      tenantId: state.tenantId,
+      extractedData: state.extractedData,
+      tenantRules: state.tenantRules,
+      rawOcrText: state.rawOcrText,
+      splitSuggestion: state.splitSuggestion ?? null,
+      pageCount: state.ocrMetadata?.pageCount ?? null,
+      splitDetectionFailed: (state as PipelineRunState).splitDetectionFailed === true,
+    });
   })
 
   // 5. Save review node (Interrupt point before approval)
   .addNode('save_review', async (state: PipelineState) => {
-    const data = state.extractedData;
-    const validatedData = data ? withSupplierRule(data, state.supplierRule) : data;
-    // Scored on what the reviewer sees (supplier-rule defaults applied)
-    const confidence = computeConfidence(validatedData);
-    
-    console.log(`[Supervisor] 💾 Saving state: REQUIRES MANUAL REVIEW (Total Cost: $${state.costMetrics.estimatedCostUsd})`);
-
-    // extracted_data stays the AI output; supplier-rule defaults go into validated_data only
-    const saved = await writeRunResult(state, {
-      extracted_data: data,
-      validated_data: validatedData,
-      status: 'review',
-      ai_confidence: confidence,
-      error_message: null,
-    });
-    if (!saved) return { status: 'review' };
-    await saveRunContext(state);
-    // A corrected document for an invoice the accountant returned to the client (review loop flag)
-    await linkResubmission(state.invoiceId);
-
+    await saveRunOutcome(state, 'review');
     return { status: 'review' };
   })
 
@@ -734,47 +923,13 @@ const graph = new StateGraph<any>({
 
   // 7. Save Auto-Approved node
   .addNode('save_success', async (state: PipelineState) => {
-    const data = state.extractedData;
-    const validatedData = data ? withSupplierRule(data, state.supplierRule) : data;
-    // Scored on what the reviewer sees (supplier-rule defaults applied)
-    const confidence = computeConfidence(validatedData);
-
-    console.log(`[Supervisor] ✅ Saving state: AUTO-APPROVED (Total Cost: $${state.costMetrics.estimatedCostUsd})`);
-
-    // No reviewed_at: auto-approved invoices don't count toward accuracy / auto-approve eligibility.
-    // (An invoice a human already reviewed is never auto-approved by a re-run: see writeRunResult.)
-    const saved = await writeRunResult(state, {
-      extracted_data: data,
-      validated_data: validatedData,
-      status: 'approved',
-      ai_confidence: confidence,
-      error_message: null,
-    });
-    if (!saved) return { status: 'approved' };
-    await saveRunContext(state);
-    await linkResubmission(state.invoiceId);
-
+    await saveRunOutcome(state, 'approved');
     return { status: 'approved' };
   })
 
   // 8. Save Error node
   .addNode('save_error', async (state: PipelineState) => {
-    console.error(`[Supervisor] ❌ Saving state: ERROR (Total Cost: $${state.costMetrics.estimatedCostUsd}). Details: ${state.error}`);
-    
-    const updateData: Record<string, unknown> = {
-      status: 'error',
-      error_message: state.error ? toUserErrorMessage(state.error) : 'העיבוד נכשל. ניתן לנסות שוב ("עבד מחדש")',
-    };
-
-    if (state.extractedData) {
-      updateData.extracted_data = state.extractedData;
-      updateData.validated_data = state.extractedData;
-    }
-
-    const saved = await writeRunResult(state, updateData);
-    if (!saved) return { status: 'error' };
-    await saveRunContext(state);
-
+    await saveRunOutcome(state, 'error');
     return { status: 'error' };
   })
 
@@ -785,27 +940,7 @@ const graph = new StateGraph<any>({
   .addEdge('extract', 'validate')
   
   // Conditional Edge after validation
-  .addConditionalEdges('validate', (state: PipelineState) => {
-    const result = state.validationResult;
-    if (!result) return 'save_error';
-
-    // Route to exception/error if not an invoice
-    if (result.not_an_invoice) {
-      return 'save_error';
-    }
-
-    // Mathematical retry loop
-    if (!result.math_ok && state.retryCount < 1) {
-      return 'retry';
-    }
-
-    // HITL vs Auto-approve route
-    if (result.requires_manual_review) {
-      return 'save_review';
-    }
-
-    return 'save_success';
-  }, {
+  .addConditionalEdges('validate', (state: PipelineState) => routeAfterValidation(state.validationResult, state.retryCount), {
     retry: 'extract',
     save_review: 'save_review',
     save_success: 'save_success',

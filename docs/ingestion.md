@@ -32,17 +32,33 @@ Amplify cuts every HTTP response at ~28 s, so no request runs the whole pipeline
   Approved invoices need `{ "reopen": true }` (their reviewed values are kept); exported / rejected /
   returned invoices and invoices with a live run get `409`.
 - The work runs in short resumable **ticks**: OCR of a few pages per tick (only those pages are sent to
-  Vision), then boundary detection, then extraction + validation + save. State lives in `processing_jobs`;
-  a killed tick loses only its own step (the job lock expires and the next tick retries, 3 attempts per stage).
-- Ticks are driven by `after()` right after enqueueing (best-effort), by the review screens
-  (`POST /api/invoices/[id]/process/tick` every few seconds while an invoice shows as processing) and by
-  the **scheduled worker** `GET|POST /api/invoices/worker` (header `X-Ingest-Secret` or
-  `Authorization: Bearer` = `PROCESSING_WORKER_SECRET`; 503 when unset). Schedule it every minute,
-  e.g. with EventBridge Scheduler (API destination) or any external cron.
-- Stuck runs (no progress for 10 minutes, or older than 45 minutes) become `error` with a Hebrew reason;
-  the user can retry ("עבד מחדש" on the review screen).
+  Vision), then boundary detection, then **extraction in parts**: one LLM call per tick over at most 3 pages
+  (a file that looks like several documents is extracted from its first document only - it can't be
+  approved before it is split), then validation + save (no LLM). Every step's result is stored in
+  `processing_jobs` (`extract_state`, migration `20261030180000_qa2_pipeline2.sql`) before the next one
+  starts, so a killed tick re-pays only for its own call. The math retry is a step of its own.
+- A tick holds the job by a **45 s lease** that a heartbeat renews every 10 s while the step runs; a tick
+  killed by the platform frees the job within the lease, and the next tick redoes only that step
+  (3 attempts per step without progress, then a Hebrew error).
+- `POST /api/invoices/[id]/process/tick` never waits past 20 s: a longer step answers `202 { state: 'busy' }`
+  and goes on in the background under its lease (no bare 504 from Amplify).
+- Ticks are driven by the **scheduled worker** `GET|POST /api/invoices/worker` every minute, by `after()`
+  right after enqueueing and by the review screens (`/process/tick` every few seconds while an invoice
+  shows as processing). The worker answers `202` at once (EventBridge API destinations time out after 5 s)
+  and runs the sweep + up to 4 due jobs after the response, each in bounded steps (~15 s budget).
+  Auth: `PROCESSING_WORKER_SECRET` as `X-Ingest-Secret` / `X-Worker-Secret` / `X-Api-Key`,
+  `Authorization: Bearer`, or Basic (secret as password); surrounding spaces / quotes in the configured value
+  are ignored; 503 when unset. Schedule it every minute, e.g. with EventBridge Scheduler (API destination).
+- A queued job whose lease is free is **resumed**, however long nobody drove it. Stuck runs become `error`
+  with a Hebrew reason: rows with nothing queued and no progress for 10 minutes, or runs older than 45
+  minutes; the user can retry ("עבד מחדש" on the review screen).
+- Concurrent `/process` calls start exactly one run: the claim is conditioned on the run token read, and a
+  run claimed less than a minute ago counts as live even before its job row exists (the others get `409`).
 - Every pipeline write is conditioned on `processing_run_id`, so a superseded run (re-process, manual split,
-  sweeper) can't overwrite the row. The UI shows `processing_stage` / `processing_progress`.
+  sweeper) can't overwrite the row. The UI shows `processing_stage` / `processing_progress`; while an invoice
+  is processing the review form is read-only and reject / split are disabled.
+- A corrected document for an invoice returned to the client is linked in the same write that ends its
+  run (`resubmission_of`, the return warning, the duplicate flag dismissed), never a moment later.
 - Manual split (`/api/invoices/[id]/split`): only from `review` / `error`, claimed atomically, parts keep
   `original_file_url` / `original_file_hash` / `split_parent_id` / page range, part `file_hash` =
   hash(source hash + page range), and the parts are queued on the server.

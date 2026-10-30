@@ -300,21 +300,42 @@ export async function listInvoiceNotifications(invoiceId: string): Promise<Clien
   return (data ?? []) as ClientNotification[];
 }
 
-/**
- * Called by the pipeline after a document was extracted: if the client previously had an invoice
- * of the same supplier + number returned, link the two (returned.resubmitted_invoice_id ↔
- * new.resubmission_of), add a warning to the new invoice and drop the duplicate flag that points
- * at the returned one. Best-effort: never throws, no-op while the flag is off for the office.
- */
-export async function linkResubmission(invoiceId: string): Promise<string | null> {
-  try {
-    const { data: rows, error } = await deps.db.from('invoices').select('*').eq('id', invoiceId).limit(1);
-    if (error) throw new Error(error.message);
-    const invoice = ((Array.isArray(rows) ? rows[0] : null) as Invoice | undefined) ?? null;
-    if (!invoice || invoice.resubmission_of) return invoice?.resubmission_of ?? null;
-    if (!(await isEnabledForClient(invoice.client_id, 'accountant_review_loop'))) return null;
+/** A corrected document's link to the invoice the accountant returned (see planResubmissionLink). */
+export interface ResubmissionPlan {
+  /** The returned invoice this document replaces. */
+  returnedId: string;
+  /** validated_data with the return warning added and the duplicate flag against it dismissed. */
+  validated: ExtractedData | null;
+}
 
-    const data = invoice.validated_data ?? invoice.extracted_data;
+function withResubmissionFlags(validated: ExtractedData | null, matchId: string): ExtractedData | null {
+  if (!validated?.validation_flags) return validated;
+  const current = validated.validation_flags;
+  // The returned invoice is the document being replaced, not a duplicate of it.
+  const flags = (current.duplicate_matches ?? []).some((m) => m.invoice_id === matchId)
+    ? dismissDuplicateInFlags(current, matchId, validated.invoice_number ?? null)
+    : { ...current };
+  const warnings = flags.warnings ?? [];
+  flags.warnings = warnings.includes(RETURN_WARNING) ? warnings : [...warnings, RETURN_WARNING];
+  return { ...validated, validation_flags: flags };
+}
+
+/**
+ * Read-only part of the resubmission link: whether a document (with the data about to be saved)
+ * replaces an invoice of the same supplier + number that was returned to the client, and the
+ * validated_data it should be saved with. null = nothing to link (or the flag is off). Never throws.
+ * The pipeline saves the result together with its status write (QA round 2, N20), so nobody sees
+ * the document in 'review' unlinked and flagged as a duplicate of the returned invoice.
+ */
+export async function planResubmissionLink(
+  invoice: { id: string; client_id: string; resubmission_of?: string | null },
+  validated: ExtractedData | null,
+  extracted: ExtractedData | null = null
+): Promise<ResubmissionPlan | null> {
+  try {
+    if (invoice.resubmission_of) return null;
+    if (!(await isEnabledForClient(invoice.client_id, 'accountant_review_loop'))) return null;
+    const data = validated ?? extracted;
     if (!data?.invoice_number) return null;
 
     const { data: candidates, error: candErr } = await deps.db
@@ -326,34 +347,72 @@ export async function linkResubmission(invoiceId: string): Promise<string | null
 
     const match = findReturnedMatch(invoice.id, data, (candidates ?? []) as ReturnedCandidate[]);
     if (!match) return null;
+    return { returnedId: match.id, validated: withResubmissionFlags(validated, match.id) };
+  } catch (err) {
+    console.error(`[returns] Could not check invoice ${invoice.id} for a returned original:`, err);
+    return null;
+  }
+}
 
-    const validated = invoice.validated_data;
-    let nextValidated = validated;
-    if (validated?.validation_flags) {
-      const current = validated.validation_flags;
-      // The returned invoice is the document being replaced, not a duplicate of it.
-      const flags = (current.duplicate_matches ?? []).some((m) => m.invoice_id === match.id)
-        ? dismissDuplicateInFlags(current, match.id, validated.invoice_number ?? null)
-        : { ...current };
-      const warnings = flags.warnings ?? [];
-      flags.warnings = warnings.includes(RETURN_WARNING) ? warnings : [...warnings, RETURN_WARNING];
-      nextValidated = { ...validated, validation_flags: flags };
-    }
+/**
+ * Points the returned invoice at its corrected document. Conditioned on it still being returned and
+ * not linked to another document. Returns false when nothing was linked.
+ */
+export async function linkReturnedToResubmission(returnedId: string, newInvoiceId: string): Promise<boolean> {
+  const { data, error } = await deps.db
+    .from('invoices')
+    .update({ resubmitted_invoice_id: newInvoiceId, updated_at: new Date().toISOString() })
+    .eq('id', returnedId)
+    .eq('status', 'returned')
+    .is('resubmitted_invoice_id', null)
+    .select('id');
+  if (error) {
+    console.error(`[returns] Could not link returned invoice ${returnedId} to ${newInvoiceId}:`, error);
+    return false;
+  }
+  if (Array.isArray(data) && data.length > 0) return true;
+  // Already linked to this document (a repeated save of the same run)
+  const { data: rows } = await deps.db.from('invoices').select('id, resubmitted_invoice_id').eq('id', returnedId).limit(1);
+  const row = Array.isArray(rows) ? (rows[0] as { resubmitted_invoice_id?: string | null } | undefined) : undefined;
+  return row?.resubmitted_invoice_id === newInvoiceId;
+}
+
+/** Undoes linkReturnedToResubmission when the corrected document's own save did not happen. */
+export async function unlinkReturnedFromResubmission(returnedId: string, newInvoiceId: string): Promise<void> {
+  const { error } = await deps.db
+    .from('invoices')
+    .update({ resubmitted_invoice_id: null, updated_at: new Date().toISOString() })
+    .eq('id', returnedId)
+    .eq('resubmitted_invoice_id', newInvoiceId);
+  if (error) console.error(`[returns] Could not unlink returned invoice ${returnedId}:`, error);
+}
+
+/**
+ * Links an already saved document to the invoice the accountant returned (same supplier + number):
+ * returned.resubmitted_invoice_id <-> new.resubmission_of, with the warning added and the duplicate
+ * flag dropped. Best-effort: never throws, no-op while the flag is off for the office. The pipeline
+ * itself links before its status write (planResubmissionLink); this is for rows saved otherwise.
+ */
+export async function linkResubmission(invoiceId: string): Promise<string | null> {
+  try {
+    const { data: rows, error } = await deps.db.from('invoices').select('*').eq('id', invoiceId).limit(1);
+    if (error) throw new Error(error.message);
+    const invoice = ((Array.isArray(rows) ? rows[0] : null) as Invoice | undefined) ?? null;
+    if (!invoice || invoice.resubmission_of) return invoice?.resubmission_of ?? null;
+
+    const plan = await planResubmissionLink(invoice, invoice.validated_data ?? null, invoice.extracted_data ?? null);
+    if (!plan) return null;
 
     const now = new Date().toISOString();
     const { error: newErr } = await deps.db
       .from('invoices')
-      .update({ resubmission_of: match.id, validated_data: nextValidated, updated_at: now })
+      .update({ resubmission_of: plan.returnedId, validated_data: plan.validated, updated_at: now })
       .eq('id', invoice.id);
     if (newErr) throw new Error(newErr.message);
-    const { error: oldErr } = await deps.db
-      .from('invoices')
-      .update({ resubmitted_invoice_id: invoice.id, updated_at: now })
-      .eq('id', match.id);
-    if (oldErr) throw new Error(oldErr.message);
+    await linkReturnedToResubmission(plan.returnedId, invoice.id);
 
-    console.log(`[returns] Invoice ${invoice.id} linked as the corrected document of returned invoice ${match.id}`);
-    return match.id;
+    console.log(`[returns] Invoice ${invoice.id} linked as the corrected document of returned invoice ${plan.returnedId}`);
+    return plan.returnedId;
   } catch (err) {
     console.error(`[returns] Failed to link resubmission for invoice ${invoiceId}:`, err);
     return null;

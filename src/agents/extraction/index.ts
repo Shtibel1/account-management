@@ -158,7 +158,13 @@ export async function extractInvoiceData(
   mimeType: string,
   useVisionFallback = false,
   withRetryHint = false,
-  fewShot: { examples: FewShotExample[]; supplierVatId: string | null } = { examples: [], supplierVatId: null }
+  fewShot: { examples: FewShotExample[]; supplierVatId: string | null } = { examples: [], supplierVatId: null },
+  options: {
+    /** Extra instruction, e.g. which part of a long document this call sees (src/shared/extractionChunks.ts). */
+    hint?: string | null;
+    /** Retry a response cut at max_tokens with a larger budget (one long call). Off for page chunks. */
+    allowLargeRetry?: boolean;
+  } = {}
 ): Promise<{
   extractedData: ExtractedData;
   inputTokens: number;
@@ -169,8 +175,9 @@ export async function extractInvoiceData(
   const anthropic = getAnthropicClient();
   const content: Anthropic.MessageParam['content'] = [];
 
-  // Decide if we should fetch and send the image (fallback / missing OCR text)
-  const shouldSendImage = useVisionFallback || !rawOcrText;
+  // Decide if we should fetch and send the image (fallback / missing OCR text). Only real images:
+  // a PDF sent as an image block is refused by the API, which failed the whole run (QA round 2).
+  const shouldSendImage = mimeType.startsWith('image/') && (useVisionFallback || !rawOcrText);
 
   if (shouldSendImage) {
     console.log(`[Extraction] Performing multimodal vision extraction (fallback or missing OCR)`);
@@ -201,6 +208,9 @@ export async function extractInvoiceData(
   if (rawOcrText) {
     promptText += `\n\nטקסט ה-OCR של החשבונית:\n\"\"\"\n${rawOcrText}\n\"\"\"`;
   }
+  if (options.hint) {
+    promptText += `\n\n${options.hint}`;
+  }
   if (withRetryHint) {
     promptText += `\n\n${RETRY_HINT}`;
   }
@@ -226,7 +236,9 @@ export async function extractInvoiceData(
   let response = await callModel(4096);
   let inputTokens = response.usage?.input_tokens ?? 0;
   let outputTokens = response.usage?.output_tokens ?? 0;
-  if (response.stop_reason === 'max_tokens') {
+  if (response.stop_reason === 'max_tokens' && options.allowLargeRetry === false) {
+    console.warn('[Extraction] Response hit max_tokens (4096) on a page chunk — keeping the partial tool input');
+  } else if (response.stop_reason === 'max_tokens') {
     console.warn('[Extraction] Response hit max_tokens (4096) — retrying with 16384');
     response = await callModel(16384);
     inputTokens += response.usage?.input_tokens ?? 0;

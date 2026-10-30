@@ -143,7 +143,7 @@ export async function reprocessInvoice(id: string) {
 export interface ProcessingTickResponse {
   state: 'done' | 'pending' | 'busy' | 'waiting' | 'failed';
   stage?: string | null;
-  progress?: { pages_done: number; pages_total: number | null } | null;
+  progress?: { pages_done: number; pages_total: number | null; parts_done?: number; parts_total?: number } | null;
 }
 
 /** Advances an invoice's queued processing by one bounded step (called while it shows as processing). */
