@@ -55,7 +55,7 @@ auth.users ──< memberships (role owner|member) >── organizations ──<
   `authenticated` may read/write only objects whose first folder is a client of their org. The app itself only touches
   the bucket server-side (service role: signed upload URLs, pipeline uploads, short-lived signed read URLs), so these
   policies are defense in depth. `invoices.file_url` stores a storage *reference*
-  (`/storage/v1/object/authenticated/raw-invoices/<path>`, not a bearer link; `file_path` is generated from it).
+  (`/storage/v1/object/authenticated/raw-invoices/<path>`, not a bearer link).
   Readers get signed URLs on demand (`src/lib/invoiceFiles.ts`): the viewer via `GET /api/invoices/[id]/file`
   (10 minutes, after the access check), a pipeline run 1 hour, split / plugins read with the Storage API.
   Migration `20261030162000_qa_export_security.sql` rewrote the old 1-year signed URLs (QA #31).

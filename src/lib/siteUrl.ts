@@ -51,7 +51,10 @@ export function allowedHostList(input: Pick<SiteOriginInput, 'allowedHosts' | 'a
     .map((h) => h.trim().toLowerCase())
     .filter(Boolean);
   if (input.amplifyAppId && input.amplifyBranch) {
-    hosts.push(`${input.amplifyBranch}.${input.amplifyAppId}.amplifyapp.com`.toLowerCase());
+    // Amplify's default domain replaces characters such as "/" in the branch name with "-".
+    const branch = input.amplifyBranch.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const appId = input.amplifyAppId.trim().toLowerCase();
+    if (branch && /^[a-z0-9]+$/.test(appId)) hosts.push(`${branch}.${appId}.amplifyapp.com`);
   }
   const configured = originOf(input.configured);
   if (configured) hosts.push(new URL(configured).host.toLowerCase());
@@ -86,8 +89,10 @@ export function siteOriginFor(request: { url: string; headers: HeaderReader }): 
   return resolveSiteOrigin({
     configured: process.env.NEXT_PUBLIC_SITE_URL,
     allowedHosts: process.env.SITE_ALLOWED_HOSTS,
-    amplifyAppId: process.env.AWS_APP_ID,
-    amplifyBranch: process.env.AWS_BRANCH,
+    // AWS_APP_ID / AWS_BRANCH exist at build time on Amplify; amplify.yml copies them into
+    // .env.production as SITE_AMPLIFY_APP_ID / SITE_AMPLIFY_BRANCH for the SSR runtime.
+    amplifyAppId: process.env.SITE_AMPLIFY_APP_ID || process.env.AWS_APP_ID,
+    amplifyBranch: process.env.SITE_AMPLIFY_BRANCH || process.env.AWS_BRANCH,
     forwardedHost: request.headers.get('x-forwarded-host'),
     forwardedProto: request.headers.get('x-forwarded-proto'),
     requestUrl: request.url,

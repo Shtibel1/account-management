@@ -6,8 +6,6 @@ import { requireClientAccess, requireInvoiceAccess } from '@/lib/auth';
 const PROTECTED_COLUMNS = [
   'id',
   'created_at',
-  // Generated from file_url (migration 20261030162000) - not writable.
-  'file_path',
   // Accountant review loop audit trail: written only by POST /api/invoices/[id]/return and the pipeline.
   'return_reason_code',
   'return_reason',

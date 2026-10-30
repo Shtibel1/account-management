@@ -188,8 +188,6 @@ export interface Invoice {
   client_id: string;
   /** Storage reference (not a link) - signed URLs come from GET /api/invoices/[id]/file. */
   file_url: string;
-  /** Object path in raw-invoices, generated from file_url (read-only). */
-  file_path?: string | null;
   file_name: string;
   status: InvoiceStatus;
   source?: InvoiceSource;

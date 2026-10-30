@@ -8,7 +8,8 @@
 --    (query string) is dropped. The old tokens themselves stay valid until they expire (Supabase
 --    cannot revoke a signed URL short of rotating the JWT secret), but the app no longer stores,
 --    returns or logs them.
---    invoices.file_path (generated, read-only) exposes the object path for queries / support.
+--    (No generated file_path column: it would rewrite the table and make every write that sends
+--    the full row fail; the app derives the object path from file_url - src/lib/invoiceFiles.ts.)
 --    Object paths are ASCII-only (buildStoragePath / sanitizeStorageFilename), so the path in the
 --    URL needs no percent-decoding.
 --
@@ -19,7 +20,7 @@
 -- Idempotent: safe to run more than once.
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 1. invoices.file_url -> storage reference, invoices.file_path
+-- 1. invoices.file_url -> storage reference
 -- ─────────────────────────────────────────────────────────────────────────────
 
 update public.invoices
@@ -30,24 +31,9 @@ set file_url = regexp_replace(
 )
 where file_url ~ '^https?://[^/]+/storage/v1/object/sign/raw-invoices/[^?#]+';
 
-do $$
-begin
-  if not exists (
-    select 1 from information_schema.columns
-    where table_schema = 'public' and table_name = 'invoices' and column_name = 'file_path'
-  ) then
-    alter table public.invoices
-      add column file_path text generated always as (
-        substring(file_url from '/storage/v1/object/(?:authenticated|sign|public)/raw-invoices/([^?#]+)')
-      ) stored;
-  end if;
-end $$;
-
 comment on column public.invoices.file_url is
   'Storage reference of the original file (/storage/v1/object/authenticated/raw-invoices/<path>). Not a link: '
   'the app signs short-lived URLs on demand (src/lib/invoiceFiles.ts).';
-comment on column public.invoices.file_path is
-  'Object path inside the raw-invoices bucket, derived from file_url (generated).';
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 2. Rate limiting of the public lead form
