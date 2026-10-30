@@ -498,8 +498,17 @@ export async function applyBankAction(db: SupabaseClient, transactionId: string,
     .select('*')
     .single();
   if (updateError?.code === '23505') throw new BankActionError('החשבונית כבר מותאמת לתנועה אחרת', 409);
+  if (isInvalidMatchError(updateError)) {
+    // DB trigger bank_transactions_check_match: the invoice changed (client / status) meanwhile.
+    throw new BankActionError('החשבונית כבר אינה מאושרת או שהועברה ללקוח אחר - רעננו את המסך', 409, 'invoice_not_matchable');
+  }
   throwDbError(updateError, 'update transaction');
   return toTransaction((updated ?? { ...txn, ...update }) as BankTransaction);
+}
+
+/** Raised by the bank_transactions_check_match trigger (migration 20261030163000). */
+export function isInvalidMatchError(error: DbError | null | undefined): boolean {
+  return !!error && error.code === 'P0001' && /bank_match_invalid/.test(error.message ?? '');
 }
 
 /** PostgREST PGRST116 = .single() found no row. */

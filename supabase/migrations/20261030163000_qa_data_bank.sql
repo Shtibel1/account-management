@@ -8,7 +8,9 @@
 --    {auto_approve:true} or DELETE invoice_corrections through PostgREST and skip those checks.
 -- 2. import_bank_transactions(): one statement = one transaction, so an import is all or nothing.
 -- 3. A matched invoice that moves to another client or leaves approved/exported releases its bank
---    line (trigger on invoices; safety net for every write path, incl. the pipeline and REST).
+--    line (trigger on invoices; safety net for every write path, incl. the pipeline and REST),
+--    and a line can only be matched to an approved/exported invoice of its own client (trigger
+--    on bank_transactions; closes the check-then-write race of the service-role server).
 -- 4. supplier_accuracy: invoices without a supplier VAT ID are no longer lumped into one '' row
 --    under an arbitrary max(supplier_name); VAT IDs are normalized (8 digits -> 9).
 -- Idempotent: safe to run more than once.
@@ -152,6 +154,48 @@ set matched_invoice_id = null, match_status = 'unmatched'
 from public.invoices i
 where i.id = t.matched_invoice_id
   and (i.client_id is distinct from t.client_id or i.status not in ('approved', 'exported'));
+
+-- The other direction: a line can only be (re)matched to an approved/exported invoice of its own
+-- client. The server checks this too, but it writes with the service role (RLS WITH CHECK is
+-- bypassed), and the invoice may change between that check and the write. FOR SHARE waits for a
+-- concurrent invoice update to commit and then checks its new state, so a match can never be
+-- written against an invoice that just moved / was reopened. Unchanged matches are not re-checked.
+create or replace function public.bank_transactions_check_match()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  inv_client uuid;
+  inv_status text;
+begin
+  if new.matched_invoice_id is null then
+    return new;
+  end if;
+  if tg_op = 'UPDATE'
+     and new.matched_invoice_id is not distinct from old.matched_invoice_id
+     and new.client_id is not distinct from old.client_id then
+    return new;
+  end if;
+  select i.client_id, i.status into inv_client, inv_status
+  from public.invoices i
+  where i.id = new.matched_invoice_id
+  for share;
+  if not found or inv_client is distinct from new.client_id or inv_status not in ('approved', 'exported') then
+    raise exception 'bank_match_invalid: invoice % is not an approved invoice of this client', new.matched_invoice_id
+      using errcode = 'P0001';
+  end if;
+  return new;
+end;
+$$;
+
+revoke execute on function public.bank_transactions_check_match() from public, anon, authenticated;
+
+drop trigger if exists bank_transactions_check_match on public.bank_transactions;
+create trigger bank_transactions_check_match
+  before insert or update of matched_invoice_id, client_id on public.bank_transactions
+  for each row execute function public.bank_transactions_check_match();
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 4. supplier_accuracy: no '' bucket, normalized VAT IDs
