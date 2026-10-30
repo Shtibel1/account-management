@@ -18,6 +18,20 @@ frontend:
         - echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> .env.production
         # Secret of the scheduled processing worker (/api/invoices/worker); see docs/ingestion.md
         - echo "PROCESSING_WORKER_SECRET=$PROCESSING_WORKER_SECRET" >> .env.production
+        # Encryption key for per-client integration credentials (docs/integrations.md)
+        - echo "INTEGRATIONS_ENCRYPTION_KEY=$INTEGRATIONS_ENCRYPTION_KEY" >> .env.production
+        - echo "FEATURE_FLAGS_DEFAULT=$FEATURE_FLAGS_DEFAULT" >> .env.production
+        - echo "LEAD_RATE_SALT=$LEAD_RATE_SALT" >> .env.production
+        # Lead / client notification emails (AWS SES)
+        - echo "CONTACT_FROM_EMAIL=$CONTACT_FROM_EMAIL" >> .env.production
+        - echo "CONTACT_TO_EMAIL=$CONTACT_TO_EMAIL" >> .env.production
+        # Ingestion channels (docs/ingestion.md); empty = endpoints fail closed
+        - echo "INGEST_EMAIL_SECRET=$INGEST_EMAIL_SECRET" >> .env.production
+        - echo "INBOUND_EMAIL_DOMAIN=$INBOUND_EMAIL_DOMAIN" >> .env.production
+        - echo "TWILIO_ACCOUNT_SID=$TWILIO_ACCOUNT_SID" >> .env.production
+        - echo "TWILIO_AUTH_TOKEN=$TWILIO_AUTH_TOKEN" >> .env.production
+        - echo "TWILIO_WEBHOOK_URL=$TWILIO_WEBHOOK_URL" >> .env.production
+        - echo "TWILIO_WHATSAPP_NUMBER=$TWILIO_WHATSAPP_NUMBER" >> .env.production
     build:
       commands:
         - npm run build
