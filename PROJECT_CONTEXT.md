@@ -46,6 +46,7 @@ The processing pipeline is defined in [supervisor/index.ts](file:///c:/Users/nad
 1. **`init_rules`:** Fetch client-specific dynamic rules from the database.
 2. **`preprocess`:** Run Google Vision OCR. If a multi-page PDF contains multiple invoices, Claude Haiku detects split boundaries. The PDF is split, parts are uploaded, and child pipelines are triggered.
 3. **`extract`:** Use Claude 3.5 Sonnet with a tool-use definition (`save_invoice_data`) to extract invoice fields and bounding box coordinates (bboxes).
+   - **Per-supplier few-shot ("instant learning"):** before the call, VAT-id candidates in the OCR text (8/9 digits passing the checksum) are matched against `supplier_vat_id` of human-reviewed invoices (`reviewed_at` set). Up to 3 recent ones with stored `ocr_text` (same client first; other clients only without bank details) are added to the prompt as truncated OCR + approved values, with fields from `invoice_corrections` marked as previously misread. Pure logic in `src/shared/fewshot.ts`, DB loader in `src/lib/fewshot.ts`; best-effort (any failure → no examples). The save nodes persist `invoices.ocr_text` and `fewshot_example_count` / `fewshot_example_ids`; compare accuracy in the `fewshot_accuracy` view. Set `EXTRACTION_FEWSHOT=off` to disable.
 4. **`validate`:** Run calculations, Luhn checksum for Israeli VAT IDs (H.P.), whitelist category checks, database duplication checks, and composed VAT ID identification (from the invoice, supplier table, and Gov.il API web search).
 5. **`save_review` / `save_success`:** Invoices currently route to `save_review` since manual review is forced (`requires_manual_review: true` in validation). The status becomes `review` and execution interrupts.
 6. **`approval`:** When a human reviews the invoice, the client-side invokes `resumeApproval` to update the state graph with modified values and finishes the graph.
@@ -84,6 +85,7 @@ Make sure the following environment variables are present in `.env.local`:
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
+- `EXTRACTION_FEWSHOT` (optional, `off` disables per-supplier few-shot examples)
 
 ---
 

@@ -5,6 +5,7 @@ import { extractInvoiceData } from '../extraction';
 import { validateInvoice } from '../validation';
 import { approvalNode } from '../approval';
 import { supabase } from '@/lib/supabase';
+import { loadFewShotExamples, saveExtractionContext } from '@/lib/fewshot';
 import { PDFDocument } from 'pdf-lib';
 
 function parseNumber(text: string): number | null {
@@ -282,6 +283,14 @@ export function calculateEstimatedCost(metrics: {
   return Math.round((ocrCost + inputCost + outputCost) * 10000) / 10000;
 }
 
+// Persist the OCR text (future few-shot input) and which examples were used, best-effort
+async function saveRunContext(state: PipelineState): Promise<void> {
+  await saveExtractionContext(supabase, state.invoiceId, {
+    ocrText: state.rawOcrText,
+    fewShotExampleIds: state.fewShotExampleIds ?? null,
+  });
+}
+
 // Define the StateGraph channels as any to bypass LangGraph's internal TS engine issues
 const graph = new StateGraph<any>({
   channels: {
@@ -303,6 +312,8 @@ const graph = new StateGraph<any>({
       default: () => ({ ocrOpCount: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 }),
     },
     useVisionFallback: { value: (a: boolean, b: boolean) => b ?? a, default: () => false },
+    fewShot:          { value: (a: any, b: any) => b ?? a, default: () => null },
+    fewShotExampleIds: { value: (a: any, b: any) => b ?? a, default: () => null },
   },
 })
   // 1. Initialize Rules node
@@ -473,12 +484,28 @@ const graph = new StateGraph<any>({
     
     console.log(`[Supervisor] 🔍 Extracting invoice fields (Retry: ${isRetry}, Vision Mode: ${useVision})`);
 
-    const { extractedData, inputTokens, outputTokens } = await extractInvoiceData(
+    // Past reviewed invoices of the same supplier as few-shot examples (best-effort, loaded once per run)
+    const fewShot = state.fewShot ?? await loadFewShotExamples(supabase, {
+      invoiceId: state.invoiceId,
+      tenantId: state.tenantId,
+      ocrText: state.rawOcrText,
+    });
+
+    const { extractedData, inputTokens, outputTokens, fewShotInvoiceIds } = await extractInvoiceData(
       state.rawOcrText,
       state.fileUrl,
       state.mimeType,
       useVision,
-      isRetry
+      isRetry,
+      fewShot
+    );
+
+    // Logged on every extraction so accuracy with/without examples can be compared later
+    console.log(
+      `[Supervisor] 📚 Few-shot examples used: ${fewShotInvoiceIds.length}` +
+      (fewShotInvoiceIds.length > 0
+        ? ` (supplier ${fewShot.supplierVatId}, invoices ${fewShotInvoiceIds.join(', ')})`
+        : '')
     );
 
     // Overwrite bounding boxes with coordinates from Google Vision OCR for pixel-perfect accuracy
@@ -498,6 +525,8 @@ const graph = new StateGraph<any>({
 
     return { 
       extractedData,
+      fewShot,
+      fewShotExampleIds: fewShotInvoiceIds,
       costMetrics: updatedMetrics,
       retryCount: isRetry ? state.retryCount + 1 : state.retryCount,
       useVisionFallback: useVision
@@ -533,6 +562,7 @@ const graph = new StateGraph<any>({
       ai_confidence: confidence,
       updated_at: new Date().toISOString(),
     }).eq('id', state.invoiceId);
+    await saveRunContext(state);
 
     return { status: 'review' };
   })
@@ -554,6 +584,7 @@ const graph = new StateGraph<any>({
       ai_confidence: confidence,
       updated_at: new Date().toISOString(),
     }).eq('id', state.invoiceId);
+    await saveRunContext(state);
 
     return { status: 'approved' };
   })
@@ -574,6 +605,7 @@ const graph = new StateGraph<any>({
     }
 
     await supabase.from('invoices').update(updateData).eq('id', state.invoiceId);
+    await saveRunContext(state);
 
     return { status: 'error' };
   })

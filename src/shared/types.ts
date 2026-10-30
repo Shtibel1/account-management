@@ -1,3 +1,5 @@
+import type { FewShotExample } from '@/shared/fewshot';
+
 export type InvoiceStatus = 'processing' | 'review' | 'approved' | 'exported' | 'error' | 'rejected';
 
 export type MappingType = 'supplier' | 'category';
@@ -92,6 +94,10 @@ export interface Invoice {
   ai_confidence: number | null;
   error_message: string | null;
   exported_at: string | null;
+  reviewed_at?: string | null;
+  ocr_text?: string | null;            // raw OCR text, input for per-supplier few-shot examples
+  fewshot_example_count?: number | null;
+  fewshot_example_ids?: string[] | null;
   created_at: string;
   updated_at: string;
 }
@@ -150,5 +156,14 @@ export interface PipelineState {
   error: string | null;
   costMetrics: CostMetrics;
   useVisionFallback: boolean;
+  /** Per-supplier few-shot lookup, loaded once per run (null = not loaded yet). */
+  fewShot?: FewShotLookupState | null;
+  /** Past invoices included as examples in the latest extraction (null = extraction didn't run). */
+  fewShotExampleIds?: string[] | null;
+}
+
+export interface FewShotLookupState {
+  examples: FewShotExample[];
+  supplierVatId: string | null;
 }
 
