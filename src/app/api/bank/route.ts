@@ -6,7 +6,8 @@ import { parseBankListQuery, summarizeBankTransactions } from '@/shared/bankOver
 
 // One page of a client's statement lines (filters: mode, status, account, q; paging: page,
 // pageSize) + summary counts over all lines + the invoices / candidates that page needs.
-// view=lines returns only the lines (paged export of the missing-invoices list).
+// view=lines returns only the lines. Filtering, sorting, paging, counts and the summary run in SQL
+// (bank_overview(), migration 20261031100000). The missing-invoices export uses /api/bank/missing.
 export async function GET(request: Request) {
   const params = new URL(request.url).searchParams;
   const clientId = params.get('clientId');

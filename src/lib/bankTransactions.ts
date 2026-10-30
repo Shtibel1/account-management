@@ -350,16 +350,19 @@ export interface MatchRunResult {
   matched: number;
   ambiguous: number;
   /**
-   * False when the run stopped at its deadline (or had too many candidate lines) before every
-   * confident pair was stored. Running it again continues: matched lines drop out of the next run.
+   * False when the run stopped at its deadline before every confident pair was stored. Running it
+   * again continues: matched lines drop out of the next run.
    */
   complete: boolean;
   /**
-   * True when the run was skipped because the client has more candidate lines than one run can
-   * handle (MAX_MATCH_LINES). Running it again does not help: those lines have to be matched
-   * manually (or the statement trimmed) until the candidate set is small enough.
+   * True when some invoices were left out of the run because they have too many candidate lines
+   * (more than MAX_LINES_PER_INVOICE, or past the MAX_MATCH_LINES budget of one run). Everything
+   * else was matched as usual; running it again does not help for those invoices: their lines have
+   * to be matched manually until fewer candidates are open.
    */
   truncated?: boolean;
+  /** How many invoices were left out (with truncated). */
+  skippedInvoices?: number;
 }
 
 export interface AutoMatchOptions {
@@ -371,8 +374,14 @@ export interface AutoMatchOptions {
 
 const MATCH_INPUT_RPC = 'bank_auto_match_input';
 const APPLY_MATCHES_RPC = 'apply_bank_auto_matches';
-/** Candidate lines one run handles; more (a pathological statement) -> nothing is matched, see below. */
+/** Candidate lines one run handles; past it whole invoices are left out (see bank_auto_match_input). */
 const MAX_MATCH_LINES = 20_000;
+/**
+ * An invoice with more candidate lines than this (e.g. a recurring charge of the same amount
+ * repeated in a bad statement) is left out of auto-matching: it would never be a clear favourite,
+ * and its lines would crowd out every other invoice of the client.
+ */
+const MAX_LINES_PER_INVOICE = 100;
 /** Pairs per apply call (one short statement each; the deadline is checked between calls). */
 const APPLY_CHUNK = 500;
 /** A DB step is started only when at least this much of the deadline is left. */
@@ -381,7 +390,10 @@ const MIN_STEP_MS = 1_500;
 type MatchLine = Pick<
   BankTransaction,
   'id' | 'txn_date' | 'description' | 'amount' | 'match_status' | 'matched_invoice_id' | 'rejected_invoice_ids' | 'import_batch_id'
->;
+> & {
+  /** Also a candidate of a left-out invoice: a rival in this run, never matched itself. */
+  blocked?: boolean;
+};
 
 /** Ran out of time (deadline reached, or the request was aborted at it). */
 class DeadlineError extends Error {
@@ -415,18 +427,26 @@ interface MatchInput {
   lines: MatchLine[];
   /** Approved/exported invoices of the client not paired with any line yet. */
   invoices: MatchableInvoice[];
-  /** More candidate lines than MAX_MATCH_LINES. */
+  /** Some invoices were left out (too many candidate lines). */
   truncated: boolean;
+  skippedInvoices: number;
 }
 
 /**
- * Preferred path: bank_auto_match_input() (migration 20261030192000) returns, in one call, only
- * the unmatched debits whose amount is within the tolerance of a free invoice's total (every line
- * that can be matched, so also every rival of a match), plus those invoices with just the fields
- * matching needs. Its cost grows with the invoices, not with the client's total line count.
- * Returns null when the function isn't deployed yet.
+ * Preferred path: bank_auto_match_input() (migrations 20261030192000, 20261031100000) returns, in
+ * one call, only the unmatched debits whose amount is within the tolerance of a free invoice's
+ * total (every line that can be matched, so also every rival of a match), plus those invoices with
+ * just the fields matching needs. Its cost grows with the invoices, not with the client's total
+ * line count. Invoices with too many candidate lines are left out (the batch just imported is
+ * preferred when the budget runs out); lines that are also theirs come back blocked. Returns null
+ * when the function isn't deployed yet.
  */
-async function loadMatchInputRpc(db: SupabaseClient, clientId: string, deadline: number | undefined): Promise<MatchInput | null> {
+async function loadMatchInputRpc(
+  db: SupabaseClient,
+  clientId: string,
+  deadline: number | undefined,
+  preferBatchId: string | undefined
+): Promise<MatchInput | null> {
   if (typeof db.rpc !== 'function') return null;
   assertTime(deadline);
   const { data, error } = await withDeadline(
@@ -438,13 +458,20 @@ async function loadMatchInputRpc(db: SupabaseClient, clientId: string, deadline:
       // The date window of evaluateCandidate(), so only lines autoMatch() can use are returned
       p_days_before: DAYS_BEFORE_INVOICE,
       p_days_after: DAYS_AFTER_INVOICE,
+      p_max_per_invoice: MAX_LINES_PER_INVOICE,
+      p_prefer_batch_id: preferBatchId ?? null,
     }),
     deadline
   );
   if (error && isAbort(error)) throw new DeadlineError();
   if (isMissingFunction(error)) return null;
   throwDbError(error, 'load auto-match input');
-  const body = (data ?? {}) as { lines?: MatchLine[] | null; invoices?: MatchableInvoice[] | null; truncated?: boolean };
+  const body = (data ?? {}) as {
+    lines?: MatchLine[] | null;
+    invoices?: MatchableInvoice[] | null;
+    truncated?: boolean;
+    skipped_invoices?: number | null;
+  };
   return {
     lines: (body.lines ?? []).map((l) => ({
       ...l,
@@ -452,12 +479,14 @@ async function loadMatchInputRpc(db: SupabaseClient, clientId: string, deadline:
       match_status: 'unmatched' as const,
       matched_invoice_id: null,
       rejected_invoice_ids: l.rejected_invoice_ids ?? [],
+      blocked: l.blocked === true,
     })),
     invoices: (body.invoices ?? []).map((i) => ({
       ...i,
       total_amount: i.total_amount == null ? null : Number(i.total_amount),
     })),
     truncated: body.truncated === true,
+    skippedInvoices: Number(body.skipped_invoices ?? 0),
   };
 }
 
@@ -509,6 +538,7 @@ async function loadMatchInputFallback(db: SupabaseClient, clientId: string, dead
     lines: lines.map((l) => ({ ...l, amount: Number(l.amount), rejected_invoice_ids: l.rejected_invoice_ids ?? [] })),
     invoices: invoices.filter((i) => !used.has(i.id)),
     truncated: false,
+    skippedInvoices: 0,
   };
 }
 
@@ -578,13 +608,15 @@ async function applyMatches(
 export async function runAutoMatch(db: SupabaseClient, clientId: string, options: AutoMatchOptions = {}): Promise<MatchRunResult> {
   const { deadline, preferBatchId } = options;
   try {
-    const input = (await loadMatchInputRpc(db, clientId, deadline)) ?? (await loadMatchInputFallback(db, clientId, deadline));
+    const input =
+      (await loadMatchInputRpc(db, clientId, deadline, preferBatchId)) ?? (await loadMatchInputFallback(db, clientId, deadline));
     if (input.truncated) {
-      // Without every candidate line the "clear favourite among all competing lines" rule can't be
-      // checked, so nothing is matched rather than risking a wrong pair. Reported as truncated, not
-      // just incomplete: another run would stop at the same place.
-      console.warn(`[bank] Auto-match for client ${clientId}: more than ${MAX_MATCH_LINES} candidate lines - skipped`);
-      return { matched: 0, ambiguous: 0, complete: false, truncated: true };
+      // The left-out invoices are not in the input and the lines that are also theirs are blocked
+      // (kept as rivals, never matched), so every pair below still saw all of its competitors.
+      // Reported as truncated, not just incomplete: another run would leave out the same invoices.
+      console.warn(
+        `[bank] Auto-match for client ${clientId}: ${input.skippedInvoices} invoice(s) with too many candidate lines left out`
+      );
     }
     const result = autoMatch(input.lines, input.invoices);
     let matches = result.matches;
@@ -593,7 +625,12 @@ export async function runAutoMatch(db: SupabaseClient, clientId: string, options
       matches = [...matches.filter((m) => inBatch.has(m.transactionId)), ...matches.filter((m) => !inBatch.has(m.transactionId))];
     }
     const applied = await applyMatches(db, clientId, matches, deadline);
-    return { matched: applied.matched, ambiguous: Object.keys(result.ambiguous).length, complete: applied.complete };
+    return {
+      matched: applied.matched,
+      ambiguous: Object.keys(result.ambiguous).length,
+      complete: applied.complete,
+      ...(input.truncated ? { truncated: true, skippedInvoices: input.skippedInvoices } : {}),
+    };
   } catch (err) {
     if (err instanceof DeadlineError) return { matched: 0, ambiguous: 0, complete: false };
     throw err;
@@ -641,10 +678,100 @@ async function loadMatchedInvoices(db: SupabaseClient, clientId: string, ids: st
   return result;
 }
 
+const OVERVIEW_RPC = 'bank_overview';
+const MISSING_LINES_RPC = 'bank_missing_lines';
+/** Lines per export call (~120 bytes each -> well under the response limit). */
+export const MISSING_EXPORT_PAGE_SIZE = 5000;
+
+/** Candidates, page invoices and the picker's list for one page of lines. */
+async function pageDetails(
+  db: SupabaseClient,
+  clientId: string,
+  rows: BankTransaction[],
+  matchable: MatchableInvoice[],
+  used: Set<string>
+): Promise<Pick<BankOverview, 'invoices' | 'available' | 'candidates'>> {
+  const invoicesById = new Map<string, MatchableInvoice>(matchable.map((i) => [i.id, i]));
+  const candidates: Record<string, string[]> = {};
+  const pageInvoiceIds = new Set<string>();
+  for (const txn of rows) {
+    if (txn.matched_invoice_id) pageInvoiceIds.add(txn.matched_invoice_id);
+    if (!isMatchableDebit(txn)) continue;
+    const list = findCandidates(txn, matchable, used);
+    if (list.length > 0) candidates[txn.id] = list.slice(0, MAX_CANDIDATES).map((c) => c.invoiceId);
+  }
+  // Safety net: a matched invoice that is no longer approved/exported (the DB trigger releases
+  // those lines, see migration 20261030163000) is still shown, never offered for a new match.
+  const missingIds = [...pageInvoiceIds].filter((id) => !invoicesById.has(id));
+  if (missingIds.length > 0) {
+    for (const inv of await loadMatchedInvoices(db, clientId, missingIds)) invoicesById.set(inv.id, inv);
+  }
+  // Candidates are always free matchable invoices, so they are in `available`.
+  const available = matchable.filter((i) => !used.has(i.id));
+  const invoices = [...pageInvoiceIds]
+    .map((id) => invoicesById.get(id))
+    .filter((i): i is MatchableInvoice => !!i);
+  return { invoices, available, candidates };
+}
+
+interface OverviewRpcBody extends BankLinesPage {
+  summary?: BankSummary;
+  /** Approved/exported invoices of the client, fields as toMatchableInvoice() returns them. */
+  matchable?: MatchableInvoice[];
+  /** The ones of `matchable` already matched to a line. */
+  used_invoice_ids?: string[];
+}
+
+/**
+ * Preferred path: bank_overview() (migration 20261031100000) filters, sorts, pages, counts and
+ * summarizes in SQL and returns the slim matchable invoices in the same call, so the cost no
+ * longer grows with the client's total line count. Returns null when it isn't deployed yet.
+ */
+async function loadBankOverviewRpc(
+  db: SupabaseClient,
+  clientId: string,
+  query: BankListQuery,
+  linesOnly: boolean
+): Promise<BankOverview | null> {
+  if (typeof db.rpc !== 'function') return null;
+  const { data, error } = await db.rpc(OVERVIEW_RPC, {
+    p_client_id: clientId,
+    p_mode: query.mode,
+    p_status: query.status,
+    p_account: query.account,
+    p_search: query.search,
+    p_page: query.page,
+    p_page_size: query.pageSize,
+    p_details: !linesOnly,
+  });
+  if (isMissingFunction(error)) return null;
+  throwDbError(error, 'load bank overview');
+  const body = (data ?? {}) as Partial<OverviewRpcBody>;
+  const lines: BankLinesPage = {
+    transactions: (body.transactions ?? []).map(toTransaction),
+    total: Number(body.total ?? 0),
+    page: Number(body.page ?? 1),
+    pageSize: Number(body.pageSize ?? query.pageSize),
+    totalPages: Number(body.totalPages ?? 1),
+  };
+  if (linesOnly) {
+    return { ...lines, summary: summarizeBankTransactions([]), invoices: [], available: [], candidates: {} };
+  }
+  const matchable = (body.matchable ?? []).map((i) => ({
+    ...i,
+    total_amount: i.total_amount == null ? null : Number(i.total_amount),
+  }));
+  const used = new Set(body.used_invoice_ids ?? []);
+  const summary: BankSummary = { ...summarizeBankTransactions([]), ...(body.summary ?? {}) };
+  summary.missingSum = Number(summary.missingSum);
+  return { ...lines, summary, ...(await pageDetails(db, clientId, lines.transactions, matchable, used)) };
+}
+
 /**
  * Summary over all lines + one filtered page of lines with the invoices / candidates it needs.
- * The response size no longer grows with the number of lines (only with the page size).
- * `linesOnly` skips invoices, candidates and the summary (paged export of the missing list).
+ * The response size doesn't grow with the number of lines (only with the page size), and with
+ * bank_overview() deployed neither does the work: everything but the page's candidates runs in SQL.
+ * `linesOnly` skips invoices, candidates and the summary.
  */
 export async function loadBankOverview(
   db: SupabaseClient,
@@ -652,6 +779,10 @@ export async function loadBankOverview(
   query: BankListQuery,
   options: { linesOnly?: boolean } = {}
 ): Promise<BankOverview> {
+  const viaRpc = await loadBankOverviewRpc(db, clientId, query, options.linesOnly === true);
+  if (viaRpc) return viaRpc;
+
+  // Fallback (mock DB / function not deployed): every line loaded and filtered here.
   const [transactions, matchable] = await Promise.all([
     loadTransactions(db, clientId),
     loadMatchableInvoices(db, clientId),
@@ -659,8 +790,7 @@ export async function loadBankOverview(
 
   const used = usedInvoiceIds(transactions);
   const invoicesById = new Map<string, MatchableInvoice>(matchable.map((i) => [i.id, i]));
-  // Safety net: a matched invoice that is no longer approved/exported (the DB trigger releases
-  // those lines, see migration 20261030163000) is still shown, never offered for a new match.
+  // Matched invoices that aren't matchable any more: searchable by supplier / number too.
   const missingIds = [...used].filter((id) => !invoicesById.has(id));
   if (missingIds.length > 0) {
     for (const inv of await loadMatchedInvoices(db, clientId, missingIds)) invoicesById.set(inv.id, inv);
@@ -678,23 +808,61 @@ export async function loadBankOverview(
   if (options.linesOnly) {
     return { ...lines, summary: summarizeBankTransactions([]), invoices: [], available: [], candidates: {} };
   }
+  return {
+    ...lines,
+    summary: summarizeBankTransactions(transactions),
+    ...(await pageDetails(db, clientId, page.rows, matchable, used)),
+  };
+}
 
-  const candidates: Record<string, string[]> = {};
-  const pageInvoiceIds = new Set<string>();
-  for (const txn of page.rows) {
-    if (txn.matched_invoice_id) pageInvoiceIds.add(txn.matched_invoice_id);
-    if (!isMatchableDebit(txn)) continue;
-    const list = findCandidates(txn, matchable, used);
-    if (list.length > 0) candidates[txn.id] = list.slice(0, MAX_CANDIDATES).map((c) => c.invoiceId);
+/** One line of the missing-invoices export (the sheet's columns). */
+export type MissingExportLine = Pick<BankTransaction, 'id' | 'txn_date' | 'account_label' | 'description' | 'reference' | 'amount'>;
+
+export interface MissingExportPage {
+  lines: MissingExportLine[];
+  /** Pass as `after` for the next page; null = this was the last page. */
+  next: string | null;
+}
+
+/**
+ * One page of the client's unmatched debits for the missing-invoices export, keyset paged by id
+ * (bank_missing_lines(), an index range scan per call). Fallback when it isn't deployed: the
+ * unmatched debits are loaded and the page cut here.
+ */
+export async function loadMissingExportPage(
+  db: SupabaseClient,
+  clientId: string,
+  after: string | null,
+  limit: number = MISSING_EXPORT_PAGE_SIZE
+): Promise<MissingExportPage> {
+  const size = Math.max(1, Math.min(MISSING_EXPORT_PAGE_SIZE, Math.floor(limit)));
+  let rows: MissingExportLine[] | null = null;
+  if (typeof db.rpc === 'function') {
+    const { data, error } = await db.rpc(MISSING_LINES_RPC, { p_client_id: clientId, p_after: after, p_limit: size });
+    if (!isMissingFunction(error)) {
+      throwDbError(error, 'load missing lines');
+      rows = (Array.isArray(data) ? data : []) as MissingExportLine[];
+    }
   }
-
-  // Candidates are always free matchable invoices, so they are in `available`.
-  const available = matchable.filter((i) => !used.has(i.id));
-  const invoices = [...pageInvoiceIds]
-    .map((id) => invoicesById.get(id))
-    .filter((i): i is MatchableInvoice => !!i);
-
-  return { ...lines, summary: summarizeBankTransactions(transactions), invoices, available, candidates };
+  if (rows === null) {
+    const all = await selectAll<MissingExportLine>(
+      () =>
+        db
+          .from(TABLE)
+          .select('id, txn_date, account_label, description, reference, amount')
+          .eq('client_id', clientId)
+          .eq('match_status', 'unmatched')
+          .lt('amount', 0)
+          .order('id'),
+      'load missing lines'
+    );
+    rows = all
+      .filter((r) => after === null || r.id > after)
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .slice(0, size);
+  }
+  const lines = rows.map((r) => ({ ...r, amount: Number(r.amount) }));
+  return { lines, next: lines.length === size ? lines[lines.length - 1].id : null };
 }
 
 /**

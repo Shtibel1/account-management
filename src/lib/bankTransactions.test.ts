@@ -90,12 +90,45 @@ test('stops between apply chunks at the deadline', async () => {
   assert.equal(calls.filter((c) => c.fn === 'apply_bank_auto_matches').length, 1);
 });
 
-test('too many candidate lines: nothing is matched, reported truncated (not "click again")', async () => {
+test('too many candidate lines: the selected invoices are still matched, blocked lines never', async () => {
   const calls: Call[] = [];
-  const db = rpcDb({ lines: [line('t-1', -100, '2026-09-05', 'x')], invoices: [invoice('i-1', 100, '2026-09-01', 'x')], truncated: true }, calls);
+  const db = rpcDb(
+    {
+      lines: [
+        line('t-1', -100, '2026-09-05', 'סופר פארם'),
+        // Also a candidate of a left-out invoice: only a rival in this run
+        { ...line('t-2', -200, '2026-09-05', 'חברת חשמל'), blocked: true },
+      ],
+      invoices: [invoice('i-1', 100, '2026-09-01', 'סופר-פארם'), invoice('i-2', 200, '2026-09-01', 'חברת החשמל')],
+      truncated: true,
+      skipped_invoices: 2,
+    },
+    calls
+  );
+  const result = await runAutoMatch(db, 'client-1', { deadline: Date.now() + 20_000, preferBatchId: BATCH });
+  assert.deepEqual(result, { matched: 1, ambiguous: 1, complete: true, truncated: true, skippedInvoices: 2 });
+  assert.deepEqual(calls.map((c) => c.fn), ['bank_auto_match_input', 'apply_bank_auto_matches']);
+  // Capped per invoice, and the batch just imported is preferred when the budget runs out
+  assert.equal(calls[0].args.p_max_per_invoice, 100);
+  assert.equal(calls[0].args.p_prefer_batch_id, BATCH);
+  assert.deepEqual(calls[1].args.p_matches, [{ transaction_id: 't-1', invoice_id: 'i-1' }]);
+});
+
+test('a blocked line still competes: its rival is not matched when it is no clear favourite', async () => {
+  const calls: Call[] = [];
+  const db = rpcDb(
+    {
+      lines: [line('t-1', -100, '2026-09-05', 'ספק'), { ...line('t-2', -100, '2026-09-04', 'ספק'), blocked: true }],
+      invoices: [invoice('i-1', 100, '2026-09-01', 'ספק')],
+      truncated: true,
+      skipped_invoices: 1,
+    },
+    calls
+  );
   const result = await runAutoMatch(db, 'client-1', { deadline: Date.now() + 20_000 });
-  assert.deepEqual(result, { matched: 0, ambiguous: 0, complete: false, truncated: true });
-  assert.deepEqual(calls.map((c) => c.fn), ['bank_auto_match_input']);
+  assert.equal(result.matched, 0);
+  assert.equal(result.truncated, true);
+  assert.equal(result.complete, true);
 });
 
 test('fallback without the RPCs: loads unmatched debits only and updates one by one', async () => {

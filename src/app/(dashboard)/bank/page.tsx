@@ -15,13 +15,14 @@ import {
   bankTransactionAction,
   BankOverviewResponse,
   BankRequestError,
-  fetchAllBankLines,
   fetchBankOverview,
+  fetchMissingBankLines,
   runBankAutoMatch,
 } from '@/lib/api';
 import { downloadMissingInvoicesXlsx } from '@/lib/exporters/missingInvoices';
 import { DEFAULT_BANK_PAGE_SIZE, summarizeBankTransactions } from '@/shared/bankOverview';
 import { clientDisplayNames } from '@/shared/clientLabels';
+import { bankMatchSkippedNote } from '@/shared/bankMatch';
 
 const EMPTY: BankOverviewResponse = {
   transactions: [],
@@ -151,17 +152,14 @@ export default function BankPage() {
     setMatching(true);
     try {
       const result = await runBankAutoMatch(clientId);
-      // Too many candidate lines: nothing was matched and another click would stop at the same place
-      if (result.truncated) {
-        toast('ההתאמה האוטומטית לא הורצה כי יש יותר מדי תנועות פתוחות שעשויות להתאים לחשבוניות. יש להתאים אותן ידנית.', 'info');
-      } else {
-        toast(
-          result.matched > 0 ? `הותאמו ${result.matched} תנועות נוספות` : 'לא נמצאו התאמות חדשות',
-          result.matched > 0 ? 'success' : 'info'
-        );
-      }
+      toast(
+        result.matched > 0 ? `הותאמו ${result.matched} תנועות נוספות` : 'לא נמצאו התאמות חדשות',
+        result.matched > 0 ? 'success' : 'info'
+      );
+      // Invoices with too many candidate lines were left out; another click leaves out the same ones
+      if (result.truncated) toast(bankMatchSkippedNote(result.skippedInvoices), 'info');
       // The run is bounded by a deadline (large statements): another click continues it
-      if (!result.truncated && result.complete === false) toast('ההתאמה האוטומטית הושלמה חלקית בגלל מגבלת זמן - לחצו שוב להמשך', 'info');
+      if (result.complete === false) toast('ההתאמה האוטומטית הושלמה חלקית בגלל מגבלת זמן - לחצו שוב להמשך', 'info');
       await load();
     } catch (err) {
       console.error('[bank] Auto-match failed:', err);
@@ -174,8 +172,8 @@ export default function BankPage() {
   const handleExportMissing = async () => {
     setExporting(true);
     try {
-      // Every missing line, not just the page on screen (fetched page by page).
-      const missing = await fetchAllBankLines(clientId, { mode: 'missing' });
+      // Every missing line, not just the page on screen (fetched page by page, sheet columns only).
+      const missing = await fetchMissingBankLines(clientId);
       await downloadMissingInvoicesXlsx(missing, clientName);
     } catch (err) {
       console.error('[bank] Missing invoices export failed:', err);
