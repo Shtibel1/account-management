@@ -69,3 +69,5 @@ select
 from reviewed
 group by supplier_vat_id
 order by reviewed_invoices desc;
+
+grant select on public.field_accuracy, public.supplier_accuracy to anon, authenticated, service_role;
