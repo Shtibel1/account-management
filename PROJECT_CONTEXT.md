@@ -4,6 +4,7 @@ Welcome! This document serves as the source of truth for the codebase architectu
 
 ### 📚 Detailed Reference Guides
 - [Database Schema (docs/db_schema.md)](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/docs/db_schema.md): Detailed schemas, tables, relationships, and JSONB formats.
+- [Supplier Rules & Auto-Approve (docs/supplier_automation.md)](docs/supplier_automation.md): Per-supplier defaults, precedence, auto-approve eligibility and opt-in.
 - [Coding Standards & AI Guidelines (docs/coding_standards.md)](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/docs/coding_standards.md): Mandatory conventions, type-safety, import rules, and Git commit guidelines.
 
 ---
@@ -47,7 +48,7 @@ The processing pipeline is defined in [supervisor/index.ts](file:///c:/Users/nad
 2. **`preprocess`:** Run Google Vision OCR. If a multi-page PDF contains multiple invoices, Claude Haiku detects split boundaries. The PDF is split, parts are uploaded, and child pipelines are triggered.
 3. **`extract`:** Use Claude 3.5 Sonnet with a tool-use definition (`save_invoice_data`) to extract invoice fields and bounding box coordinates (bboxes).
 4. **`validate`:** Run calculations, Luhn checksum for Israeli VAT IDs (H.P.), whitelist category checks, database duplication checks, and composed VAT ID identification (from the invoice, supplier table, and Gov.il API web search).
-5. **`save_review` / `save_success`:** Invoices currently route to `save_review` since manual review is forced (`requires_manual_review: true` in validation). The status becomes `review` and execution interrupts.
+5. **`save_review` / `save_success`:** Invoices route to `save_review` (status `review`, execution interrupts) unless the client opted the supplier into auto-approve and every validation check passed; then `save_success` approves it without `reviewed_at`. Both nodes write the AI output to `extracted_data` and the AI output + supplier-rule defaults to `validated_data`. See [docs/supplier_automation.md](docs/supplier_automation.md).
 6. **`approval`:** When a human reviews the invoice, the client-side invokes `resumeApproval` to update the state graph with modified values and finishes the graph.
 
 ---

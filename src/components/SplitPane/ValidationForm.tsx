@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from 'react';
 import { ExtractedData, Invoice, AccountMapping } from '@/shared/types';
-import { approveInvoice } from '@/lib/api';
+import { approveInvoice, reapplySupplierRules } from '@/lib/api';
 import { allocationThreshold, isAllocationNumberWellFormed, isAllocationRequired } from '@/shared/allocation';
+import { findSupplierRule, normalizeVatId, VARIOUS_SUPPLIERS_ACCOUNT } from '@/shared/supplierRules';
 import { createClient } from '@/utils/supabase/client';
 import clsx from 'clsx';
-import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark } from 'lucide-react';
+import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark, Zap } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
 
 interface Props {
@@ -33,6 +34,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const [categoryMappingKeys, setCategoryMappingKeys] = useState<string[] | null>(null);
   const [supplierCode, setSupplierCode] = useState('');
   const [categoryCode, setCategoryCode] = useState('');
+  const [saveCategoryAsDefault, setSaveCategoryAsDefault] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
 
   const [webSearchVat, setWebSearchVat] = useState<string | null>(
@@ -70,13 +72,14 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   useEffect(() => {
     if (supplierMappingKeys === null || isInitialized) return;
 
-    const originalName = invoice.extracted_data?.supplier_name;
-    const mapping = dbMappings.find(
-      (m) => m.mapping_type === 'supplier' && m.key === originalName
-    );
+    // Supplier rule: matched by VAT ID first, then by the name the AI read
+    const mapping = findSupplierRule(dbMappings, {
+      supplier_name: invoice.extracted_data?.supplier_name,
+      supplier_vat_id: initial?.supplier_vat_id,
+    });
 
     if (mapping) {
-      if (mapping.account_code === '3499') {
+      if (mapping.account_code === VARIOUS_SUPPLIERS_ACCOUNT) {
         setData((prev) => ({
           ...prev,
           supplier_name: 'ספקים שונים',
@@ -97,7 +100,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
       setSupplierCode('3499');
     }
     setIsInitialized(true);
-  }, [dbMappings, supplierMappingKeys, invoice.extracted_data?.supplier_name, isInitialized]);
+  }, [dbMappings, supplierMappingKeys, invoice.extracted_data?.supplier_name, initial?.supplier_vat_id, isInitialized]);
 
   useEffect(() => {
     if (!data.supplier_name) return;
@@ -169,16 +172,17 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
 
   const originalSupplierName = invoice.extracted_data?.supplier_name || '';
 
-  const originalSupplierMapping = dbMappings.find(
-    (m) => m.mapping_type === 'supplier' && m.key === originalSupplierName
-  );
+  const originalSupplierMapping = findSupplierRule(dbMappings, {
+    supplier_name: originalSupplierName,
+    supplier_vat_id: initial?.supplier_vat_id,
+  }) ?? undefined;
 
   const isVariousSuppliers = supplierMappingKeys !== null && (
-    !originalSupplierMapping || originalSupplierMapping.account_code === '3499'
+    !originalSupplierMapping || originalSupplierMapping.account_code === VARIOUS_SUPPLIERS_ACCOUNT
   );
 
   const isKnownSupplier = supplierMappingKeys !== null &&
-    !!originalSupplierMapping && originalSupplierMapping.account_code !== '3499';
+    !!originalSupplierMapping && originalSupplierMapping.account_code !== VARIOUS_SUPPLIERS_ACCOUNT;
 
   const supplierStatus: SupplierStatus = supplierMappingKeys === null
     ? 'loading'
@@ -191,6 +195,14 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const flags = initial?.validation_flags;
   const mathOk = flags?.math_ok ?? true;
   const warnings = flags?.warnings ?? [];
+
+  // Supplier rule (account_mappings) defaults: show which value came from the rule, and offer to
+  // make the reviewer's category the supplier's default.
+  const ruleCategory = initial?.supplier_rule?.applied?.expense_category ?? null;
+  const isCategoryFromRule = !!ruleCategory && data.expense_category === ruleCategory;
+  const canSaveCategoryAsDefault =
+    isKnownSupplier && !!data.expense_category &&
+    data.expense_category !== (originalSupplierMapping?.expense_category ?? null);
 
   const set = (key: keyof ExtractedData, value: any) =>
     setData((prev) => ({ ...prev, [key]: value }));
@@ -271,15 +283,32 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
     setSaving(true); setError('');
     try {
       const originalName = invoice.extracted_data?.supplier_name;
-      const mappingExists = dbMappings.some(
-        (m) => m.mapping_type === 'supplier' && m.key === originalName
-      );
-      if (supplierStatus === 'unknown' && supplierCode.trim() && originalName && !mappingExists) {
-        await supabase.from('account_mappings').insert({
+      const supplierVatId = normalizeVatId(data.supplier_vat_id);
+      // Supplier rules created / changed here are re-applied to the client's other invoices in review
+      const changedRules: { name: string | null; vatId: string | null }[] = [];
+      if (supplierStatus === 'unknown' && supplierCode.trim() && originalName && !originalSupplierMapping) {
+        const accountCode = supplierCode.trim();
+        const { error: insertErr } = await supabase.from('account_mappings').insert({
           client_id: invoice.client_id,
           mapping_type: 'supplier',
           key: originalName,
-          account_code: supplierCode.trim(),
+          account_code: accountCode,
+          vat_id: supplierVatId,
+          // A catch-all supplier gets no default category from a single invoice
+          expense_category: accountCode !== VARIOUS_SUPPLIERS_ACCOUNT ? data.expense_category || null : null,
+        });
+        if (insertErr) throw insertErr;
+        changedRules.push({ name: originalName, vatId: supplierVatId });
+      }
+      if (saveCategoryAsDefault && canSaveCategoryAsDefault && originalSupplierMapping) {
+        const { error: updateErr } = await supabase
+          .from('account_mappings')
+          .update({ expense_category: data.expense_category })
+          .eq('id', originalSupplierMapping.id);
+        if (updateErr) throw updateErr;
+        changedRules.push({
+          name: originalSupplierMapping.key,
+          vatId: normalizeVatId(originalSupplierMapping.vat_id) ?? supplierVatId,
         });
       }
       if (categoryStatus === 'unknown' && categoryCode.trim() && data.expense_category) {
@@ -324,8 +353,20 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
         };
       }
 
-      await approveInvoice(invoice.id, updatedData);
+      const approval = await approveInvoice(invoice.id, updatedData);
       toast('החשבונית אושרה בהצלחה', 'success');
+      if (approval?.autoApproveDisabled) {
+        toast('האישור האוטומטי לספק זה כובה בעקבות התיקונים', 'info');
+      }
+
+      if (changedRules.length > 0) {
+        try {
+          const { updated } = await reapplySupplierRules(invoice.client_id, changedRules);
+          if (updated > 0) toast(`כלל הספק הוחל על ${updated} חשבוניות נוספות הממתינות לבדיקה`, 'info');
+        } catch (reapplyErr) {
+          console.error('[ValidationForm] Failed to re-apply supplier rule to invoices in review:', reapplyErr);
+        }
+      }
       onApproved();
     } catch (e: any) {
       setError(e.message);
@@ -391,6 +432,23 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
       </div>
 
       {/* Alerts */}
+      {flags?.auto_approved && (
+        <div className="mx-4 mt-3 flex items-center gap-2.5 p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-sm text-emerald-800">
+          <Zap className="h-4 w-4 shrink-0" />
+          אושרה אוטומטית — הספק מוגדר לאישור אוטומטי וכל הבדיקות עברו
+        </div>
+      )}
+      {!flags?.auto_approved && (flags?.auto_approve_blockers?.length ?? 0) > 0 && (
+        <div className="mx-4 mt-3 flex items-start gap-2.5 p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700">
+          <Zap className="h-4 w-4 shrink-0 mt-0.5 text-slate-400" />
+          <div>
+            <p className="font-medium">הספק מוגדר לאישור אוטומטי, אך החשבונית הועברה לבדיקה:</p>
+            <ul className="list-disc pr-4 mt-1 text-xs text-slate-600 space-y-0.5">
+              {flags?.auto_approve_blockers?.map((b, i) => <li key={i}>{b}</li>)}
+            </ul>
+          </div>
+        </div>
+      )}
       {!mathOk && (
         <div className="mx-4 mt-3 flex items-center gap-2.5 p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
           <AlertCircle className="h-4 w-4 shrink-0" />
@@ -731,7 +789,13 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             )}
             {isAllocationMalformed && <p className="text-xs text-amber-700">מספר הקצאה אמור להיות 9 ספרות — אנא ודא</p>}
 
-            <Field label="קטגוריית הוצאה" error={fieldError('expense_category')} fieldKey="expense_category" onFieldFocus={onFieldFocus}>
+            <Field label="קטגוריית הוצאה" error={fieldError('expense_category')} fieldKey="expense_category" onFieldFocus={onFieldFocus}
+              badge={isCategoryFromRule
+                ? <span className="flex items-center gap-1 text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full font-medium" title="ברירת המחדל שהוגדרה לספק במיפוי החשבונות">
+                    <CheckCircle2 className="h-3 w-3" /> לפי כלל ספק
+                  </span>
+                : null}
+            >
               <select
                 className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', fieldError('expense_category') && 'input-error')}
                 value={data.expense_category ?? ''}
@@ -744,6 +808,17 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                 {categories.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
             </Field>
+            {canSaveCategoryAsDefault && !isReadOnly && (
+              <label className="flex items-center gap-2 -mt-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700 cursor-pointer animate-in fade-in duration-200">
+                <input
+                  type="checkbox"
+                  className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                  checked={saveCategoryAsDefault}
+                  onChange={(e) => setSaveCategoryAsDefault(e.target.checked)}
+                />
+                שמור כקטגוריית ברירת המחדל של הספק (יוחל גם על חשבוניות הספק הממתינות לבדיקה)
+              </label>
+            )}
             {categoryStatus === 'unknown' && data.expense_category && !isReadOnly && (
               <div className="flex items-center gap-2 -mt-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg animate-in fade-in duration-200">
                 <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />

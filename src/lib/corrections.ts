@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { ExtractedData } from '@/shared/types';
+import { systemProposal } from '@/shared/supplierRules';
 
 // Keep in sync with the field list in the field_accuracy view (supabase/migrations).
 export const TRACKED_FIELDS = [
@@ -56,6 +57,8 @@ export function diffCorrections(
 
 /**
  * Replaces the correction rows for an invoice (idempotent on re-approval) and marks it reviewed.
+ * Diffs against what the system proposed (AI output + supplier rule values), so accepting a
+ * supplier-rule default is not counted as a correction.
  * Never throws: logging corrections must not block an approval.
  */
 export async function recordCorrections(
@@ -66,12 +69,12 @@ export async function recordCorrections(
   try {
     const { data: invoice, error } = await db
       .from('invoices')
-      .select('client_id, extracted_data')
+      .select('client_id, extracted_data, validated_data')
       .eq('id', invoiceId)
       .single();
     if (error || !invoice) throw error ?? new Error('Invoice not found');
 
-    const corrections = diffCorrections(invoice.extracted_data, approvedData);
+    const corrections = diffCorrections(systemProposal(invoice.extracted_data, invoice.validated_data), approvedData);
     const supplierVatId = normalize(approvedData.supplier_vat_id ?? invoice.extracted_data?.supplier_vat_id);
 
     await db.from('invoice_corrections').delete().eq('invoice_id', invoiceId);

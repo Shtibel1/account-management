@@ -50,3 +50,6 @@ export interface ValidationResult {
   - Flags negative amounts as credit notes.
 - **Manual Review Trigger:**
   - If `requires_manual_review` is true, the supervisor will route the graph to the HITL approval state.
+  - `requires_manual_review` is false ONLY when the client opted the supplier (by VAT ID) into auto-approve (`supplier_automation.auto_approve`) AND math/VAT ID are OK, no fields are missing, no rule violations, no duplicate (and the duplicate check actually ran), the document is an invoice and the amounts were not auto-corrected. Otherwise it is true, and for an opted-in supplier the reasons go to `auto_approve_blockers`. See `docs/supplier_automation.md`.
+- **Supplier Rules:**
+  - The supplier's rule (`account_mappings`, type `supplier`, matched by VAT ID then name) is applied before the supplier-name / category checks; its values go to `validated_data` only (via the `supplierRule` graph channel), never `extracted_data`.

@@ -1,4 +1,4 @@
-import type { ExtractedData } from '@/shared/types';
+import type { ExtractedData, SupplierAutomation, SupplierAutomationStatus } from '@/shared/types';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -115,6 +115,45 @@ export async function approveInvoice(id: string, validatedData: Partial<Extracte
     body: JSON.stringify({ validated_data: validatedData }),
   });
   if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+/** Re-applies supplier rules to the client's invoices still in review. Omit suppliers to re-apply to all. */
+export async function reapplySupplierRules(
+  clientId: string,
+  suppliers?: { name?: string | null; vatId?: string | null }[]
+): Promise<{ checked: number; updated: number }> {
+  const res = await fetch(`${API_URL}/api/suppliers/rules/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientId, suppliers }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function fetchSupplierAutomation(
+  clientId: string
+): Promise<{ historySize: number; suppliers: SupplierAutomationStatus[] }> {
+  const res = await fetch(`${API_URL}/api/suppliers/automation?clientId=${encodeURIComponent(clientId)}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function setSupplierAutoApprove(
+  clientId: string,
+  supplierVatId: string,
+  autoApprove: boolean
+): Promise<SupplierAutomation> {
+  const res = await fetch(`${API_URL}/api/suppliers/automation`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientId, supplierVatId, autoApprove }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? 'שגיאה בעדכון האישור האוטומטי');
+  }
   return res.json();
 }
 

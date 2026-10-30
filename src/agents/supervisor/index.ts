@@ -5,6 +5,7 @@ import { extractInvoiceData } from '../extraction';
 import { validateInvoice } from '../validation';
 import { approvalNode } from '../approval';
 import { supabase } from '@/lib/supabase';
+import { withSupplierRule } from '@/shared/supplierRules';
 import { PDFDocument } from 'pdf-lib';
 
 function parseNumber(text: string): number | null {
@@ -295,6 +296,7 @@ const graph = new StateGraph<any>({
     ocrWords:         { value: (a: any, b: any) => b ?? a, default: () => null },
     extractedData:    { value: (a: any, b: any) => b ?? a, default: () => null },
     validationResult: { value: (a: any, b: any) => b ?? a, default: () => null },
+    supplierRule:     { value: (a: any, b: any) => (b === undefined ? a : b), default: () => null },
     retryCount:       { value: (a: number, b: number) => b ?? a, default: () => 0 },
     status:           { value: (a: any, b: any) => b ?? a, default: () => 'processing' },
     error:            { value: (a: any, b: any) => b ?? a, default: () => null },
@@ -509,14 +511,14 @@ const graph = new StateGraph<any>({
     if (!state.extractedData || !state.tenantRules) {
       throw new Error('Missing extraction data or rules for validation');
     }
-    const { data: validated, validationResult } = await validateInvoice(
+    const { data: validated, validationResult, supplierRule } = await validateInvoice(
       state.invoiceId,
       state.tenantId,
       state.extractedData,
       state.tenantRules
     );
     const errorMsg = validationResult.not_an_invoice ? 'המסמך לא זוהה כחשבונית' : null;
-    return { extractedData: validated, validationResult, error: errorMsg };
+    return { extractedData: validated, validationResult, supplierRule, error: errorMsg };
   })
 
   // 5. Save review node (Interrupt point before approval)
@@ -526,9 +528,10 @@ const graph = new StateGraph<any>({
     
     console.log(`[Supervisor] 💾 Saving state: REQUIRES MANUAL REVIEW (Total Cost: $${state.costMetrics.estimatedCostUsd})`);
 
+    // extracted_data stays the AI output; supplier-rule defaults go into validated_data only
     await supabase.from('invoices').update({
       extracted_data: data,
-      validated_data: data,
+      validated_data: data ? withSupplierRule(data, state.supplierRule) : data,
       status: 'review',
       ai_confidence: confidence,
       updated_at: new Date().toISOString(),
@@ -547,9 +550,10 @@ const graph = new StateGraph<any>({
 
     console.log(`[Supervisor] ✅ Saving state: AUTO-APPROVED (Total Cost: $${state.costMetrics.estimatedCostUsd})`);
 
+    // No reviewed_at: auto-approved invoices don't count toward accuracy / auto-approve eligibility
     await supabase.from('invoices').update({
       extracted_data: data,
-      validated_data: data,
+      validated_data: data ? withSupplierRule(data, state.supplierRule) : data,
       status: 'approved',
       ai_confidence: confidence,
       updated_at: new Date().toISOString(),

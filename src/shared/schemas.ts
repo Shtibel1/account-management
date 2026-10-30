@@ -36,6 +36,17 @@ export const ValidationResultSchema = z.object({
   not_an_invoice: z.boolean().optional(),
   allocation_required: z.boolean().optional(),
   vat_id_sources: VatIdSourcesSchema.optional(),
+  auto_approved: z.boolean().optional(),
+  auto_approve_blockers: z.array(z.string()).optional(),
+});
+
+export const SupplierRuleTraceSchema = z.object({
+  mapping_id: z.string().nullable(),
+  applied: z.object({
+    supplier_name: z.string().optional(),
+    expense_category: z.string().optional(),
+  }),
+  applied_at: z.string(),
 });
 
 export const ExtractedDataSchema = z.object({
@@ -50,6 +61,7 @@ export const ExtractedDataSchema = z.object({
   allocation_number: z.string().nullable().optional(),
   validation_flags: ValidationResultSchema.optional(),
   bboxes: BboxMapSchema.optional(),
+  supplier_rule: SupplierRuleTraceSchema.nullable().optional(),
 });
 
 export const TenantRulesSchema = z.object({

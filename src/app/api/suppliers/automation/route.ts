@@ -1,0 +1,50 @@
+import { NextResponse } from 'next/server';
+import { supabase } from '@/lib/supabase';
+import {
+  fetchSupplierAutomationStatus,
+  setSupplierAutoApprove,
+  SupplierNotEligibleError,
+} from '@/lib/supplierAutomation';
+import { AUTO_APPROVE_HISTORY_SIZE } from '@/shared/autoApprove';
+
+/** Auto-approve eligibility + opt-in state for every supplier of a client. */
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const clientId = searchParams.get('clientId');
+  if (!clientId) {
+    return NextResponse.json({ error: 'Missing clientId' }, { status: 400 });
+  }
+
+  try {
+    const suppliers = await fetchSupplierAutomationStatus(supabase, clientId);
+    return NextResponse.json({ historySize: AUTO_APPROVE_HISTORY_SIZE, suppliers });
+  } catch (err) {
+    console.error(`[suppliers/automation] Failed to load auto-approve status for client ${clientId}:`, err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    );
+  }
+}
+
+/** Body: { clientId, supplierVatId, autoApprove }. Turning it on requires an eligible supplier. */
+export async function PUT(request: Request) {
+  try {
+    const body = (await request.json()) as { clientId?: unknown; supplierVatId?: unknown; autoApprove?: unknown };
+    if (typeof body.clientId !== 'string' || typeof body.supplierVatId !== 'string' || typeof body.autoApprove !== 'boolean') {
+      return NextResponse.json({ error: 'Expected { clientId, supplierVatId, autoApprove }' }, { status: 400 });
+    }
+
+    const row = await setSupplierAutoApprove(supabase, body.clientId, body.supplierVatId, body.autoApprove);
+    return NextResponse.json(row);
+  } catch (err) {
+    if (err instanceof SupplierNotEligibleError) {
+      return NextResponse.json({ error: err.message, eligibility: err.eligibility }, { status: 409 });
+    }
+    console.error('[suppliers/automation] Failed to update auto-approve opt-in:', err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    );
+  }
+}

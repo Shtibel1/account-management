@@ -3,6 +3,7 @@ import { compiledGraph } from '@/agents/supervisor';
 import { approvalNode, resumeApproval } from '@/agents/approval';
 import { supabase } from '@/lib/supabase';
 import { recordCorrections } from '@/lib/corrections';
+import { disableAutoApproveAfterCorrections } from '@/lib/supplierAutomation';
 import type { PipelineState } from '@/shared/types';
 
 export async function POST(
@@ -21,6 +22,8 @@ export async function POST(
 
     // Log what the reviewer changed vs. the AI output (before approval overwrites validated_data)
     const corrections = await recordCorrections(supabase, id, validatedData);
+    // A supplier that needed corrections is no longer trusted for auto-approve
+    const autoApproveDisabled = await disableAutoApproveAfterCorrections(supabase, id, validatedData, corrections);
 
     // The MemorySaver checkpoint only lives in this server process; after a restart / on
     // another instance there is nothing to resume, so finalize the approval directly.
@@ -39,6 +42,7 @@ export async function POST(
       success: true,
       message: 'Workflow resumed and completed',
       corrections: corrections.length,
+      autoApproveDisabled,
     });
   } catch (err) {
     console.error(`Error resuming workflow for invoice ${id}:`, err);

@@ -2,9 +2,13 @@
 
 import { useEffect, useState, useRef } from 'react';
 import { createClient } from '@/utils/supabase/client';
-import { AccountMapping, Client, MappingType } from '@/shared/types';
+import { AccountMapping, Client, MappingType, SupplierAutomationStatus } from '@/shared/types';
 import { Button } from '@/components/ui/Button';
-import { Plus, Trash2, Info, Upload, Loader2, X, ChevronLeft, ChevronRight, Users, Tag } from 'lucide-react';
+import { useToast } from '@/components/ui/Toast';
+import { fetchSupplierAutomation, reapplySupplierRules, setSupplierAutoApprove } from '@/lib/api';
+import { normalizeVatId } from '@/shared/supplierRules';
+import { AUTO_APPROVE_HISTORY_SIZE } from '@/shared/autoApprove';
+import { Plus, Trash2, Info, Upload, Loader2, X, ChevronLeft, ChevronRight, Users, Tag, Pencil, Zap } from 'lucide-react';
 import clsx from 'clsx';
 
 function getPageNumbers(currentPage: number, totalPages: number) {
@@ -27,6 +31,7 @@ function getPageNumbers(currentPage: number, totalPages: number) {
 
 export default function MappingsPage() {
   const supabase = createClient();
+  const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   const [clients, setClients] = useState<Client[]>([]);
@@ -48,10 +53,16 @@ export default function MappingsPage() {
   const [vatId, setVatId] = useState('');
   const [expenseCategory, setExpenseCategory] = useState('');
   
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState('');
   const [categories, setCategories] = useState<string[]>([]);
+
+  // Auto-approve eligibility + opt-in per supplier VAT ID
+  const [automation, setAutomation] = useState<Map<string, SupplierAutomationStatus>>(new Map());
+  const [historySize, setHistorySize] = useState(AUTO_APPROVE_HISTORY_SIZE);
+  const [togglingVat, setTogglingVat] = useState<string | null>(null);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
@@ -88,25 +99,97 @@ export default function MappingsPage() {
     ]);
   };
 
+  const loadAutomation = async (clientId: string) => {
+    try {
+      const res = await fetchSupplierAutomation(clientId);
+      setHistorySize(res.historySize);
+      setAutomation(new Map(res.suppliers.map((s) => [s.supplier_vat_id, s])));
+    } catch (err) {
+      console.error('[Mappings] Failed to load auto-approve status:', err);
+      setAutomation(new Map());
+    }
+  };
+
   useEffect(() => {
-    if (selectedClient) loadMappings(selectedClient);
+    if (selectedClient) {
+      loadMappings(selectedClient);
+      loadAutomation(selectedClient);
+    }
   }, [selectedClient]);
+
+  /** Re-applies supplier rules to the client's invoices still in review (validated_data only). */
+  const reapplyRules = async (suppliers?: { name?: string | null; vatId?: string | null }[]) => {
+    try {
+      const { updated } = await reapplySupplierRules(selectedClient, suppliers);
+      if (updated > 0) toast(`כללי הספק הוחלו על ${updated} חשבוניות הממתינות לבדיקה`, 'info');
+    } catch (err) {
+      console.error('[Mappings] Failed to re-apply supplier rules:', err);
+      toast('המיפוי נשמר, אך עדכון החשבוניות הממתינות לבדיקה נכשל', 'error');
+    }
+  };
+
+  const resetForm = () => {
+    setKey(''); setCode(''); setSupplierNumber(''); setVatId(''); setExpenseCategory('');
+    setEditingId(null);
+  };
+
+  const handleEdit = (m: AccountMapping) => {
+    setActiveTab(m.mapping_type);
+    setType(m.mapping_type);
+    setKey(m.key);
+    setCode(m.account_code ?? '');
+    setSupplierNumber(m.supplier_number ?? '');
+    setVatId(m.vat_id ?? '');
+    setExpenseCategory(m.expense_category ?? '');
+    setEditingId(m.id);
+    setShowForm(true);
+  };
 
   const handleAdd = async () => {
     if (!key.trim() || !code.trim()) return;
     setSaving(true);
-    await supabase.from('account_mappings').insert({
-      client_id: selectedClient,
+    const values = {
       mapping_type: type,
       key: key.trim(),
       account_code: code.trim(),
       supplier_number: type === 'supplier' ? supplierNumber.trim() || null : null,
       vat_id: type === 'supplier' ? vatId.trim() || null : null,
       expense_category: type === 'supplier' ? expenseCategory || null : null,
-    });
-    setKey(''); setCode(''); setSupplierNumber(''); setVatId(''); setExpenseCategory('');
-    setShowForm(false); setSaving(false);
-    loadMappings(selectedClient);
+    };
+    const previous = editingId ? mappings.find((m) => m.id === editingId) : undefined;
+    const { error: saveErr } = editingId
+      ? await supabase.from('account_mappings').update(values).eq('id', editingId)
+      : await supabase.from('account_mappings').insert({ client_id: selectedClient, ...values });
+    setSaving(false);
+    if (saveErr) {
+      console.error('[Mappings] Failed to save mapping:', saveErr);
+      toast('שמירת המיפוי נכשלה', 'error');
+      return;
+    }
+    resetForm();
+    setShowForm(false);
+    await loadMappings(selectedClient);
+
+    // A saved / changed supplier rule applies to that supplier's invoices still in review
+    if (values.mapping_type === 'supplier' || previous?.mapping_type === 'supplier') {
+      await reapplyRules([
+        { name: values.key, vatId: values.vat_id },
+        ...(previous ? [{ name: previous.key, vatId: previous.vat_id ?? null }] : []),
+      ]);
+    }
+  };
+
+  const handleToggleAutoApprove = async (vat: string, enabled: boolean) => {
+    setTogglingVat(vat);
+    try {
+      await setSupplierAutoApprove(selectedClient, vat, enabled);
+      toast(enabled ? 'אישור אוטומטי הופעל לספק' : 'אישור אוטומטי כובה לספק', 'success');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'שגיאה בעדכון האישור האוטומטי', 'error');
+    } finally {
+      setTogglingVat(null);
+      loadAutomation(selectedClient);
+    }
   };
 
   const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -248,6 +331,8 @@ export default function MappingsPage() {
           // Refresh mappings
           loadMappings(selectedClient);
           alert(`יובאו בהצלחה ${parsedRows.length} ספקים! (${toInsert.length} חדשים, ${toUpdate.length} עודכנו)`);
+          // Imported rules apply to every invoice still in review
+          reapplyRules();
         } catch (err: any) {
           console.error(err);
           setImportError(err.message || 'שגיאה בפענוח קובץ האקסל');
@@ -265,8 +350,13 @@ export default function MappingsPage() {
   };
 
   const handleDelete = async (id: string) => {
+    const deleted = mappings.find((m) => m.id === id);
     await supabase.from('account_mappings').delete().eq('id', id);
     setMappings((prev) => prev.filter((m) => m.id !== id));
+    // Invoices in review that took values from this rule fall back to another rule or the AI values
+    if (deleted?.mapping_type === 'supplier') {
+      await reapplyRules([{ name: deleted.key, vatId: deleted.vat_id ?? null }]);
+    }
   };
 
   const supplierMappings = mappings.filter((m) => m.mapping_type === 'supplier');
@@ -312,7 +402,7 @@ export default function MappingsPage() {
             accept=".xlsx,.xls,.csv"
             className="hidden"
           />
-          <Button onClick={() => setShowForm(true)} disabled={!selectedClient}>
+          <Button onClick={() => { resetForm(); setShowForm(true); }} disabled={!selectedClient}>
             <Plus className="h-4 w-4" /> הוסף מיפוי
           </Button>
         </div>
@@ -329,6 +419,8 @@ export default function MappingsPage() {
         <Info className="h-4 w-4 shrink-0 mt-0.5 text-blue-500" />
         <div className="space-y-1">
           <p><strong>ספק</strong> — קוד פנימי בתוכנת הנהלת החשבונות (לא ח.פ.). לדוגמה: אופיס דיפו → <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-mono">2340</code></p>
+          <p><strong>כלל ספק</strong> — קטגוריית ברירת המחדל וקוד הכרטיס של הספק ממולאים אוטומטית בחשבוניות שלו (גם בחשבוניות שכבר ממתינות לבדיקה). עריכה ידנית של המבקר בחשבונית גוברת על הכלל.</p>
+          <p><strong>אישור אוטומטי</strong> — ספק שב-{historySize} החשבוניות האחרונות שנבדקו לא נדרש בהן אף תיקון מסומן ככשיר. לאחר הפעלה, חשבוניות שעוברות את כל הבדיקות מאושרות ללא בדיקה ידנית; תיקון בחשבונית של הספק מכבה את האישור האוטומטי.</p>
           <p><strong>יבוא אקסל ספקים</strong> — העלה קובץ עם העמודות הבאות: <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-mono">מספר</code>, <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-mono">שם הספק</code>, <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-mono">מספר תיק מע"מ</code>, <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-mono">מספר כרטיס</code>, <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-mono">שם הוצאה</code>.</p>
         </div>
       </div>
@@ -348,11 +440,11 @@ export default function MappingsPage() {
       {/* Add form */}
       {showForm && (
         <div className="card p-5 space-y-4">
-          <h3 className="font-semibold text-slate-900">מיפוי חדש</h3>
+          <h3 className="font-semibold text-slate-900">{editingId ? 'עריכת מיפוי' : 'מיפוי חדש'}</h3>
           <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1.5">סוג</label>
-              <select value={type} onChange={(e) => setType(e.target.value as MappingType)} className="input-base">
+              <select value={type} onChange={(e) => setType(e.target.value as MappingType)} className="input-base" disabled={!!editingId}>
                 <option value="supplier">ספק</option>
                 <option value="category">קטגוריה</option>
               </select>
@@ -417,7 +509,7 @@ export default function MappingsPage() {
             </Button>
             <Button variant="secondary" onClick={() => {
               setShowForm(false);
-              setKey(''); setCode(''); setSupplierNumber(''); setVatId(''); setExpenseCategory('');
+              resetForm();
             }}>ביטול</Button>
           </div>
         </div>
@@ -489,7 +581,8 @@ export default function MappingsPage() {
                   <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">מספר תיק מע"מ (ח.פ.)</th>
                   <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">מספר כרטיס (קוד)</th>
                   <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">שם הוצאה ברירת מחדל</th>
-                  <th className="px-4 py-2.5 w-10"></th>
+                  <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">אישור אוטומטי</th>
+                  <th className="px-4 py-2.5 w-16"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -508,19 +601,38 @@ export default function MappingsPage() {
                         </span>
                       ) : '-'}
                     </td>
+                    <td className="px-4 py-3">
+                      <AutoApproveCell
+                        vatId={normalizeVatId(m.vat_id)}
+                        status={automation.get(normalizeVatId(m.vat_id) ?? '')}
+                        historySize={historySize}
+                        busy={togglingVat === normalizeVatId(m.vat_id)}
+                        onToggle={handleToggleAutoApprove}
+                      />
+                    </td>
                     <td className="px-4 py-3 text-center">
-                      <button
-                        onClick={() => handleDelete(m.id)}
-                        className="text-slate-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      <div className="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={() => handleEdit(m)}
+                          className="text-slate-300 hover:text-blue-600 transition-colors"
+                          title="עריכה"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => handleDelete(m.id)}
+                          className="text-slate-300 hover:text-red-500 transition-colors"
+                          title="מחיקה"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
                 {paginatedSuppliers.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="px-4 py-12 text-center text-slate-400">
+                    <td colSpan={7} className="px-4 py-12 text-center text-slate-400">
                       {searchQuery ? 'לא נמצאו ספקים העונים לחיפוש' : 'אין מיפוי ספקים מוגדר'}
                     </td>
                   </tr>
@@ -626,7 +738,7 @@ export default function MappingsPage() {
                 <tr className="bg-slate-50 border-b border-slate-100">
                   <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">שם קטגוריה</th>
                   <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">קוד חשבון</th>
-                  <th className="px-4 py-2.5 w-10"></th>
+                  <th className="px-4 py-2.5 w-16"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -637,12 +749,22 @@ export default function MappingsPage() {
                       <code className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded text-xs font-mono">{m.account_code || 'לא הוגדר'}</code>
                     </td>
                     <td className="px-4 py-3">
-                      <button
-                        onClick={() => handleDelete(m.id)}
-                        className="text-slate-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={() => handleEdit(m)}
+                          className="text-slate-300 hover:text-blue-600 transition-colors"
+                          title="עריכה"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => handleDelete(m.id)}
+                          className="text-slate-300 hover:text-red-500 transition-colors"
+                          title="מחיקה"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -664,6 +786,65 @@ export default function MappingsPage() {
         )}
       </div>
 
+    </div>
+  );
+}
+
+function AutoApproveCell({ vatId, status, historySize, busy, onToggle }: {
+  vatId: string | null;
+  status: SupplierAutomationStatus | undefined;
+  historySize: number;
+  busy: boolean;
+  onToggle: (vatId: string, enabled: boolean) => void;
+}) {
+  if (!vatId) {
+    return <span className="text-xs text-slate-400" title="אישור אוטומטי מזוהה לפי ח.פ. הספק">נדרש ח.פ.</span>;
+  }
+
+  const enabled = status?.auto_approve ?? false;
+  const eligible = status?.eligible ?? false;
+  const streak = Math.min(status?.clean_streak ?? 0, historySize);
+  const revertedByCorrections = !enabled && status?.disabled_reason === 'corrections';
+  // Turning it on needs an eligible supplier; turning it off is always allowed
+  const canToggle = !busy && (enabled || eligible);
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        aria-label="אישור אוטומטי"
+        disabled={!canToggle}
+        onClick={() => onToggle(vatId, !enabled)}
+        title={!enabled && !eligible ? `זמין לאחר ${historySize} חשבוניות שנבדקו ברצף ללא תיקונים` : undefined}
+        className={clsx(
+          'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500/30 disabled:cursor-not-allowed disabled:opacity-50',
+          enabled ? 'bg-emerald-500' : 'bg-slate-200'
+        )}
+      >
+        <span
+          className={clsx(
+            'inline-block h-4 w-4 rounded-full bg-white shadow transition-transform',
+            enabled ? '-translate-x-4' : '-translate-x-0.5'
+          )}
+        />
+      </button>
+      {busy ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" />
+      ) : revertedByCorrections ? (
+        <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full" title="תיקון בחשבונית שנבדקה כיבה את האישור האוטומטי">
+          כובה עקב תיקון
+        </span>
+      ) : eligible ? (
+        <span className="flex items-center gap-1 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full font-medium">
+          <Zap className="h-3 w-3" /> כשיר
+        </span>
+      ) : (
+        <span className="text-xs text-slate-500" title="חשבוניות אחרונות שנבדקו ללא תיקונים">
+          {streak}/{historySize} ללא תיקונים
+        </span>
+      )}
     </div>
   );
 }

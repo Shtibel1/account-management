@@ -33,6 +33,20 @@ export interface ExtractedData {
   bank_account?: string | null;
   validation_flags?: ValidationResult;
   bboxes?: BboxMap;
+  supplier_rule?: SupplierRuleTrace | null; // validated_data only: what the supplier rule filled in
+}
+
+// Fields a supplier rule (account_mappings row of type 'supplier') may fill on an invoice.
+export type SupplierRuleField = 'supplier_name' | 'expense_category';
+
+/**
+ * Trace of the supplier rule applied to validated_data. Lets a later re-apply tell rule-filled
+ * values apart from explicit reviewer edits (precedence: reviewer edit > supplier rule > AI).
+ */
+export interface SupplierRuleTrace {
+  mapping_id: string | null;
+  applied: Partial<Record<SupplierRuleField, string>>;
+  applied_at: string;
 }
 
 export interface TenantRules {
@@ -61,6 +75,8 @@ export interface ValidationResult {
   not_an_invoice?: boolean;
   allocation_required?: boolean;
   vat_id_sources?: VatIdSources;
+  auto_approved?: boolean;            // skipped manual review via the supplier auto-approve opt-in
+  auto_approve_blockers?: string[];   // supplier is opted in, but these checks sent it to review
 }
 
 export interface Client {
@@ -81,6 +97,35 @@ export interface AccountMapping {
   expense_category?: string | null;
 }
 
+// Per client+supplier auto-approve opt-in (table supplier_automation), keyed by normalized VAT ID.
+export type AutoApproveDisabledReason = 'manual' | 'corrections';
+
+export interface SupplierAutomation {
+  id: string;
+  client_id: string;
+  supplier_vat_id: string;
+  auto_approve: boolean;
+  enabled_at: string | null;
+  disabled_at: string | null;
+  disabled_reason: AutoApproveDisabledReason | null;
+  disabled_by_invoice_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SupplierEligibility {
+  supplier_vat_id: string;
+  reviewed_count: number;  // human-reviewed invoices (reviewed_at set)
+  clean_streak: number;    // most recent reviewed invoices in a row with zero corrections
+  eligible: boolean;       // last AUTO_APPROVE_HISTORY_SIZE reviews were all correction-free
+}
+
+export interface SupplierAutomationStatus extends SupplierEligibility {
+  auto_approve: boolean;
+  disabled_reason: AutoApproveDisabledReason | null;
+  disabled_at: string | null;
+}
+
 export interface Invoice {
   id: string;
   client_id: string;
@@ -92,6 +137,7 @@ export interface Invoice {
   ai_confidence: number | null;
   error_message: string | null;
   exported_at: string | null;
+  reviewed_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -145,6 +191,7 @@ export interface PipelineState {
   ocrWords?: OcrWord[];
   extractedData: ExtractedData | null;
   validationResult: ValidationResult | null;
+  supplierRule?: SupplierRuleTrace | null;
   retryCount: number;
   status: InvoiceStatus;
   error: string | null;

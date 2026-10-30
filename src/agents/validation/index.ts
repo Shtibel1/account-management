@@ -1,5 +1,8 @@
-import type { ExtractedData, TenantRules, ValidationResult } from '@/shared/types';
+import type { ExtractedData, SupplierRuleTrace, TenantRules, ValidationResult } from '@/shared/types';
 import { supabase } from '@/lib/supabase';
+import { fetchSupplierMappings, isAutoApproveEnabled } from '@/lib/supplierAutomation';
+import { applySupplierRule, findSupplierRule, normalizeVatId } from '@/shared/supplierRules';
+import { autoApproveBlockers } from '@/shared/autoApprove';
 import { searchVatIdByName } from '@/utils/businessLookup';
 import {
   allocationThreshold,
@@ -96,7 +99,10 @@ export async function validateInvoice(
   tenantId: string,
   data: ExtractedData,
   rules: TenantRules
-): Promise<{ data: ExtractedData; validationResult: ValidationResult }> {
+): Promise<{ data: ExtractedData; validationResult: ValidationResult; supplierRule: SupplierRuleTrace | null }> {
+  // Amounts the edge-case handlers will have to rewrite (blocks auto-approve)
+  const amountsAutoCorrected = !checkMath(data);
+
   // 1. Run edge cases & auto-corrections
   const { data: corrected, warnings: edgeWarnings } = runEdgeCaseHandlers(data);
   const warnings = [...edgeWarnings];
@@ -169,16 +175,22 @@ export async function validateInvoice(
     warnings.push(`מספר ח.פ./עוסק מורשה עודכן אוטומטית ל-${webSearchVatId} לפי חיפוש באינטרנט`);
   }
 
+  // 1.6 Supplier rule (client's supplier defaults). Applied to validated_data only by the save nodes;
+  // the rule-dependent checks below (supplier name, category) run on the values the reviewer will see.
+  const supplierMapping = findSupplierRule(await fetchSupplierMappings(supabase, tenantId), corrected);
+  const { data: withRule } = applySupplierRule(corrected, corrected, supplierMapping);
+  const supplierRule = withRule.supplier_rule ?? null;
+
   // 2. Perform baseline structural checks
   const mathOk = checkMath(corrected);
   const vatIdOk = checkVatId(corrected.supplier_vat_id);
 
   // Determine missing fields based on tenant rules & system defaults
   const missingFields: string[] = [];
-  if (!corrected.supplier_name) missingFields.push('supplier_name');
+  if (!withRule.supplier_name) missingFields.push('supplier_name');
   if (rules.requireVatId && !corrected.supplier_vat_id) missingFields.push('supplier_vat_id');
   if (rules.requireInvoiceDate && !corrected.invoice_date) missingFields.push('invoice_date');
-  if (rules.requireExpenseCategory && !corrected.expense_category) missingFields.push('expense_category');
+  if (rules.requireExpenseCategory && !withRule.expense_category) missingFields.push('expense_category');
   
   // Base fields that must always be present
   if (corrected.amount_before_vat == null) missingFields.push('amount_before_vat');
@@ -197,11 +209,11 @@ export async function validateInvoice(
 
   // Category whitelist check
   if (
-    corrected.expense_category &&
+    withRule.expense_category &&
     rules.allowedExpenseCategories.length > 0 &&
-    !rules.allowedExpenseCategories.includes(corrected.expense_category)
+    !rules.allowedExpenseCategories.includes(withRule.expense_category)
   ) {
-    ruleViolations.push(`קטגוריית ההוצאה "${corrected.expense_category}" אינה מורשית עבור לקוח זה`);
+    ruleViolations.push(`קטגוריית ההוצאה "${withRule.expense_category}" אינה מורשית עבור לקוח זה`);
   }
 
   // VAT ID requirement fallback
@@ -222,6 +234,7 @@ export async function validateInvoice(
 
   // 4. Duplicate checks
   let duplicateFound = false;
+  let duplicateCheckRan = false;
   if (rules.duplicateInvoiceCheck && corrected.supplier_vat_id && corrected.invoice_number) {
     try {
       const { data: existing, error } = await supabase
@@ -235,7 +248,10 @@ export async function validateInvoice(
 
       if (error) {
         console.error('Error running duplicate check query:', error);
-      } else if (existing && existing.length > 0) {
+      } else {
+        duplicateCheckRan = true;
+      }
+      if (!error && existing && existing.length > 0) {
         duplicateFound = true;
         ruleViolations.push(`חשבונית כפולה: מספר חשבונית ${corrected.invoice_number} עבור ספק זה כבר קיים במערכת`);
       }
@@ -246,13 +262,39 @@ export async function validateInvoice(
 
   // 5. Detect if the document is not an invoice at all (missing all key structural fields)
   const notAnInvoice =
-    !corrected.supplier_name &&
+    !withRule.supplier_name &&
     !corrected.invoice_number &&
     !corrected.total_amount &&
     !corrected.amount_before_vat;
 
-  // 6. Compute manual review trigger (Forced to true so all invoices always go to manual review first)
-  const requiresManualReview = true;
+  // 6. Manual review is required unless the client opted this supplier into auto-approve AND every
+  // check passed (math, VAT ID, required fields, rules, duplicates, document type).
+  const supplierVatKey = normalizeVatId(corrected.supplier_vat_id);
+  const optedIn = supplierVatKey ? await isAutoApproveEnabled(supabase, tenantId, supplierVatKey) : false;
+  const blockers = optedIn
+    ? autoApproveBlockers({
+        supplierVatId: supplierVatKey,
+        result: {
+          math_ok: mathOk,
+          vat_id_ok: vatIdOk,
+          fields_missing: missingFields,
+          rule_violations: ruleViolations,
+          duplicate_found: duplicateFound,
+          not_an_invoice: notAnInvoice,
+        },
+        duplicateCheckRan,
+        amountsAutoCorrected,
+      })
+    : [];
+  const autoApproved = optedIn && blockers.length === 0;
+  const requiresManualReview = !autoApproved;
+  if (optedIn) {
+    console.log(
+      autoApproved
+        ? `[Validation] Supplier ${supplierVatKey} is opted into auto-approve and all checks passed: skipping manual review.`
+        : `[Validation] Supplier ${supplierVatKey} is opted into auto-approve but needs review: ${blockers.join(' | ')}`
+    );
+  }
 
   const validationResult: ValidationResult = {
     math_ok: mathOk,
@@ -264,6 +306,8 @@ export async function validateInvoice(
     requires_manual_review: requiresManualReview,
     not_an_invoice: notAnInvoice,
     allocation_required: allocationRequired,
+    auto_approved: autoApproved,
+    ...(optedIn && !autoApproved ? { auto_approve_blockers: blockers } : {}),
     vat_id_sources: {
       invoice: invoiceVatId,
       supplier_table: supplierTableVatId,
@@ -277,5 +321,6 @@ export async function validateInvoice(
       validation_flags: validationResult,
     },
     validationResult,
+    supplierRule,
   };
 }
