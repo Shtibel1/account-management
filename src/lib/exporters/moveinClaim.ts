@@ -60,33 +60,76 @@ export interface LegacyClaimResult {
   skipped: { invoice: Invoice; message: string }[];
 }
 
+/** Parallel DB round trips per request: a large batch must finish well inside Amplify's ~28s cut. */
+export const LEGACY_CLAIM_CONCURRENCY = 8;
+
+/** Runs `fn` over `items` with at most `limit` calls in flight; results keep the input order. */
+export async function mapWithLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 export async function claimMoveinInvoices(params: {
   invoices: Invoice[];
   clientId: string;
   correlationId: string;
   store: ExportStore;
   now?: () => number;
+  concurrency?: number;
 }): Promise<LegacyClaimResult> {
   const now = params.now ?? Date.now;
   const records = await params.store.getRecords(params.invoices.map((i) => i.id), MOVEIN_PLUGIN_ID);
   const byInvoice = new Map(records.map((r) => [r.invoice_id, r]));
   const result: LegacyClaimResult = { claimed: [], skipped: [] };
-  for (const invoice of params.invoices) {
+  let failure: unknown = null;
+  type Outcome = { invoice: Invoice; record: InvoiceExportRecord | null; message?: string };
+  const outcomes = await mapWithLimit<Invoice, Outcome>(params.invoices, params.concurrency ?? LEGACY_CLAIM_CONCURRENCY, async (invoice) => {
     const previous = byInvoice.get(invoice.id) ?? null;
     const decision = decideLegacyClaim(invoice, previous, now());
-    if (decision.action === 'skip') {
-      result.skipped.push({ invoice, message: decision.message });
-      continue;
+    if (decision.action === 'skip') return { invoice, record: null, message: decision.message };
+    if (failure) return { invoice, record: null, message: LEGACY_SKIP_MESSAGES.in_progress };
+    try {
+      const record = await params.store.claim({
+        invoiceId: invoice.id,
+        clientId: params.clientId,
+        pluginId: MOVEIN_PLUGIN_ID,
+        correlationId: params.correlationId,
+        previous,
+      });
+      return record ? { invoice, record } : { invoice, record: null, message: LEGACY_SKIP_MESSAGES.in_progress };
+    } catch (err) {
+      failure = failure ?? err;
+      return { invoice, record: null, message: LEGACY_SKIP_MESSAGES.in_progress };
     }
-    const record = await params.store.claim({
-      invoiceId: invoice.id,
-      clientId: params.clientId,
-      pluginId: MOVEIN_PLUGIN_ID,
-      correlationId: params.correlationId,
-      previous,
-    });
-    if (!record) result.skipped.push({ invoice, message: LEGACY_SKIP_MESSAGES.in_progress });
-    else result.claimed.push({ invoice, record });
+  });
+  for (const o of outcomes) {
+    if (o.record) result.claimed.push({ invoice: o.invoice, record: o.record });
+    else result.skipped.push({ invoice: o.invoice, message: o.message ?? LEGACY_SKIP_MESSAGES.in_progress });
+  }
+  if (failure) {
+    // A DB error mid-way: release what this request already claimed (otherwise those invoices stay
+    // "in progress" for PENDING_STALE_MS) and fail the request.
+    await releaseClaims(params.store, result.claimed, failure instanceof Error ? failure.message : String(failure));
+    throw failure;
   }
   return result;
+}
+
+/** Marks this request's claims failed (no file was delivered), so the invoices can be exported again. */
+export async function releaseClaims(
+  store: ExportStore,
+  claimed: { record: InvoiceExportRecord }[],
+  message: string
+): Promise<void> {
+  await mapWithLimit(claimed, LEGACY_CLAIM_CONCURRENCY, (c) =>
+    store.complete(c.record.id, { status: 'failed', last_error: message }).catch(() => undefined)
+  );
 }

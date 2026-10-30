@@ -5,7 +5,7 @@ import { MoveinExporter, MoveinValidationError, validateMoveinInvoices } from '@
 import type { Invoice, AccountMapping } from '@/shared/types';
 import { accessibleClientIds, isUuid, requireUser } from '@/lib/auth';
 import { MOVEIN_FILE_NAME, moveinDownloadHeaders } from '@/lib/exporters/moveinResponse';
-import { claimMoveinInvoices } from '@/lib/exporters/moveinClaim';
+import { claimMoveinInvoices, LEGACY_CLAIM_CONCURRENCY, mapWithLimit, releaseClaims } from '@/lib/exporters/moveinClaim';
 import { supabaseExportStore } from '@/integrations/store';
 
 const NOT_FOUND = 'לא נמצאו חשבוניות מאושרות';
@@ -142,18 +142,16 @@ export async function POST(request: Request) {
     try {
       buffer = new MoveinExporter().export(claimed.map((c) => c.invoice), mappings, client.vat_account ?? '');
     } catch (buildErr) {
-      const message = buildErr instanceof Error ? buildErr.message : String(buildErr);
-      await Promise.all(claimed.map((c) =>
-        store.complete(c.record.id, { status: 'failed', last_error: message }).catch(() => undefined)
-      ));
+      await releaseClaims(store, claimed, buildErr instanceof Error ? buildErr.message : String(buildErr));
       throw buildErr;
     }
 
-    // 6. Record the export (invoice_exports success, then invoices approved -> exported).
+    // 6. Record the export (invoice_exports success, then invoices approved -> exported). Bounded
+    // parallel writes: a large selection must finish well inside the ~28s request cut.
     const externalId = `${MOVEIN_FILE_NAME}#${correlationId}`;
-    for (const c of claimed) {
-      await store.complete(c.record.id, { status: 'success', external_id: externalId });
-    }
+    await mapWithLimit(claimed, LEGACY_CLAIM_CONCURRENCY, (c) =>
+      store.complete(c.record.id, { status: 'success', external_id: externalId })
+    );
     try {
       await store.markInvoicesExported(claimed.map((c) => c.invoice.id));
     } catch (markErr) {
