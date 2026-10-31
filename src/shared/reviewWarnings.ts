@@ -4,6 +4,7 @@
 import type { ExtractedData, LineItem } from '@/shared/types';
 import { checkLineItemsSum, isLineItemWarning, lineItemWarnings, normalizeLineItems } from '@/shared/lineItems';
 import { VAT_RATE_WARNING_PREFIX, vatRateWarning } from '@/shared/vatRate';
+import { DATE_SANITY_WARNING, isImplausibleInvoiceDate } from '@/shared/dateSanity';
 
 /** Written by the validation agent when the extraction found no invoice date. */
 export const MISSING_DATE_WARNING = 'לא נמצא תאריך בחשבונית — ייתכן שמדובר בקבלה בלבד';
@@ -12,6 +13,11 @@ export const CREDIT_NOTE_WARNING = 'זוהתה חשבונית זיכוי (סכו
 
 type WarningData = Pick<Partial<ExtractedData>, 'invoice_date' | 'amount_before_vat' | 'vat_amount' | 'total_amount'> & {
   line_items?: LineItem[] | null;
+  /**
+   * The upload date the stored date-sanity warning was computed against
+   * (validation_flags.date_sanity.reference_date, else invoices.created_at; defaults to today).
+   */
+  uploaded_at?: string | null;
 };
 
 function amountsOf(data: WarningData) {
@@ -25,7 +31,8 @@ function amountsOf(data: WarningData) {
 
 /**
  * The stored warnings, minus the ones the current data no longer supports (a date was entered, the
- * total is no longer negative), with the line-item and VAT-rate warnings recomputed from the data.
+ * total is no longer negative, the date was changed to one close to the upload date), with the
+ * line-item and VAT-rate warnings recomputed from the data.
  * Other warnings (auto-corrections, registrar notes, split hints) are kept as they were stored.
  */
 export function liveReviewWarnings(stored: readonly string[] | null | undefined, data: WarningData): string[] {
@@ -34,6 +41,7 @@ export function liveReviewWarnings(stored: readonly string[] | null | undefined,
     if (isLineItemWarning(w) || w.startsWith(VAT_RATE_WARNING_PREFIX)) return false;
     if (w === MISSING_DATE_WARNING) return !data.invoice_date;
     if (w === CREDIT_NOTE_WARNING) return data.total_amount != null && data.total_amount < 0;
+    if (w === DATE_SANITY_WARNING) return isImplausibleInvoiceDate(data.invoice_date, data.uploaded_at);
     return true;
   });
   const rateWarning = vatRateWarning({ ...amounts, invoice_date: data.invoice_date ?? null });

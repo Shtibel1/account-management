@@ -9,7 +9,7 @@ import { allocationThreshold, isAllocationRequired } from '@/shared/allocation';
 import { isAllocationNumberAcceptable } from '@/shared/approvalValidation';
 import { APPROVABLE_STATUSES, REJECTABLE_STATUSES, REOPENABLE_STATUSES } from '@/shared/invoiceStatus';
 import { findSupplierRule, normalizeVatId, VARIOUS_SUPPLIERS_ACCOUNT } from '@/shared/supplierRules';
-import { ruleReappliedMessage } from '@/shared/hebrewCount';
+import { countHe, ruleReappliedMessage } from '@/shared/hebrewCount';
 import { accountCodeError, mappingDbErrorMessage } from '@/shared/mappingValidation';
 import { dismissDuplicateInFlags } from '@/shared/duplicates';
 import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
@@ -221,7 +221,8 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
   const flags = initial?.validation_flags;
   const mathOk = flags?.math_ok ?? true;
   // Follows the current data while editing (a date entered, line items changed), not the stored run
-  const warnings = liveReviewWarnings(flags?.warnings, data);
+  const uploadedAt = flags?.date_sanity?.reference_date ?? invoice.created_at ?? null;
+  const warnings = liveReviewWarnings(flags?.warnings, { ...data, uploaded_at: uploadedAt });
 
   // Supplier rule (account_mappings) defaults: show which value came from the rule, and offer to
   // make the reviewer's category the supplier's default.
@@ -443,7 +444,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
           math_ok: mathOk,
           rule_violations: ruleViolations,
           allocation_required: allocationRequired,
-          warnings: liveReviewWarnings(updatedData.validation_flags.warnings, { ...amounts, invoice_date: updatedData.invoice_date ?? null }),
+          warnings: liveReviewWarnings(updatedData.validation_flags.warnings, { ...amounts, invoice_date: updatedData.invoice_date ?? null, uploaded_at: uploadedAt }),
           line_items_sum_ok: checkLineItemsSum(amounts).ok,
           mixed_vat: hasMixedVat(lineItems),
         };
@@ -605,7 +606,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
         )}
         {lowConfidenceCount > 0 && (
           <p className="text-[11px] text-amber-700 mt-1">
-            {lowConfidenceCount === 1 ? 'שדה אחד' : `${lowConfidenceCount} שדות`} בביטחון נמוך — מסומנים בפס כתום
+            {countHe(lowConfidenceCount, 'field')} בביטחון נמוך — מסומנים בפס כתום
           </p>
         )}
       </div>

@@ -18,6 +18,7 @@ import { checkLineItemsSum, hasMixedVat, lineItemWarnings, normalizeLineItems } 
 import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
 import { vatRateWarning } from '@/shared/vatRate';
 import { checkAmountSanity } from '@/shared/amountSanity';
+import { checkInvoiceDateSanity, DATE_SANITY_WARNING, IMPLAUSIBLE_DATE_CONFIDENCE } from '@/shared/dateSanity';
 import {
   BUYER_VAT_UNRESOLVED_VIOLATION,
   checkSupplierVatId,
@@ -102,6 +103,20 @@ export interface ValidationContext {
   ocrText?: string | null;
   /** OCR word boxes: tell label/value columns of a key-value table apart from the issuer's header. */
   ocrWords?: readonly OcrWord[] | null;
+  /** When the document was uploaded (invoices.created_at); read from the invoice when not given. */
+  uploadedAt?: string | Date | null;
+}
+
+/** invoices.created_at of the invoice, or null (the date sanity check then compares with today). */
+async function invoiceUploadedAt(invoiceId: string): Promise<string | null> {
+  try {
+    // limit(1), not maybeSingle(): the local mock DB client doesn't implement maybeSingle
+    const { data: rows } = await supabase.from('invoices').select('created_at').eq('id', invoiceId).limit(1);
+    const row = (Array.isArray(rows) ? rows[0] : null) as { created_at?: string | null } | null;
+    return row?.created_at ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function validateInvoice(
@@ -345,6 +360,20 @@ export async function validateInvoice(
       if (v != null && corrected[f] === sanity.data[f]) corrected.field_confidence[f] = v;
     }
   }
+  // Date sanity: a date far in the future or long before the upload (e.g. a year printed on the
+  // receipt book read instead of the handwritten date) is kept, but highlighted as low confidence
+  // (blocks auto-approve) with a warning. The review form drops the warning once the date is fixed.
+  const uploadedAt = context.uploadedAt !== undefined ? context.uploadedAt : await invoiceUploadedAt(invoiceId);
+  const dateSanity = checkInvoiceDateSanity(corrected.invoice_date, uploadedAt);
+  if (dateSanity) {
+    console.log(`[Validation] Implausible invoice date (${dateSanity.reason}) on invoice ${invoiceId}: ${dateSanity.original} vs. upload ${dateSanity.reference_date}`);
+    const prev = corrected.field_confidence?.invoice_date;
+    corrected.field_confidence = {
+      ...(corrected.field_confidence ?? {}),
+      invoice_date: Math.min(prev ?? IMPLAUSIBLE_DATE_CONFIDENCE, IMPLAUSIBLE_DATE_CONFIDENCE),
+    };
+    warnings.push(DATE_SANITY_WARNING);
+  }
   if (!corrected.field_confidence) delete corrected.field_confidence;
   if ((registrarVatConflict || (buyerVatIdSuspected && vatReplacementSource === 'reference')) && corrected.supplier_vat_id) {
     // The model's (often 0.95) score is not evidence against the registrar: highlight the field
@@ -424,6 +453,7 @@ export async function validateInvoice(
         zeroVatContradictsHistory,
         zeroVatHistoryUnknown,
         buyerVatIdSuspected: buyerVatIdSuspected || registrarVatConflict,
+        implausibleDate: dateSanity != null,
       })
     : [];
   const autoApproved = optedIn && blockers.length === 0;
@@ -449,6 +479,7 @@ export async function validateInvoice(
     allocation_required: allocationRequired,
     auto_approved: autoApproved,
     ...(sanity.result ? { amount_sanity: sanity.result } : {}),
+    ...(dateSanity ? { date_sanity: dateSanity } : {}),
     ...(optedIn && !autoApproved ? { auto_approve_blockers: blockers } : {}),
     line_items_sum_ok: lineItemsSumOk,
     mixed_vat: mixedVat,

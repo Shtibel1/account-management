@@ -1,4 +1,5 @@
 import type { AmountSanityResult } from '@/shared/amountSanity';
+import type { DateSanityResult } from '@/shared/dateSanity';
 import type { SplitSuggestion } from '@/shared/documentSplit';
 import type { FewShotExample } from '@/shared/fewshot';
 import type { LearnedRule, LearnedRulesTrace } from '@/shared/learning';
@@ -130,6 +131,8 @@ export interface ValidationResult {
   auto_approve_blockers?: string[];   // supplier is opted in, but these checks sent it to review
   /** Extracted amounts the sanity layer rejected / left unconfirmed, with the model's values (src/shared/amountSanity.ts). */
   amount_sanity?: AmountSanityResult;
+  /** The invoice date was implausible relative to the upload date (src/shared/dateSanity.ts). */
+  date_sanity?: DateSanityResult;
 }
 
 export interface Client {

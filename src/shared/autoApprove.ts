@@ -73,6 +73,8 @@ export interface AutoApproveCheck {
   zeroVatHistoryUnknown?: boolean;
   /** The extracted VAT ID looked like the buyer's and was swapped / removed (src/shared/buyerVatId.ts). */
   buyerVatIdSuspected?: boolean;
+  /** The invoice date is far from the upload date (src/shared/dateSanity.ts). */
+  implausibleDate?: boolean;
 }
 
 /** True when any amount differs between the AI output and the edge-case-corrected data. */
@@ -101,6 +103,7 @@ export function autoApproveBlockers(check: AutoApproveCheck): string[] {
   else if (!check.duplicateCheckRan) blockers.push('בדיקת כפילות לא הושלמה');
   if (check.lineItemWarnings && check.lineItemWarnings.length > 0) blockers.push(...check.lineItemWarnings);
   if (check.buyerVatIdSuspected) blockers.push('ח.פ. שזוהה נראה כשל הלקוח (הנמען) ולא של הספק');
+  if (check.implausibleDate) blockers.push('תאריך החשבונית רחוק מתאריך ההעלאה');
   if (check.vatRateMismatch) blockers.push('שיעור המע"מ אינו תואם לתאריך החשבונית');
   if (check.exemptGuessed) blockers.push('סכום המע"מ חסר והושלם כ-0 (ניחוש עוסק פטור)');
   if (check.zeroVatContradictsHistory) blockers.push('מע"מ 0, אך בחשבוניות קודמות של הספק היה מע"מ');
