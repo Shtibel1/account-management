@@ -211,8 +211,9 @@ export default function BankPage() {
             disabled={loading || !clientId}
             className="shrink-0 flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700 transition-colors px-3 min-h-[44px] rounded-lg hover:bg-slate-100"
           >
-            <RefreshCw className={clsx('h-4 w-4', loading && 'animate-spin')} />
-            רענן
+            <RefreshCw className={clsx('h-4 w-4', loading && 'animate-spin')} aria-hidden="true" />
+            {/* Icon only on phones so the client select gets the room */}
+            <span className="sr-only sm:not-sr-only">רענן</span>
           </button>
         </div>
       </div>
@@ -273,7 +274,7 @@ export default function BankPage() {
               setPage(1);
             }}
             className={clsx(
-              'px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
+              'px-4 py-2.5 min-h-[44px] text-sm font-medium border-b-2 -mb-px transition-colors',
               tab === key ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500 hover:text-slate-700'
             )}
           >

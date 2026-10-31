@@ -363,7 +363,7 @@ export function IntegrationSettings({ clientId }: { clientId: string }) {
         })}
         <Link
           href={`/integration-logs?clientId=${encodeURIComponent(clientId)}`}
-          className="flex items-center gap-2 px-3 py-2.5 text-sm text-blue-600 hover:text-blue-700 font-medium"
+          className="flex items-center gap-2 px-3 py-2.5 min-h-[44px] text-sm text-blue-600 hover:text-blue-700 font-medium"
         >
           <ScrollText className="h-4 w-4" /> יומן אינטגרציות
         </Link>
