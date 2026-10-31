@@ -147,6 +147,18 @@ describe('a queued run whose job row vanished (#3)', () => {
     assert.deepEqual(result.failed, []);
     assert.equal(invoice('live').processing_run_id, 'r-live');
   });
+
+  test('a backlog of live queued jobs beyond the limit does not hide a lost one (review)', async () => {
+    for (let i = 0; i < 5; i++) {
+      seedInvoice({ id: `live${i}`, processing_run_id: `r${i}`, updated_at: iso(T0 - ENQUEUE_GRACE_MS - 60_000 + i * 1_000) });
+      seedJob({ invoice_id: `live${i}`, run_id: `r${i}` });
+    }
+    seedInvoice({ id: 'lostq', updated_at: iso(T0 - ENQUEUE_GRACE_MS - 1_000), processing_started_at: iso(T0 - ENQUEUE_GRACE_MS - 1_000) });
+    const result = await sweepStaleProcessing(null, 2);
+    assert.deepEqual(result.enqueued, ['lostq']);
+    assert.deepEqual(result.failed, []);
+    assert.equal(job('lostq')?.run_id, invoice('lostq').processing_run_id);
+  });
 });
 
 describe('stuck-run messages depend on the cause (#5)', () => {

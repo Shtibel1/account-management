@@ -91,6 +91,8 @@ import type { BoundaryDetectionResult } from '@/agents/splitter';
  */
 
 const JOBS = 'processing_jobs';
+/** Pages of still-'queued' sweep candidates looked through for rows whose job vanished (QA round 4 review). */
+const QUEUED_SCAN_PAGES = 5;
 const SUPPORTED_MIME = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/tiff']);
 
 interface InvoiceRow {
@@ -1240,7 +1242,7 @@ export async function sweepStaleProcessing(clientIds: string[] | null = null, li
   // Only rows that may need action, so a long queue of live jobs can't crowd them out (QA round 3
   // review): never-queued and still-'queued' rows past the enqueue grace, and rows without any change
   // for STALE_PROCESSING_MS (a stale run has an old updated_at; a live job's steps keep bumping it).
-  const candidates = (cutoffMs: number, kind: 'never-queued' | 'queued' | 'stale') => {
+  const candidates = (cutoffMs: number, kind: 'never-queued' | 'queued' | 'stale', after?: string) => {
     let query = d.db
       .from('invoices')
       .select(INVOICE_COLUMNS)
@@ -1248,12 +1250,38 @@ export async function sweepStaleProcessing(clientIds: string[] | null = null, li
       .lt('updated_at', iso(d.now() - cutoffMs));
     if (kind === 'never-queued') query = query.or('processing_attempts.is.null,processing_attempts.eq.0');
     if (kind === 'queued') query = query.eq('processing_stage', 'queued' satisfies ProcessingStage);
+    if (after) query = query.gt('updated_at', after);
     if (clientIds) query = query.in('client_id', clientIds);
     return query.order('updated_at', { ascending: true }).limit(limit);
   };
+  // Still-'queued' rows past the grace are mostly live jobs waiting in a backlog (a big batch upload),
+  // which could push a row whose job vanished beyond the limit: page through them (oldest first, at
+  // most QUEUED_SCAN_PAGES pages) and keep only rows without a job of their run. Rows sharing the
+  // page's last updated_at may be skipped this time; the next sweep sees them.
+  const queuedWithoutJob = async () => {
+    const found: InvoiceRow[] = [];
+    let after: string | undefined;
+    for (let page = 0; page < QUEUED_SCAN_PAGES && found.length < limit; page++) {
+      const { data, error } = await candidates(ENQUEUE_GRACE_MS, 'queued', after);
+      if (error) return { data: null, error };
+      const rows = (data ?? []) as unknown as InvoiceRow[];
+      if (rows.length === 0) break;
+      const { data: jobRows, error: jobsErr } = await d.db
+        .from(JOBS)
+        .select('invoice_id, run_id')
+        .in('invoice_id', rows.map((r) => r.id));
+      if (jobsErr) return { data: null, error: jobsErr };
+      const runs = new Map(((jobRows ?? []) as Pick<JobRow, 'invoice_id' | 'run_id'>[]).map((j) => [j.invoice_id, j.run_id]));
+      for (const row of rows) if (runs.get(row.id) !== row.processing_run_id) found.push(row);
+      if (rows.length < limit) break;
+      after = rows[rows.length - 1].updated_at ?? undefined;
+      if (!after) break;
+    }
+    return { data: found.slice(0, limit), error: null };
+  };
   const lists = await Promise.all([
     candidates(ENQUEUE_GRACE_MS, 'never-queued'),
-    candidates(ENQUEUE_GRACE_MS, 'queued'),
+    queuedWithoutJob(),
     candidates(STALE_PROCESSING_MS, 'stale'),
   ]);
   const failedList = lists.find((l) => l.error);
@@ -1262,7 +1290,7 @@ export async function sweepStaleProcessing(clientIds: string[] | null = null, li
     return result;
   }
   const byId = new Map<string, InvoiceRow>();
-  for (const row of lists.flatMap((l) => l.data ?? []) as unknown as InvoiceRow[]) byId.set(row.id, row);
+  for (const row of lists.flatMap((l) => (l.data ?? []) as unknown as InvoiceRow[])) byId.set(row.id, row);
   const invoices = [...byId.values()];
   if (invoices.length === 0) return result;
 

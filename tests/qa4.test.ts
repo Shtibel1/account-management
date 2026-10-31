@@ -200,6 +200,14 @@ describe('deleteClientWithFiles (QA round 4 #1)', () => {
     assert.ok(CLIENT_DELETE_MESSAGES.exported.length > 0);
   });
 
+  test('imported bank transactions block the deletion with their own message (review)', async () => {
+    const f = fakeDb('bank_transactions', ['a.pdf']);
+    const r = await deleteClientWithFiles(f.db, 'raw-invoices', 'c1');
+    assert.deepEqual(r, { ok: false, blocker: 'bank_transactions' });
+    assert.deepEqual(f.removed, []);
+    assert.match(CLIENT_DELETE_MESSAGES.bank_transactions, /תנועות בנק/);
+  });
+
   test('a deleted client has its stored files removed in chunks', async () => {
     const files = Array.from({ length: 250 }, (_, i) => `f${i}.pdf`);
     const f = fakeDb('deleted', files);

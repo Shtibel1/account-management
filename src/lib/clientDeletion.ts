@@ -1,13 +1,14 @@
 /**
  * Deleting a client (QA round 4 #1). The DB decides what may go (migration
  * 20261031101000_qa4_client_delete_guard.sql): a client is deleted only while every invoice is
- * failed ('error') or awaiting review, none was ever exported and none has status audit events, so
- * approved / exported books are never wiped by the cascade. delete_client_guarded() checks and
+ * failed ('error') or awaiting review, none was ever exported, none has status audit events and no
+ * bank statement was imported for it, so approved / exported books are never wiped by the cascade. delete_client_guarded() checks and
  * deletes in one transaction; the files under raw-invoices/<client_id>/ are then removed through
- * the Storage API (SQL can't delete storage objects). Office owners only (checked by the route).
+ * the Storage API (SQL can't delete storage objects). Office owners only (checked by the route);
+ * browser sessions have no delete policy on clients, so this is the only way to delete one.
  */
 
-export type ClientDeleteBlocker = 'not_found' | 'not_owner' | 'active_invoices' | 'exported' | 'audit_history';
+export type ClientDeleteBlocker = 'not_found' | 'not_owner' | 'active_invoices' | 'exported' | 'audit_history' | 'bank_transactions';
 
 export const CLIENT_DELETE_MESSAGES: Record<ClientDeleteBlocker, string> = {
   not_found: 'הלקוח לא נמצא',
@@ -15,6 +16,7 @@ export const CLIENT_DELETE_MESSAGES: Record<ClientDeleteBlocker, string> = {
   active_invoices: 'ללקוח יש חשבוניות בעיבוד, מאושרות, שיוצאו, שנדחו או שהוחזרו - לא ניתן למחוק אותו. ניתן למחוק לקוח רק כשכל החשבוניות שלו נכשלו בעיבוד או ממתינות לבדיקה',
   exported: 'חשבוניות של הלקוח כבר יוצאו להנהלת החשבונות - לא ניתן למחוק אותו',
   audit_history: 'לחשבוניות של הלקוח יש היסטוריית פעולות (פתיחה מחדש / דחייה) שנשמרת - לא ניתן למחוק אותו',
+  bank_transactions: 'ללקוח יובאו תנועות בנק (דפי חשבון והתאמות) - לא ניתן למחוק אותו',
 };
 
 const BLOCKERS = new Set<string>(Object.keys(CLIENT_DELETE_MESSAGES));
