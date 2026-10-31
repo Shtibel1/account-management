@@ -116,6 +116,17 @@ export default function ReviewDetailPage() {
   const [yOffset, setYOffset] = useState(0);
   // Below lg the document is a sticky panel above the form; it can be folded to its title bar
   const [docCollapsed, setDocCollapsed] = useState(false);
+  // ...stuck right under the dashboard's sticky top bar, whose height differs per breakpoint
+  const [topBarHeight, setTopBarHeight] = useState(0);
+  useEffect(() => {
+    const bar = document.querySelector<HTMLElement>('main > header');
+    if (!bar) return;
+    const update = () => setTopBarHeight(bar.offsetHeight);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(bar);
+    return () => ro.disconnect();
+  }, []);
 
   // Manual split states
   const [pageCount, setPageCount] = useState<number | null>(null);
@@ -381,7 +392,8 @@ export default function ReviewDetailPage() {
 
         {/* Left — document viewer (places it on the left side in RTL) */}
         <div
-          className={`card overflow-hidden flex flex-col order-first sticky top-[61px] md:top-[69px] z-[5] shadow-md lg:order-none lg:static lg:z-auto lg:shadow-sm lg:h-auto ${
+          style={{ top: topBarHeight }}
+          className={`card overflow-hidden flex flex-col order-first sticky z-[5] shadow-md lg:order-none lg:static lg:z-auto lg:shadow-sm lg:h-auto ${
             docCollapsed ? 'h-auto' : 'h-[42vh]'
           }`}
         >
