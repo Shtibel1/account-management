@@ -84,21 +84,51 @@ export function sniffUploadMime(bytes: Uint8Array): UploadMimeType | null {
   return null;
 }
 
-/** A PDF header followed by garbage, a truncated file, a PDF whose page tree can't be read (QA round 4). */
+/** A PDF header followed by garbage, a truncated file, a PDF pdf-lib can't parse or whose page tree can't be read (QA rounds 4-5). */
 export const DAMAGED_PDF_MESSAGE = 'קובץ ה-PDF פגום ולא ניתן לקרוא אותו - יש לייצא או לסרוק אותו מחדש ולהעלות שוב';
 
 /** Bytes searched for the first PDF object (every real PDF has one right after its header). */
 const PDF_OBJECT_SCAN_BYTES = 64 * 1024;
 /** No real PDF (header, one object, xref / trailer) is this small. */
 const MIN_PDF_BYTES = 64;
+/**
+ * Bytes at the end searched for the trailer. Readers look in the last 1 KB; some producers append
+ * whitespace, NULs or a stray line after %%EOF, so twice that is tolerated.
+ */
+export const PDF_TRAILER_SCAN_BYTES = 2 * 1024;
+
+const PDF_EOF_MARKER = [0x25, 0x25, 0x45, 0x4f, 0x46]; // %%EOF
+const PDF_STARTXREF_MARKER = [0x73, 0x74, 0x61, 0x72, 0x74, 0x78, 0x72, 0x65, 0x66]; // startxref
+
+function endsRegionContains(bytes: Uint8Array, from: number, marker: number[]): boolean {
+  for (let i = bytes.byteLength - marker.length; i >= from; i--) {
+    let k = 0;
+    while (k < marker.length && bytes[i + k] === marker[k]) k++;
+    if (k === marker.length) return true;
+  }
+  return false;
+}
 
 /**
- * Cheap structural check of a file that starts with '%PDF-': it is not tiny and has an indirect
- * object ("<n> <gen> obj") near its start. Catches a header followed by garbage before anything is
- * stored or OCR'd; deeper damage shows when the page tree is read (readPdfPageCount).
+ * True when the file ends like a complete PDF: '%%EOF' or 'startxref' within the last
+ * PDF_TRAILER_SCAN_BYTES. A file cut off mid-way (a broken download or copy) ends inside a stream
+ * instead, which pdf-lib may still "load" with a wrong page count (QA round 5 #3). With incremental
+ * updates the last update ends with its own trailer, so only the end matters.
+ */
+export function hasPdfTrailer(bytes: Uint8Array): boolean {
+  const from = Math.max(0, bytes.byteLength - PDF_TRAILER_SCAN_BYTES);
+  return endsRegionContains(bytes, from, PDF_EOF_MARKER) || endsRegionContains(bytes, from, PDF_STARTXREF_MARKER);
+}
+
+/**
+ * Cheap structural check of a file that starts with '%PDF-': it is not tiny, ends with a trailer
+ * (hasPdfTrailer) and has an indirect object ("<n> <gen> obj") near its start. Catches a header
+ * followed by garbage, or a truncated file, before anything is stored or OCR'd; deeper damage shows
+ * when the page tree is read (readPdfPageCount).
  */
 export function hasPdfStructure(bytes: Uint8Array): boolean {
   if (bytes.byteLength < MIN_PDF_BYTES) return false;
+  if (!hasPdfTrailer(bytes)) return false;
   const end = Math.min(bytes.byteLength, PDF_OBJECT_SCAN_BYTES);
   // "obj" preceded by whitespace and a digit (the generation number), e.g. "1 0 obj"
   for (let i = 2; i + 2 < end; i++) {

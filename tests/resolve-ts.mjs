@@ -14,6 +14,9 @@ function findFile(base) {
 }
 
 export async function resolve(specifier, context, nextResolve) {
+  // Next's entry points (next/server, next/headers) are CommonJS files without an exports map: ESM
+  // needs the extension (route guards in src/lib/auth.ts import NextResponse).
+  if (/^next\/(server|headers)$/.test(specifier)) return nextResolve(`${specifier}.js`, context);
   if (specifier.startsWith('@/')) {
     const file = findFile(path.join(SRC, specifier.slice(2)));
     if (file) return { url: pathToFileURL(file).href, format: 'module', shortCircuit: true };

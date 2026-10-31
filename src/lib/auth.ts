@@ -12,7 +12,7 @@ import { isMisconfiguredProduction, isMockMode, MISCONFIGURED_MESSAGE } from '@/
  *
  * Usage:
  *   const access = await requireClientAccess(clientId);
- *   if (!access.ok) return access.response;      // 401 / 403 / 404 / 503
+ *   if (!access.ok) return access.response;      // 401 / 403 / 404 / 503 (another office's client: 404)
  *
  * Mock mode (local dev without Supabase env) skips auth: a fixed mock user may access everything.
  * In production without Supabase env every guard fails closed with 503.
@@ -158,7 +158,9 @@ async function checkClient(ctx: AuthContext, clientId: unknown): Promise<Guard<C
   if (!data) return deny(404, 'לקוח לא נמצא');
 
   const orgId = (data as { org_id: string | null }).org_id;
-  if (!(await hasOrgAccess(ctx, orgId))) return deny(403, MSG_FORBIDDEN);
+  // Another office's client answers like a missing one (QA round 5 #2): a 403 would tell existing
+  // client ids apart. Invoice / bank-line guards map this 404 back to their own 403.
+  if (!(await hasOrgAccess(ctx, orgId))) return deny(404, 'לקוח לא נמצא');
   return ok({ ctx, clientId, orgId });
 }
 

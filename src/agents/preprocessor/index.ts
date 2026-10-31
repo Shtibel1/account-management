@@ -1,7 +1,7 @@
 import type { OcrMetadata, OcrWord } from '@/shared/types';
 import { PDFDocument } from 'pdf-lib';
-import { UserFacingError } from '@/shared/processing';
-import { DAMAGED_PDF_MESSAGE, readPdfPageCount } from '@/shared/uploadValidation';
+import { UserFacingError, isUnreadableFileError } from '@/shared/processing';
+import { DAMAGED_PDF_MESSAGE, hasPdfStructure, readPdfPageCount, sniffUploadMime } from '@/shared/uploadValidation';
 
 function extractWordsFromPage(pageRes: any, pageIndex: number): OcrWord[] {
   const words: OcrWord[] = [];
@@ -264,6 +264,10 @@ export async function preprocessInvoice(
     };
   }
 
+  // A truncated file may still "load" with a wrong page count (QA round 5 #3)
+  if (sniffUploadMime(fileBuffer) === 'application/pdf' && !hasPdfStructure(fileBuffer)) {
+    throw new UserFacingError(DAMAGED_PDF_MESSAGE);
+  }
   const pdfDoc = await loadPdf(fileBuffer);
   // Loaded, but its page tree can't be read (QA round 4): no reader can use this file
   const counted = pdfDoc ? readPdfPageCount(pdfDoc) : 0;
@@ -271,7 +275,14 @@ export async function preprocessInvoice(
   const pageCount = counted;
   if (!pdfDoc || pageCount === 0) {
     // pdf-lib couldn't read it: let Vision try the first page
-    const res = await ocrPdfPages(fileBuffer, null, [1]);
+    let res: Awaited<ReturnType<typeof ocrPdfPages>>;
+    try {
+      res = await ocrPdfPages(fileBuffer, null, [1]);
+    } catch (err) {
+      // Vision rejects it too: the PDF is damaged (QA round 5 #3)
+      if (!pdfDoc && isUnreadableFileError(err)) throw new UserFacingError(DAMAGED_PDF_MESSAGE);
+      throw err;
+    }
     const text = res.pageTexts[0] || '';
     return {
       rawOcrText: text,

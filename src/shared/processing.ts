@@ -274,7 +274,16 @@ export function stuckRunMessage(cause: StuckCause, pageCount: number | null | un
 export const STUCK_RUN_MESSAGE = 'העיבוד נקטע ולא הסתיים. ניתן לנסות שוב ("עבד מחדש")';
 export const STUCK_LONG_RUN_MESSAGE = 'עיבוד המסמך הארוך לא הסתיים בזמן. ניתן לנסות שוב ("עבד מחדש"), או לפצל אותו לחלקים קטנים יותר';
 export const LOST_JOB_MESSAGE = 'העיבוד לא התחיל (המשימה בתור אבדה). ניתן לנסות שוב ("עבד מחדש")';
-export const TOO_MANY_ATTEMPTS_MESSAGE = 'העיבוד נכשל שוב ושוב בשלב זה. ניתן לנסות שוב ("עבד מחדש"), ואם הקובץ גדול - לפצל אותו לחלקים קטנים יותר';
+export const TOO_MANY_ATTEMPTS_MESSAGE = 'העיבוד נכשל שוב ושוב בשלב זה. ניתן לנסות שוב ("עבד מחדש")';
+export const TOO_MANY_ATTEMPTS_LONG_MESSAGE = 'העיבוד נכשל שוב ושוב בשלב זה. ניתן לנסות שוב ("עבד מחדש"), או לפצל את המסמך הארוך לחלקים קטנים יותר';
+
+/**
+ * Hebrew message of a run whose step was interrupted too often. Like stuckRunMessage, splitting is
+ * suggested only for a long multi-page document (QA round 5 #5).
+ */
+export function tooManyAttemptsMessage(pageCount: number | null | undefined = null): string {
+  return typeof pageCount === 'number' && pageCount >= LONG_DOCUMENT_PAGES ? TOO_MANY_ATTEMPTS_LONG_MESSAGE : TOO_MANY_ATTEMPTS_MESSAGE;
+}
 export const CONNECTION_ERROR_MESSAGE = 'החיבור לשירותי העיבוד נקטע שוב ושוב. ניתן לנסות שוב ("עבד מחדש") בעוד כמה דקות';
 export const TRANSIENT_EXHAUSTED_MESSAGE = 'העיבוד נקטע שוב ושוב בגלל תקלה זמנית. ניתן לנסות שוב ("עבד מחדש") בעוד כמה דקות';
 /** last_error of a job whose previous tick was interrupted (its lease ran out while the step ran). */
@@ -442,6 +451,21 @@ export function isPermanentError(err: unknown): boolean {
 }
 
 /**
+ * True when the OCR / PDF reader rejected the file's content itself (not a PDF or image it can
+ * decode). Retrying can't help, and with a PDF pdf-lib couldn't parse either it means the file is
+ * damaged (QA round 5 #3).
+ */
+export function isUnreadableFileError(err: unknown): boolean {
+  if (err instanceof UserFacingError) return false;
+  const text = (err instanceof Error ? err.message : typeof err === 'string' ? err : '').toLowerCase();
+  return (
+    text.includes('unsupported input file format') || text.includes('bad image data') ||
+    text.includes('no pdf header') || text.includes('failed to parse pdf') || text.includes('invalid pdf') ||
+    text.includes('image processing error')
+  );
+}
+
+/**
  * Maps any pipeline error (Google Vision, Anthropic, storage, pdf-lib...) to a short Hebrew message
  * for invoices.error_message / API bodies. The raw detail belongs in the server log only.
  */
@@ -454,11 +478,7 @@ export function toUserErrorMessage(err: unknown): string {
   if (text.includes('no input file') || text.includes('empty file')) {
     return 'הקובץ ריק - יש להעלות קובץ אחר';
   }
-  if (
-    text.includes('unsupported input file format') || text.includes('bad image data') ||
-    text.includes('no pdf header') || text.includes('failed to parse pdf') || text.includes('invalid pdf') ||
-    text.includes('image processing error')
-  ) {
+  if (isUnreadableFileError(err)) {
     return 'הקובץ אינו PDF או תמונה תקינים - יש להעלות קובץ אחר';
   }
   if (text.includes('password') || text.includes('encrypted')) {
