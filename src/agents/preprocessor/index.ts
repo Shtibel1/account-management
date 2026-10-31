@@ -164,10 +164,18 @@ export async function ocrPdfPages(
   if (!pdfDoc) {
     return runOcrForPageRange(fileBuffer.toString('base64'), apiKey, pages, pages, options);
   }
-  const subDoc = await PDFDocument.create();
-  const copied = await subDoc.copyPages(pdfDoc, pages.map((p) => p - 1));
-  copied.forEach((page) => subDoc.addPage(page));
-  const subBytes = Buffer.from(await subDoc.save());
+  let subBytes: Buffer;
+  try {
+    const subDoc = await PDFDocument.create();
+    const copied = await subDoc.copyPages(pdfDoc, pages.map((p) => p - 1));
+    copied.forEach((page) => subDoc.addPage(page));
+    subBytes = Buffer.from(await subDoc.save());
+  } catch (e) {
+    // pdf-lib loaded the file but its objects are broken (e.g. 'Expected instance of PDFDict'):
+    // the file is damaged and retrying won't help (QA round 5 #3). Vision errors stay outside.
+    console.warn('[Preprocessor] Failed to copy PDF pages with pdf-lib:', e);
+    throw new UserFacingError(DAMAGED_PDF_MESSAGE);
+  }
   return runOcrForPageRange(subBytes.toString('base64'), apiKey, pages.map((_, i) => i + 1), pages, options);
 }
 

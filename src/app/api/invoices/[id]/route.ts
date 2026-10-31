@@ -23,6 +23,10 @@ const PROTECTED_COLUMNS = [
   'reviewed_at',
   'exported_at',
   'ai_confidence',
+  // Stored-file references: set only by ingest and split (QA round 5 #1 - repointing them would
+  // let the original of a finished invoice be deleted from storage).
+  'file_url',
+  'original_file_url',
 ];
 
 export async function GET(

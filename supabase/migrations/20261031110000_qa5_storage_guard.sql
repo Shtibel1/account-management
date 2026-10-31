@@ -13,7 +13,12 @@
 -- 2. DELETE only of objects that no invoice depends on: not referenced by any invoices.file_url /
 --    original_file_url, or referenced only by invoices in status 'error' - the app's own delete
 --    rule (DELETABLE_STATUSES in src/shared/invoiceStatus.ts). See can_delete_storage_object().
+--    Every invoice counts, whatever its client_id (an invoice moved to another client still
+--    points at the file under the old client's folder).
 -- 3. SELECT / INSERT keep can_access_storage_object() unchanged.
+-- 4. The references themselves can't be cleared or repointed from the browser: invoices_status_guard
+--    now also blocks browser changes of file_url, original_file_url and client_id (else a member
+--    could PATCH them away over PostgREST and then delete the file).
 -- The app's own delete paths (DELETE /api/invoices/[id], DELETE /api/clients/[id] via
 -- src/lib/clientDeletion.ts, split cleanup) use the service role, which bypasses RLS: unaffected.
 -- Idempotent: safe to run more than once.
@@ -23,33 +28,32 @@
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- Percent-decoding of a URL path (file_url encodes each path segment with encodeURIComponent,
--- src/lib/ingestHelpers.ts storageReferenceUrl). Malformed input is returned as is.
+-- src/lib/ingestHelpers.ts storageReferenceUrl). A '%' not followed by two hex digits stays as is;
+-- bytes that aren't valid UTF-8 raise an error (storage_path_decode() catches it).
+create or replace function public.storage_path_decode_strict(p text)
+returns text
+language sql
+immutable
+set search_path = ''
+as $$
+  select coalesce(convert_from(string_agg(
+           case when t.m[1] is not null then decode(substr(t.m[1], 2), 'hex') else convert_to(t.m[2], 'UTF8') end,
+           ''::bytea order by t.n), 'UTF8'), '')
+  from regexp_matches(p, '(%[0-9A-Fa-f]{2})|([^%]+|%)', 'g') with ordinality as t(m, n)
+$$;
+
+-- Malformed input (not valid UTF-8 once decoded) is returned as is.
 create or replace function public.storage_path_decode(p text)
 returns text
 language plpgsql
 immutable
 set search_path = ''
 as $$
-declare
-  v_out bytea := ''::bytea;
-  v_i integer := 1;
-  v_n integer := length(coalesce(p, ''));
-  v_c text;
 begin
   if p is null or position('%' in p) = 0 then
     return p;
   end if;
-  while v_i <= v_n loop
-    v_c := substr(p, v_i, 1);
-    if v_c = '%' and substr(p, v_i + 1, 2) ~ '^[0-9A-Fa-f]{2}$' then
-      v_out := v_out || decode(substr(p, v_i + 1, 2), 'hex');
-      v_i := v_i + 3;
-    else
-      v_out := v_out || convert_to(v_c, 'UTF8');
-      v_i := v_i + 1;
-    end if;
-  end loop;
-  return convert_from(v_out, 'UTF8');
+  return public.storage_path_decode_strict(p);
 exception when others then
   return p;
 end;
@@ -70,39 +74,33 @@ $$;
 
 -- True when the caller may delete this raw-invoices object: it belongs to a client of one of the
 -- caller's offices AND no invoice outside status 'error' references it (as its file or as the
--- original of a split). Conservative on purpose: any reference that can't be ruled out blocks.
+-- original of a split). Every invoice counts, not only those of the path's client: an invoice
+-- moved to another client still points at the file under the old client's folder.
+-- Conservative on purpose: any reference that can't be ruled out blocks.
 create or replace function public.can_delete_storage_object(object_name text)
 returns boolean
-language plpgsql
+language sql
 stable
 security definer
 set search_path = ''
 as $$
-declare
-  v_client_id uuid;
-begin
-  if not public.can_access_storage_object(object_name) then
-    return false;
-  end if;
-  -- can_access_storage_object() already checked that the first segment is a client uuid
-  v_client_id := split_part(object_name, '/', 1)::uuid;
-
-  return not exists (
-    select 1
-    from public.invoices i
-    where i.client_id = v_client_id
-      and i.status::text <> 'error'
-      and (
-        public.invoice_file_object_path(i.file_url) = object_name
-        or public.invoice_file_object_path(i.original_file_url) = object_name
-      )
-  );
-end;
+  select public.can_access_storage_object(object_name)
+    and not exists (
+      select 1
+      from public.invoices i
+      where i.status::text <> 'error'
+        and (
+          public.invoice_file_object_path(i.file_url) = object_name
+          or public.invoice_file_object_path(i.original_file_url) = object_name
+        )
+    )
 $$;
 
+revoke execute on function public.storage_path_decode_strict(text) from public, anon;
 revoke execute on function public.storage_path_decode(text) from public, anon;
 revoke execute on function public.invoice_file_object_path(text) from public, anon;
 revoke execute on function public.can_delete_storage_object(text) from public, anon;
+grant execute on function public.storage_path_decode_strict(text) to authenticated, service_role;
 grant execute on function public.storage_path_decode(text) to authenticated, service_role;
 grant execute on function public.invoice_file_object_path(text) to authenticated, service_role;
 grant execute on function public.can_delete_storage_object(text) to authenticated, service_role;
@@ -116,3 +114,73 @@ drop policy if exists raw_invoices_member_delete on storage.objects;
 create policy raw_invoices_member_delete on storage.objects
   for delete to authenticated
   using (bucket_id = 'raw-invoices' and public.can_delete_storage_object(name));
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 3. Invoice file references (invoices_status_guard)
+-- ─────────────────────────────────────────────────────────────────────────────
+-- invoices_member_all lets a member UPDATE any column of their office's invoices over PostgREST.
+-- Clearing or repointing file_url / original_file_url, or moving the invoice to another client,
+-- would take the stored original out of can_delete_storage_object()'s view (and rewriting the file
+-- of a finished invoice tampers with the evidence by itself). These columns are set only by the
+-- service role (ingest, split) and PATCH /api/invoices/[id] (client_id, after its access check).
+-- Same function as 20261030160000_qa_status_integrity.sql (search_path from
+-- 20261030170000_advisor_hardening.sql) plus the three columns.
+create or replace function public.invoices_status_guard()
+returns trigger
+language plpgsql
+set search_path = public, pg_temp
+as $$
+declare
+  v_browser boolean := current_user in ('authenticated', 'anon');
+begin
+  if tg_op = 'INSERT' then
+    -- Uploads go through the API (service role). A browser session may only create a document
+    -- waiting to be processed, never an already approved / exported / reviewed one.
+    if v_browser
+       and (new.status::text <> 'processing'
+            or new.reviewed_at is not null
+            or new.exported_at is not null) then
+      raise exception 'invoice_status_api_only: new invoices start in processing'
+        using errcode = 'P0001';
+    end if;
+    return new;
+  end if;
+
+  if tg_op = 'DELETE' then
+    -- Only failed documents are deleted, through DELETE /api/invoices/[id].
+    if v_browser then
+      raise exception 'invoice_status_api_only: invoice % is deleted through the API only', old.id
+        using errcode = 'P0001';
+    end if;
+    return old;
+  end if;
+
+  -- UPDATE
+  if new.status is distinct from old.status
+     and old.status::text = 'exported'
+     and coalesce(current_setting('app.invoice_reopen', true), '') <> 'on' then
+    raise exception 'invoice_exported_final: invoice % is exported; reopen it explicitly', old.id
+      using errcode = 'P0001';
+  end if;
+
+  if v_browser
+     and (new.status is distinct from old.status
+          or new.reviewed_at is distinct from old.reviewed_at
+          or new.exported_at is distinct from old.exported_at
+          or new.validated_data is distinct from old.validated_data
+          or new.ai_confidence is distinct from old.ai_confidence) then
+    raise exception 'invoice_status_api_only: invoice % status/approval fields change through the API only', old.id
+      using errcode = 'P0001';
+  end if;
+
+  if v_browser
+     and (new.file_url is distinct from old.file_url
+          or new.original_file_url is distinct from old.original_file_url
+          or new.client_id is distinct from old.client_id) then
+    raise exception 'invoice_file_api_only: invoice % file / client fields change through the API only', old.id
+      using errcode = 'P0001';
+  end if;
+
+  return new;
+end;
+$$;

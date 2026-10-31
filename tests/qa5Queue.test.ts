@@ -150,3 +150,50 @@ describe('too many interrupted attempts (#5)', () => {
     });
   }
 });
+
+describe('a PDF pdf-lib loads but whose objects are broken (#3)', () => {
+  // The real ocrPdfPages: copying the pages throws a pdf-lib error before any Vision call.
+  async function brokenDoc() {
+    const { PDFDocument } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    doc.addPage();
+    doc.getPages = () => {
+      throw new Error('Expected instance of PDFDict, but got instance of undefined');
+    };
+    return doc;
+  }
+
+  test('ocrPdfPages throws the permanent damaged-file error', async () => {
+    const { ocrPdfPages } = await import('@/agents/preprocessor');
+    const { UserFacingError } = await import('@/shared/processing');
+    process.env.GOOGLE_CLOUD_API_KEY ??= 'test-key';
+    await assert.rejects(ocrPdfPages(PDF, await brokenDoc(), [1]), (err: unknown) => {
+      assert.ok(err instanceof UserFacingError);
+      assert.equal((err as Error).message, DAMAGED_PDF_MESSAGE);
+      return true;
+    });
+  });
+
+  test('the run fails at once with the damaged-file message', async () => {
+    const { ocrPdfPages } = await import('@/agents/preprocessor');
+    process.env.GOOGLE_CLOUD_API_KEY ??= 'test-key';
+    const doc = await brokenDoc();
+    setQueueDepsForTests({
+      db: db.client,
+      now: () => clock,
+      fetchFile: async () => PDF,
+      loadPdf: async () => doc,
+      ocrPdfPages: (file, pdf, pages, options) => ocrPdfPages(file, pdf as Parameters<typeof ocrPdfPages>[1], pages, options),
+      loadFewShot: async () => ({ examples: [], supplierVatId: null }),
+      extract: async () => ({ data: DATA, inputTokens: 1, outputTokens: 1, fewShotInvoiceIds: [] }),
+      finalize: async () => ({ outcome: 'saved', status: 'review', saved: true }),
+      heartbeatMs: 0,
+    });
+    seedInvoice({ processing_stage: 'ocr' });
+    seedJob();
+    const r = await runProcessingTick('inv1', { deadline: clock + 20_000 });
+    assert.equal(r.state, 'failed');
+    assert.equal(invoice().status, 'error');
+    assert.equal(invoice().error_message, DAMAGED_PDF_MESSAGE);
+  });
+});
