@@ -1,3 +1,4 @@
+import type { AmountSanityResult } from '@/shared/amountSanity';
 import type { SplitSuggestion } from '@/shared/documentSplit';
 import type { FewShotExample } from '@/shared/fewshot';
 
@@ -125,6 +126,8 @@ export interface ValidationResult {
   vat_id_sources?: VatIdSources;
   auto_approved?: boolean;            // skipped manual review via the supplier auto-approve opt-in
   auto_approve_blockers?: string[];   // supplier is opted in, but these checks sent it to review
+  /** Extracted amounts the sanity layer rejected / left unconfirmed, with the model's values (src/shared/amountSanity.ts). */
+  amount_sanity?: AmountSanityResult;
 }
 
 export interface Client {
