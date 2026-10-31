@@ -444,13 +444,14 @@ export default function MappingsPage() {
         <div className="flex items-center gap-2">
           <Button variant="secondary" onClick={() => fileInputRef.current?.click()} disabled={!selectedClient || importing}>
             {importing ? <Loader2 className="h-4 w-4 animate-spin ml-1" /> : <Upload className="h-4 w-4 ml-1" />}
-            {importing ? 'מייבא...' : 'יבוא מאקסל'}
+            {importing ? 'מייבא...' : 'ייבוא מאקסל'}
           </Button>
           <input
             type="file"
             ref={fileInputRef}
             onChange={handleImportExcel}
             accept=".xlsx,.xls,.csv"
+            aria-label="ייבוא קובץ ספקים מאקסל"
             className="hidden"
           />
           <Button onClick={() => { resetForm(); setShowForm(true); }} disabled={!selectedClient}>
@@ -465,17 +466,6 @@ export default function MappingsPage() {
         </div>
       )}
 
-      {/* Info box */}
-      <div className="flex gap-3 p-4 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-800">
-        <Info className="h-4 w-4 shrink-0 mt-0.5 text-blue-500" />
-        <div className="space-y-1">
-          <p><strong>ספק</strong> — קוד פנימי בתוכנת הנהלת החשבונות (לא ח.פ.). לדוגמה: אופיס דיפו → <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-mono">2340</code></p>
-          <p><strong>כלל ספק</strong> — קטגוריית ברירת המחדל וקוד הכרטיס של הספק ממולאים אוטומטית בחשבוניות שלו (גם בחשבוניות שכבר ממתינות לבדיקה). עריכה ידנית של המבקר בחשבונית גוברת על הכלל.</p>
-          <p><strong>אישור אוטומטי</strong> — ספק שב-{historySize} החשבוניות האחרונות שנבדקו לא נדרש בהן אף תיקון מסומן ככשיר. לאחר הפעלה, חשבוניות שעוברות את כל הבדיקות מאושרות ללא בדיקה ידנית; תיקון בחשבונית של הספק מכבה את האישור האוטומטי.</p>
-          <p><strong>יבוא אקסל ספקים</strong> — העלה קובץ עם העמודות הבאות: <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-mono">מספר</code>, <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-mono">שם הספק</code>, <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-mono">מספר תיק מע"מ</code>, <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-mono">מספר כרטיס</code>, <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-mono">שם הוצאה</code>.</p>
-        </div>
-      </div>
-
       {/* Client selector */}
       <div className="flex items-center gap-3">
         <label htmlFor="mappings-client" className="text-sm font-medium text-slate-700 shrink-0">לקוח:</label>
@@ -483,10 +473,21 @@ export default function MappingsPage() {
           id="mappings-client"
           value={selectedClient}
           onChange={(e) => setSelectedClient(e.target.value)}
-          className="input-base max-w-xs"
+          className="input-base flex-1 min-w-0 sm:flex-none sm:w-80"
         >
           {clients.map((c) => <option key={c.id} value={c.id}>{clientLabels.get(c.id) ?? c.name}</option>)}
         </select>
+      </div>
+
+      {/* Info box */}
+      <div className="flex gap-3 p-4 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-800">
+        <Info className="h-4 w-4 shrink-0 mt-0.5 text-blue-500" />
+        <div className="space-y-1">
+          <p><strong>ספק</strong> — קוד פנימי בתוכנת הנהלת החשבונות (לא ח.פ.). לדוגמה: אופיס דיפו ← <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-mono">2340</code></p>
+          <p><strong>כלל ספק</strong> — קטגוריית ברירת המחדל וקוד הכרטיס של הספק ממולאים אוטומטית בחשבוניות שלו (גם בחשבוניות שכבר ממתינות לבדיקה). עריכה ידנית של המבקר בחשבונית גוברת על הכלל.</p>
+          <p><strong>אישור אוטומטי</strong> — ספק שב-{historySize} החשבוניות האחרונות שנבדקו לא נדרש בהן אף תיקון מסומן ככשיר. לאחר הפעלה, חשבוניות שעוברות את כל הבדיקות מאושרות ללא בדיקה ידנית; תיקון בחשבונית של הספק מכבה את האישור האוטומטי.</p>
+          <p><strong>ייבוא אקסל ספקים</strong> — העלו קובץ עם העמודות הבאות: <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-sans">מספר</code>, <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-sans">שם הספק</code>, <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-sans">מספר תיק מע"מ</code>, <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-sans">מספר כרטיס</code>, <code className="bg-blue-100 px-1.5 py-0.5 rounded text-xs font-sans">שם הוצאה</code>.</p>
+        </div>
       </div>
 
       {/* Add form */}
@@ -585,7 +586,7 @@ export default function MappingsPage() {
         <button
           onClick={() => setActiveTab('supplier')}
           className={clsx(
-            'flex items-center gap-2 px-3 sm:px-6 py-3 border-b-2 font-medium text-sm transition-all focus:outline-none',
+            'flex items-center gap-2 px-3 sm:px-6 py-3 border-b-2 font-medium text-sm transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500',
             activeTab === 'supplier'
               ? 'border-blue-600 text-blue-600 font-semibold'
               : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
@@ -597,7 +598,7 @@ export default function MappingsPage() {
         <button
           onClick={() => setActiveTab('category')}
           className={clsx(
-            'flex items-center gap-2 px-3 sm:px-6 py-3 border-b-2 font-medium text-sm transition-all focus:outline-none',
+            'flex items-center gap-2 px-3 sm:px-6 py-3 border-b-2 font-medium text-sm transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500',
             activeTab === 'category'
               ? 'border-blue-600 text-blue-600 font-semibold'
               : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
@@ -623,15 +624,19 @@ export default function MappingsPage() {
               <div className="relative w-full sm:w-64">
                 <input
                   type="text"
+                  type="search"
+                  aria-label="חיפוש ספקים"
                   placeholder="חיפוש ספק, ח.פ., קוד..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full text-sm border border-slate-200 rounded-lg bg-white pl-8 pr-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-right font-medium"
+                  className="w-full text-sm border border-slate-300 rounded-lg bg-white pl-8 pr-3 py-1.5 max-md:min-h-[44px] focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-right font-medium"
                 />
                 {searchQuery && (
                   <button
+                    type="button"
+                    aria-label="ניקוי החיפוש"
                     onClick={() => setSearchQuery('')}
-                    className="absolute inset-y-0 left-2.5 flex items-center text-slate-400 hover:text-slate-600"
+                    className="absolute inset-y-0 left-1 px-1.5 flex items-center text-slate-400 hover:text-slate-600"
                   >
                     <X className="h-4 w-4" />
                   </button>
@@ -679,16 +684,20 @@ export default function MappingsPage() {
                     <td className="px-4 py-3 text-center">
                       <div className="flex items-center justify-center gap-2 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity">
                         <button
+                          type="button"
                           onClick={() => handleEdit(m)}
-                          className="text-slate-300 hover:text-blue-600 transition-colors"
+                          className="p-2 max-md:p-3 -m-1 rounded-lg text-slate-500 hover:text-blue-600 hover:bg-blue-50 transition-colors"
                           title="עריכה"
+                          aria-label={`עריכת ${m.key}`}
                         >
                           <Pencil className="h-4 w-4" />
                         </button>
                         <button
+                          type="button"
                           onClick={() => handleDelete(m.id)}
-                          className="text-slate-300 hover:text-red-500 transition-colors"
+                          className="p-2 max-md:p-3 -m-1 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-50 transition-colors"
                           title="מחיקה"
+                          aria-label={`מחיקת ${m.key}`}
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
@@ -698,8 +707,11 @@ export default function MappingsPage() {
                 ))}
                 {paginatedSuppliers.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="px-4 py-12 text-center text-slate-400">
-                      {searchQuery ? 'לא נמצאו ספקים העונים לחיפוש' : 'אין מיפוי ספקים מוגדר'}
+                    <td colSpan={7} className="px-4 py-12 text-slate-500">
+                      {/* Pinned to the visible width: the table scrolls sideways on phones */}
+                      <div className="sticky right-0 w-[calc(100vw-4.5rem)] md:w-auto text-center">
+                        {searchQuery ? 'לא נמצאו ספקים העונים לחיפוש' : 'עדיין אין ספקים ממופים. לחצו על "הוסף מיפוי" או ייבאו קובץ ספקים מאקסל.'}
+                      </div>
                     </td>
                   </tr>
                 )}
@@ -742,7 +754,7 @@ export default function MappingsPage() {
                     </p>
                   </div>
                   <div>
-                    <nav className="isolate inline-flex -space-x-px rounded-md shadow-sm gap-1" aria-label="Pagination">
+                    <nav className="isolate inline-flex -space-x-px rounded-md shadow-sm gap-1" aria-label="עימוד">
                       <button
                         onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
                         disabled={safeCurrentPage === 1}
@@ -819,16 +831,20 @@ export default function MappingsPage() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity">
                         <button
+                          type="button"
                           onClick={() => handleEdit(m)}
-                          className="text-slate-300 hover:text-blue-600 transition-colors"
+                          className="p-2 max-md:p-3 -m-1 rounded-lg text-slate-500 hover:text-blue-600 hover:bg-blue-50 transition-colors"
                           title="עריכה"
+                          aria-label={`עריכת ${m.key}`}
                         >
                           <Pencil className="h-4 w-4" />
                         </button>
                         <button
+                          type="button"
                           onClick={() => handleDelete(m.id)}
-                          className="text-slate-300 hover:text-red-500 transition-colors"
+                          className="p-2 max-md:p-3 -m-1 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-50 transition-colors"
                           title="מחיקה"
+                          aria-label={`מחיקת ${m.key}`}
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
