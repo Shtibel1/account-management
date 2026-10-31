@@ -2,9 +2,16 @@
 // the split API route (server-side range validation) and the review UI (suggestion banner).
 // Pages are always 1-based and ranges are inclusive.
 
-/** When true, the pipeline splits a PDF on its own if the detection is confident enough. */
-export const AUTO_SPLIT_ENABLED = false;
-/** Minimum overall confidence for an automatic split (only used when AUTO_SPLIT_ENABLED). */
+/**
+ * When true, the processing queue splits a PDF on its own if the detection is confident enough
+ * (QA: was false since 2026-10-30, so every multi-invoice scan stayed one review row). Server-side
+ * override: AUTO_SPLIT_ENABLED=false (src/lib/processingQueue.ts, autoSplitSettings).
+ */
+export const AUTO_SPLIT_ENABLED = true;
+/**
+ * Default minimum overall confidence for an automatic split; below it the review screen only
+ * suggests the split. Server-side override: AUTO_SPLIT_MIN_CONFIDENCE (0.5-1 or 50-100).
+ */
 export const AUTO_SPLIT_MIN_CONFIDENCE = 0.9;
 /** Confidence assigned when explicit "page X of N" markers fully explain the page grouping. */
 export const PAGE_MARKER_CONFIDENCE = 0.92;

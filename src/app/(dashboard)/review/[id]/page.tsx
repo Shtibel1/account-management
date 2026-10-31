@@ -6,8 +6,9 @@ import dynamic from 'next/dynamic';
 import { createClient } from '@/utils/supabase/client';
 import { Invoice } from '@/shared/types';
 import { ValidationForm } from '@/components/SplitPane/ValidationForm';
-import { ArrowRight, Loader2, Eye, EyeOff, SlidersHorizontal, Scissors, Sparkles } from 'lucide-react';
+import { ArrowLeftRight, ArrowRight, Loader2, Eye, EyeOff, SlidersHorizontal, Scissors, Sparkles } from 'lucide-react';
 import { getInvoiceFileUrl, splitInvoice } from '@/lib/api';
+import { reviewListHref } from '@/components/InvoiceTable/listFilters';
 import { formatRangesForInput, usableSuggestion } from '@/shared/documentSplit';
 import { useToast } from '@/components/ui/Toast';
 import { useFeatureFlags } from '@/components/FeatureFlags/useFeatureFlags';
@@ -19,6 +20,7 @@ import { splitStatusError } from '@/shared/processing';
 import { ProcessingBanner } from '@/components/Processing/ProcessingStatus';
 import { displayBboxes, fieldLabel } from '@/shared/reviewFields';
 import { useEscapeKey } from '@/components/ui/useEscapeKey';
+import { MoveToClientDialog, moveBlockedReason } from '@/components/SplitPane/MoveToClientDialog';
 
 const ImageViewer = dynamic(() => import('@/components/SplitPane/ImageViewer').then((m) => m.ImageViewer), {
   ssr: false,
@@ -130,6 +132,7 @@ export default function ReviewDetailPage() {
   const { isEnabled: isFlagEnabled } = useFeatureFlags({ clientId: invoice?.client_id ?? null });
   const reviewLoop = !!invoice?.client_id && isFlagEnabled('accountant_review_loop');
   const [showReturnDialog, setShowReturnDialog] = useState(false);
+  const [showMoveDialog, setShowMoveDialog] = useState(false);
 
   const load = async () => {
     const { data } = await supabase.from('invoices').select('*').eq('id', id).single();
@@ -227,7 +230,8 @@ export default function ReviewDetailPage() {
       const result = await splitInvoice(invoice.id, finalSplits, invoice.client_id);
       toast(result?.warning || 'הקובץ פוצל בהצלחה. תהליך ה-AI הופעל מחדש עבור כל חלק.', result?.warning ? 'info' : 'success');
       setShowSplitModal(false);
-      router.push('/review');
+      // Back to the list with this client still selected (QA: the filter reset to all clients)
+      router.push(reviewListHref(invoice.client_id));
     } catch (e: any) {
       console.error(e);
       toast(e.message || 'שגיאה בביצוע הפיצול', 'error');
@@ -269,6 +273,16 @@ export default function ReviewDetailPage() {
 
         <span className="text-slate-300">·</span>
         <h1 className="text-base font-semibold text-slate-900 truncate min-w-0 max-w-[60vw] sm:max-w-xs" title={invoice.file_name}><bdi>{invoice.file_name}</bdi></h1>
+
+        <button
+          type="button"
+          onClick={() => setShowMoveDialog(true)}
+          disabled={!!moveBlockedReason(invoice.status)}
+          title={moveBlockedReason(invoice.status) ?? 'העברת החשבונית ללקוח אחר'}
+          className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <ArrowLeftRight className="h-3.5 w-3.5" /> העבר ללקוח
+        </button>
 
         {hasBboxes && (
           <div className="mr-auto flex items-center gap-3 flex-wrap">
@@ -400,6 +414,20 @@ export default function ReviewDetailPage() {
           </div>
         </div>
       </div>
+
+      {showMoveDialog && (
+        <MoveToClientDialog
+          invoiceIds={[invoice.id]}
+          currentClientId={invoice.client_id}
+          label={invoice.file_name}
+          onClose={() => setShowMoveDialog(false)}
+          onMoved={() => {
+            setShowMoveDialog(false);
+            toast('החשבונית הועברה ללקוח האחר', 'success');
+            void load();
+          }}
+        />
+      )}
 
       {showReturnDialog && (
         <ReturnToClientDialog

@@ -4,7 +4,8 @@ import { supabase } from '@/lib/supabase';
 import { isClientStorageFileUrl } from '@/lib/ingestHelpers';
 import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
 import type { ExtractedData, FewShotLookupState, OcrWord } from '@/shared/types';
-import type { SplitSuggestion } from '@/shared/documentSplit';
+import { AUTO_SPLIT_ENABLED, AUTO_SPLIT_MIN_CONFIDENCE, shouldAutoSplit, validateSplitRanges, type PageRange, type SplitSuggestion } from '@/shared/documentSplit';
+import { sha256Hex, splitPartHash } from '@/lib/fileHash';
 import { DAMAGED_PDF_MESSAGE, checkStoredBytes, mimeFromFileName, readPdfPageCount } from '@/shared/uploadValidation';
 import {
   DUE_SOON_MS,
@@ -199,6 +200,33 @@ export interface QueueDeps {
   ocrBudgetMs: number;
   /** Lease renewal interval while a step runs (0 = off, tests). */
   heartbeatMs: number;
+  /** Builds and uploads the parts of an automatic split (src/lib/invoiceSplit.ts). */
+  splitPdf: (file: Buffer, ranges: PageRange[], target: { clientId: string; fileName: string | null; tag: string }) => Promise<{ fileUrl: string; start_page: number; end_page: number }[]>;
+  /** Automatic split of multi-document PDFs (AUTO_SPLIT_ENABLED / AUTO_SPLIT_MIN_CONFIDENCE env). */
+  autoSplit: AutoSplitSettings;
+}
+
+export interface AutoSplitSettings {
+  enabled: boolean;
+  /** Overall detection confidence (0-1) from which a file is split without asking; below it the review screen suggests the split. */
+  minConfidence: number;
+}
+
+/**
+ * Auto-split settings from the environment: AUTO_SPLIT_ENABLED ('false' / '0' / 'off' turns it off)
+ * and AUTO_SPLIT_MIN_CONFIDENCE (0.5-1, or a percentage 50-100). Defaults: on, 0.9.
+ */
+export function autoSplitSettings(env: Record<string, string | undefined> = process.env): AutoSplitSettings {
+  const rawEnabled = (env.AUTO_SPLIT_ENABLED ?? '').trim().toLowerCase();
+  const enabled = rawEnabled === '' ? AUTO_SPLIT_ENABLED : !['false', '0', 'off', 'no'].includes(rawEnabled);
+  let minConfidence = AUTO_SPLIT_MIN_CONFIDENCE;
+  const text = (env.AUTO_SPLIT_MIN_CONFIDENCE ?? '').trim();
+  const raw = Number(text);
+  if (text !== '' && Number.isFinite(raw)) {
+    const value = raw > 1 ? raw / 100 : raw;
+    if (value >= 0.5 && value <= 1) minConfidence = value;
+  }
+  return { enabled, minConfidence };
 }
 
 async function defaultDeps(): Promise<QueueDeps> {
@@ -208,6 +236,7 @@ async function defaultDeps(): Promise<QueueDeps> {
   const extraction = await import('@/agents/extraction');
   const fewshot = await import('@/lib/fewshot');
   const files = await import('@/lib/invoiceFiles');
+  const splitting = await import('@/lib/invoiceSplit');
   return {
     db: supabase,
     now: () => Date.now(),
@@ -248,6 +277,8 @@ async function defaultDeps(): Promise<QueueDeps> {
     },
     ocrBudgetMs: TICK_OCR_BUDGET_MS,
     heartbeatMs: JOB_HEARTBEAT_MS,
+    splitPdf: splitting.splitPdfIntoStoredParts,
+    autoSplit: autoSplitSettings(),
   };
 }
 
@@ -258,7 +289,7 @@ export function setQueueDepsForTests(overrides: Partial<QueueDeps> | null): void
 }
 async function deps(): Promise<QueueDeps> {
   const base = depsOverride?.db && depsOverride.fetchFile && depsOverride.extract && depsOverride.finalize
-    ? ({ now: () => Date.now(), ocrBudgetMs: TICK_OCR_BUDGET_MS, heartbeatMs: 0 } as QueueDeps)
+    ? ({ now: () => Date.now(), ocrBudgetMs: TICK_OCR_BUDGET_MS, heartbeatMs: 0, autoSplit: { enabled: false, minConfidence: AUTO_SPLIT_MIN_CONFIDENCE } } as QueueDeps)
     : await defaultDeps();
   return { ...base, ...(depsOverride ?? {}) } as QueueDeps;
 }
@@ -374,6 +405,22 @@ export interface EnqueueOptions {
    * processing_progress.requeues, which caps how often that happens in a row.
    */
   requeues?: number;
+  /**
+   * OCR already done for this file (a part of an automatic split: its pages were read with the
+   * whole file). The job then starts at extraction instead of reading the pages again.
+   */
+  seed?: JobSeed;
+}
+
+/** OCR results a new job starts from (see EnqueueOptions.seed). */
+export interface JobSeed {
+  page_texts: string[];
+  ocr_words: OcrWord[];
+  ocr_confidence: number | null;
+  detected_languages: string[] | null;
+  ocr_op_count: number;
+  split_input_tokens: number;
+  split_output_tokens: number;
 }
 
 /**
@@ -475,14 +522,21 @@ export async function enqueueProcessing(invoiceId: string, options: EnqueueOptio
     client_id: invoice.client_id,
     file_url: invoice.file_url,
     mime_type: pickMimeType(options.mimeType, invoice.file_name),
-    stage: 'ocr',
-    pages_done: 0,
-    page_texts: [],
-    ocr_words: [],
-    ocr_op_count: 0,
+    ...(options.seed
+      ? {
+          stage: 'extract',
+          page_count: options.seed.page_texts.length,
+          pages_done: options.seed.page_texts.length,
+          page_texts: options.seed.page_texts,
+          ocr_words: options.seed.ocr_words,
+          ocr_confidence: options.seed.ocr_confidence,
+          detected_languages: options.seed.detected_languages,
+          ocr_op_count: options.seed.ocr_op_count,
+          split_input_tokens: options.seed.split_input_tokens,
+          split_output_tokens: options.seed.split_output_tokens,
+        }
+      : { stage: 'ocr', pages_done: 0, page_texts: [], ocr_words: [], ocr_op_count: 0, split_input_tokens: 0, split_output_tokens: 0 }),
     split_detection_failed: false,
-    split_input_tokens: 0,
-    split_output_tokens: 0,
     stage_attempts: 0,
     lock_version: 0,
     locked_until: null,
@@ -629,6 +683,8 @@ export interface TickResult {
   deferred?: boolean;
   /** 'busy' because of a retry backoff: not before this time. */
   retryAt?: string | null;
+  /** The tick split the file automatically: ids of all parts (the first is this invoice). */
+  splitInto?: string[];
 }
 
 export interface TickOptions {
@@ -650,8 +706,10 @@ function jobProgress(job: JobRow): ProcessingProgress {
 }
 
 /** Time a tick needs left before its deadline to start this job's next step. */
-export function minStepMs(job: Pick<JobRow, 'stage' | 'extract_state'>): number {
+export function minStepMs(job: Pick<JobRow, 'stage' | 'extract_state'> & { split_suggestion?: SplitSuggestion | null }): number {
   if (job.stage === 'ocr') return MIN_OCR_STEP_MS;
+  // A detected split waiting to be carried out: no LLM call, only file work
+  if (job.stage === 'detect' && job.split_suggestion) return MIN_SPLIT_STEP_MS;
   if (job.stage === 'extract' && job.extract_state?.phase === 'finalize') return MIN_FINALIZE_STEP_MS;
   return MIN_LLM_STEP_MS;
 }
@@ -952,7 +1010,24 @@ async function ocrStep(d: QueueDeps, job: JobRow, deadline: number): Promise<Tic
   return { state: 'pending', stage: 'ocr', progress };
 }
 
+/** Time a tick needs left to carry out an automatic split (download, split, uploads, rows, enqueues). */
+export const MIN_SPLIT_STEP_MS = 9_000;
+
+/** True when this detection result is split automatically (multi-document, confident enough, fits the file). */
+function autoSplitApplies(d: QueueDeps, job: JobRow, suggestion: SplitSuggestion | null): suggestion is SplitSuggestion {
+  if (!suggestion || job.mime_type !== 'application/pdf') return false;
+  if (!shouldAutoSplit(suggestion, d.autoSplit.enabled, d.autoSplit.minConfidence)) return false;
+  const pageCount = job.page_count ?? job.page_texts.length;
+  return suggestion.page_count === pageCount && validateSplitRanges(suggestion.documents, pageCount).ok;
+}
+
 async function detectStep(d: QueueDeps, job: JobRow, deadline: number): Promise<TickResult> {
+  // A split suggestion stored while the stage is still 'detect' is an automatic split that is due
+  if (job.split_suggestion) {
+    if (autoSplitApplies(d, job, job.split_suggestion)) return autoSplitStep(d, job, deadline);
+    // Settings changed meanwhile: go on with the suggestion for the reviewer
+    return continueWithSuggestion(d, job);
+  }
   let detection: BoundaryDetectionResult;
   try {
     // With a time limit, detect() throws transient failures (instead of "no suggestion")
@@ -963,6 +1038,25 @@ async function detectStep(d: QueueDeps, job: JobRow, deadline: number): Promise<
     if (!isTransientError(err) || transientTries(job) < OPTIONAL_STEP_TRANSIENT_RETRIES) throw err;
     console.warn(`[Queue] Boundary detection of invoice ${job.invoice_id} keeps failing; going on without a split suggestion:`, errorDetail(err));
     detection = { suggestion: null, inputTokens: 0, outputTokens: 0, failed: true };
+  }
+  if (autoSplitApplies(d, job, detection.suggestion)) {
+    // Confident multi-document file: split it into parts that are processed on their own. The
+    // suggestion is stored first (stage stays 'detect'), so a tick that is cut off resumes the split
+    // without paying for detection again.
+    console.log(`[Queue] Invoice ${job.invoice_id}: ${detection.suggestion.documents.length} documents (confidence ${detection.suggestion.confidence} >= ${d.autoSplit.minConfidence}); splitting automatically.`);
+    await saveJob(d, job, {
+      split_suggestion: detection.suggestion,
+      split_detection_failed: false,
+      split_input_tokens: detection.inputTokens,
+      split_output_tokens: detection.outputTokens,
+      stage_attempts: 0,
+      last_error: null,
+    });
+    if (deadline - d.now() >= MIN_SPLIT_STEP_MS) return autoSplitStep(d, job, deadline);
+    await saveJob(d, job, { locked_until: null });
+    const progress = { pages_done: job.pages_done, pages_total: job.page_count };
+    await setInvoiceProgress(d, job, 'splitting', progress);
+    return { state: 'pending', stage: 'splitting', progress };
   }
   await saveJob(d, job, {
     split_suggestion: detection.suggestion,
@@ -977,6 +1071,180 @@ async function detectStep(d: QueueDeps, job: JobRow, deadline: number): Promise<
   const progress = { pages_done: job.pages_done, pages_total: job.page_count };
   await setInvoiceProgress(d, job, 'extract', progress);
   return { state: 'pending', stage: 'extract', progress };
+}
+
+/** Detection is done and the file is not split automatically: extract it, suggesting the split in review. */
+async function continueWithSuggestion(d: QueueDeps, job: JobRow): Promise<TickResult> {
+  await saveJob(d, job, { stage: 'extract', stage_attempts: 0, locked_until: null, last_error: null });
+  const progress = { pages_done: job.pages_done, pages_total: job.page_count };
+  await setInvoiceProgress(d, job, 'extract', progress);
+  return { state: 'pending', stage: 'extract', progress };
+}
+
+/**
+ * Invoice id of part `index` (1-based, >= 2) of the automatic split of `runId`: deterministic, so a
+ * retried split step finds the rows it already created instead of inserting them again.
+ */
+export function autoSplitPartId(runId: string, index: number): string {
+  const h = sha256Hex(Buffer.from(`auto-split:${runId}:${index}`));
+  // RFC 4122 shape (version 5 style, variant 10)
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-${((parseInt(h.slice(16, 18), 16) & 0x3f) | 0x80).toString(16)}${h.slice(18, 20)}-${h.slice(20, 32)}`;
+}
+
+/** Lineage columns in a separate best-effort update (a missing column must not fail the split). */
+async function saveSplitLineage(d: QueueDeps, invoiceId: string, lineage: Record<string, unknown>): Promise<void> {
+  try {
+    const { error } = await d.db.from('invoices').update(lineage).eq('id', invoiceId);
+    if (error) throw error;
+  } catch (err) {
+    console.warn(`[Queue] Could not save the split lineage of invoice ${invoiceId}:`, err);
+  }
+}
+
+async function saveFileHash(d: QueueDeps, invoiceId: string, hash: string): Promise<void> {
+  try {
+    const { error } = await d.db.from('invoices').update({ file_hash: hash }).eq('id', invoiceId);
+    if (error) throw error;
+  } catch (err) {
+    console.warn(`[Queue] Could not save the file hash of invoice ${invoiceId}:`, err);
+  }
+}
+
+/** The OCR of pages start..end (1-based) of the job, renumbered from page 1 for the part's own job. */
+function partSeed(job: JobRow, range: PageRange, first: boolean): JobSeed {
+  return {
+    page_texts: job.page_texts.slice(range.start_page - 1, range.end_page),
+    ocr_words: (job.ocr_words ?? [])
+      .filter((w) => typeof w.page === 'number' && w.page >= range.start_page && w.page <= range.end_page)
+      .map((w) => ({ ...w, page: (w.page as number) - range.start_page + 1 })),
+    ocr_confidence: job.ocr_confidence,
+    detected_languages: job.detected_languages,
+    // The whole file's OCR and detection cost is counted once, on part 1
+    ocr_op_count: first ? job.ocr_op_count : 0,
+    split_input_tokens: first ? job.split_input_tokens : 0,
+    split_output_tokens: first ? job.split_output_tokens : 0,
+  };
+}
+
+/**
+ * Automatic split (QA: multi-invoice PDFs came out as ONE review row; auto-split had been left off
+ * behind AUTO_SPLIT_ENABLED = false since the splitter rewrite of 2026-10-30). Same result as the
+ * manual split route: the invoice becomes part 1, one new invoice per further part ("<name>_חלק_<n>"),
+ * the original file stays referenced from every part, part fingerprints derive from the source hash
+ * and page range. Each part is queued as its own processing job, starting at extraction with its
+ * pages' OCR (no second Vision pass). Safe to retry: part files go to fixed paths (upsert), the part
+ * rows have ids derived from the run, and every write is conditioned on this run.
+ * A file that can't be split (pdf-lib can't parse it, uploads keep failing) is extracted whole with
+ * the split suggested in review, as before.
+ */
+async function autoSplitStep(d: QueueDeps, job: JobRow, deadline: number): Promise<TickResult> {
+  const suggestion = job.split_suggestion as SplitSuggestion;
+  const ranges: PageRange[] = suggestion.documents.map((doc) => ({ start_page: doc.start_page, end_page: doc.end_page }));
+  const started = d.now();
+  await setInvoiceProgress(d, job, 'splitting', { pages_done: job.pages_done, pages_total: job.page_count });
+
+  const { data: rowData } = await d.db.from('invoices').select('file_name, file_hash').eq('id', job.invoice_id).limit(1);
+  const row = (Array.isArray(rowData) ? rowData[0] : null) as { file_name?: string | null; file_hash?: string | null } | null;
+  const fileName = row?.file_name || 'invoice.pdf';
+
+  let file: Buffer;
+  let parts: { fileUrl: string; start_page: number; end_page: number }[];
+  try {
+    file = await d.fetchFile(job.file_url, job.client_id, { timeoutMs: callTimeoutMs(d, deadline, Number.POSITIVE_INFINITY) });
+    parts = await d.splitPdf(file, ranges, { clientId: job.client_id, fileName, tag: `auto_${job.run_id.slice(0, 8)}` });
+  } catch (err) {
+    if (err instanceof LostJobLockError) throw err;
+    if (isTransientError(err) && transientTries(job) < OPTIONAL_STEP_TRANSIENT_RETRIES) throw err;
+    console.warn(`[Queue] Automatic split of invoice ${job.invoice_id} failed; extracting it whole with the split suggested in review:`, errorDetail(err));
+    return continueWithSuggestion(d, job);
+  }
+
+  const sourceHash = row?.file_hash || sha256Hex(file);
+  const lineageBase = { original_file_url: job.file_url, original_file_name: fileName, original_file_hash: sourceHash };
+  const { nameWithoutExt, ext } = (() => {
+    const dot = fileName.lastIndexOf('.');
+    return dot !== -1 ? { nameWithoutExt: fileName.slice(0, dot), ext: fileName.slice(dot) } : { nameWithoutExt: fileName, ext: '.pdf' };
+  })();
+  const partName = (idx: number) => `${nameWithoutExt}_חלק_${idx + 1}${ext}`;
+  const now = iso(d.now());
+
+  // 1. The invoice itself becomes part 1 - only while this run still owns it
+  const first = parts[0];
+  const { data: updated, error: updateErr } = await d.db
+    .from('invoices')
+    .update({
+      file_url: first.fileUrl,
+      file_name: partName(0),
+      processing_stage: 'splitting' satisfies ProcessingStage,
+      extracted_data: null,
+      validated_data: null,
+      ai_confidence: null,
+      error_message: null,
+      reviewed_at: null,
+      updated_at: now,
+    })
+    .eq('id', job.invoice_id)
+    .eq('processing_run_id', job.run_id)
+    .select('id');
+  if (updateErr) throw new Error(`auto-split: update of part 1 failed: ${updateErr.message}`);
+  if (!Array.isArray(updated) || updated.length === 0) throw new LostJobLockError(job.invoice_id);
+  await saveFileHash(d, job.invoice_id, splitPartHash(sourceHash, first.start_page, first.end_page));
+  await saveSplitLineage(d, job.invoice_id, { ...lineageBase, split_start_page: first.start_page, split_end_page: first.end_page });
+
+  // 2. One invoice per further part (created once: the id is derived from the run)
+  const partIds: (string | null)[] = [job.invoice_id];
+  for (let idx = 1; idx < parts.length; idx++) {
+    const part = parts[idx];
+    const id = autoSplitPartId(job.run_id, idx + 1);
+    const { data: existing } = await d.db.from('invoices').select('id').eq('id', id).limit(1);
+    if (!Array.isArray(existing) || existing.length === 0) {
+      const { error: insertErr } = await d.db.from('invoices').insert({
+        id,
+        client_id: job.client_id,
+        file_url: part.fileUrl,
+        file_name: partName(idx),
+        status: 'processing',
+        created_at: now,
+        updated_at: now,
+      });
+      if (insertErr) {
+        console.error(`[Queue] Insert of part ${idx + 1} of invoice ${job.invoice_id} failed:`, insertErr);
+        partIds.push(null);
+        continue;
+      }
+    }
+    await saveFileHash(d, id, splitPartHash(sourceHash, part.start_page, part.end_page));
+    await saveSplitLineage(d, id, { ...lineageBase, split_parent_id: job.invoice_id, split_start_page: part.start_page, split_end_page: part.end_page });
+    partIds.push(id);
+  }
+
+  // 3. Queue every part with its pages' OCR. Part 1's enqueue replaces this job (a new run on the
+  // same row), so nothing of this job is written after it.
+  const queued = await Promise.all(
+    parts.map((part, idx) => {
+      const id = partIds[idx];
+      if (!id) return Promise.resolve(false);
+      return enqueueProcessing(id, {
+        mimeType: 'application/pdf',
+        seed: partSeed(job, part, idx === 0),
+        ...(idx === 0 ? { claimToken: job.run_id } : {}),
+      }).then((r) => {
+        if (!r.ok) console.error(`[Queue] Could not queue part ${idx + 1} (${id}) of invoice ${job.invoice_id}: ${r.error}`);
+        return r.ok;
+      }, (err) => {
+        console.error(`[Queue] Queueing part ${idx + 1} (${id}) of invoice ${job.invoice_id} crashed:`, err);
+        return false;
+      });
+    })
+  );
+  const created = partIds.filter(Boolean).length;
+  console.log(`[Queue] Automatic split of invoice ${job.invoice_id}: ${created}/${parts.length} parts, ${queued.filter(Boolean).length} queued (${d.now() - started} ms).`);
+  if (!queued[0]) {
+    // Part 1 could not be queued: fail its run so it can be retried from the review screen
+    await failRun(d, job.invoice_id, job.run_id, 'לא ניתן היה להתחיל את העיבוד. יש לנסות שוב', 'auto-split: enqueue of part 1 failed');
+    return { state: 'failed' };
+  }
+  return { state: 'pending', stage: 'extract', progress: { pages_done: 0, pages_total: first.end_page - first.start_page + 1 }, splitInto: partIds.filter((x): x is string => !!x) };
 }
 
 /** True when the DB has no processing_jobs.extract_state yet (migration not applied). */

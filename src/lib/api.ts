@@ -209,6 +209,16 @@ export function reopenInvoice(id: string, reason?: string) {
   return invoiceAction(id, 'reopen', 'שגיאה בפתיחת החשבונית מחדש', reason ? { reason } : {});
 }
 
+/** Moves an invoice (and its stored files) to another client of the office. Throws the server's Hebrew error. */
+export async function moveInvoiceToClient(id: string, clientId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/api/invoices/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client_id: clientId }),
+  });
+  if (!res.ok) throw new Error(await errorText(res, 'העברת החשבונית ללקוח האחר נכשלה'));
+}
+
 /** Deletes a failed document (status 'error' only). */
 export async function deleteInvoice(id: string): Promise<void> {
   const res = await fetch(`${API_URL}/api/invoices/${encodeURIComponent(id)}`, { method: 'DELETE' });
