@@ -221,8 +221,12 @@ function sanitizeStorageFilename(fileName: string): string {
 // Confidence scoring lives in shared/confidence.ts (also used by the approval node)
 export { computeConfidence };
 
-// Fetch dynamic tenant rules helper
-export async function getTenantRules(tenantId: string): Promise<TenantRules> {
+/**
+ * Validation rules of a client. There is no per-client rules column: the old lookup of
+ * clients.rules (a column that never existed) answered 400 on every finalize and fell back to these
+ * defaults anyway (QA round 4), so every client gets the defaults without a DB round trip.
+ */
+export async function getTenantRules(): Promise<TenantRules> {
   const defaultRules: TenantRules = {
     maxAmountForAutoApprove: 1000,
     requireVatId: true,
@@ -242,25 +246,7 @@ export async function getTenantRules(tenantId: string): Promise<TenantRules> {
     duplicateInvoiceCheck: true,
   };
 
-  try {
-    const { data, error } = await supabase
-      .from('clients')
-      .select('rules')
-      .eq('id', tenantId)
-      .single();
-
-    if (error || !data || !data.rules) {
-      return defaultRules;
-    }
-
-    return {
-      ...defaultRules,
-      ...(data.rules as Partial<TenantRules>),
-    };
-  } catch (e) {
-    console.warn(`Error fetching rules for tenant ${tenantId}, using defaults.`, e);
-    return defaultRules;
-  }
+  return defaultRules;
 }
 
 // Calculate token and OCR costs for billing
@@ -561,7 +547,7 @@ export type QueuedExtractionOutcome =
  * runs another extraction call in its own tick).
  */
 export async function finalizeQueuedExtraction(input: QueuedExtractionInput): Promise<QueuedExtractionOutcome> {
-  const tenantRules = await getTenantRules(input.tenantId);
+  const tenantRules = await getTenantRules();
   const extracted: ExtractedData = { ...input.extractedData };
   if (input.ocrWords.length > 0) extracted.bboxes = matchBboxesWithOcr(extracted, input.ocrWords);
 
@@ -639,7 +625,7 @@ const graph = new StateGraph<any>({
 })
   // 1. Initialize Rules node
   .addNode('init_rules', async (state: PipelineState) => {
-    const rules = await getTenantRules(state.tenantId);
+    const rules = await getTenantRules();
     return { tenantRules: rules };
   })
 

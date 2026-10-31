@@ -87,6 +87,11 @@ export interface VatIdSources {
   invoice: string | null;
   supplier_table: string | null;
   web_search: string | null;
+  /**
+   * Outcome of the registrar lookup (src/utils/businessLookup.ts): 'unavailable' = the registrar did
+   * not answer, so the ID was not checked against it (QA round 4). Absent on older invoices.
+   */
+  web_search_status?: 'found' | 'no_match' | 'unavailable' | 'skipped';
 }
 
 // Why another invoice is suspected to be the same document, strongest first.

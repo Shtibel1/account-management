@@ -1,5 +1,7 @@
 import type { OcrMetadata, OcrWord } from '@/shared/types';
 import { PDFDocument } from 'pdf-lib';
+import { UserFacingError } from '@/shared/processing';
+import { DAMAGED_PDF_MESSAGE, readPdfPageCount } from '@/shared/uploadValidation';
 
 function extractWordsFromPage(pageRes: any, pageIndex: number): OcrWord[] {
   const words: OcrWord[] = [];
@@ -263,7 +265,10 @@ export async function preprocessInvoice(
   }
 
   const pdfDoc = await loadPdf(fileBuffer);
-  const pageCount = pdfDoc?.getPageCount() ?? 0;
+  // Loaded, but its page tree can't be read (QA round 4): no reader can use this file
+  const counted = pdfDoc ? readPdfPageCount(pdfDoc) : 0;
+  if (counted === null) throw new UserFacingError(DAMAGED_PDF_MESSAGE);
+  const pageCount = counted;
   if (!pdfDoc || pageCount === 0) {
     // pdf-lib couldn't read it: let Vision try the first page
     const res = await ocrPdfPages(fileBuffer, null, [1]);

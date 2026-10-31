@@ -19,7 +19,9 @@ export const dynamic = 'force-dynamic';
  * `overran` (their leases run out and the next pass redoes those steps). Sizing and limits:
  * src/lib/processingWorker.ts. Safe to call back to back and concurrently: jobs are leased, so two
  * calls never run the same step. Answers 200
- * `{ stuck, enqueued, driven: [{ id, state }], due, ms, overran? }`.
+ * `{ stuck, enqueued, driven: [{ id, state }], due, soon, next_due_in_ms, ms, overran? }`: the caller
+ * calls again at once while `due` > 0, and after `next_due_in_ms` while `soon` > 0 (jobs in a short
+ * retry backoff, QA round 4; contract in docs/ingestion.md).
  *
  * Auth: `PROCESSING_WORKER_SECRET` as `X-Ingest-Secret` / `X-Worker-Secret` / `X-Api-Key`,
  * `Authorization: Bearer <secret>` or Basic (secret as password or user). Surrounding whitespace or
@@ -48,7 +50,7 @@ async function handle(request: Request): Promise<NextResponse> {
       workerConfig()
     );
     if (summary.stuck > 0 || summary.enqueued > 0 || summary.driven.length > 0) {
-      console.log(`[Processing Worker] stuck=${summary.stuck} enqueued=${summary.enqueued} driven=${JSON.stringify(summary.driven)} due=${summary.due} in ${summary.ms} ms`);
+      console.log(`[Processing Worker] stuck=${summary.stuck} enqueued=${summary.enqueued} driven=${JSON.stringify(summary.driven)} due=${summary.due} soon=${summary.soon} in ${summary.ms} ms`);
     }
     return NextResponse.json(summary);
   } catch (err) {

@@ -84,12 +84,54 @@ export function sniffUploadMime(bytes: Uint8Array): UploadMimeType | null {
   return null;
 }
 
-/** Server-side check of the stored bytes (size + magic bytes). */
+/** A PDF header followed by garbage, a truncated file, a PDF whose page tree can't be read (QA round 4). */
+export const DAMAGED_PDF_MESSAGE = 'קובץ ה-PDF פגום ולא ניתן לקרוא אותו - יש לייצא או לסרוק אותו מחדש ולהעלות שוב';
+
+/** Bytes searched for the first PDF object (every real PDF has one right after its header). */
+const PDF_OBJECT_SCAN_BYTES = 64 * 1024;
+/** No real PDF (header, one object, xref / trailer) is this small. */
+const MIN_PDF_BYTES = 64;
+
+/**
+ * Cheap structural check of a file that starts with '%PDF-': it is not tiny and has an indirect
+ * object ("<n> <gen> obj") near its start. Catches a header followed by garbage before anything is
+ * stored or OCR'd; deeper damage shows when the page tree is read (readPdfPageCount).
+ */
+export function hasPdfStructure(bytes: Uint8Array): boolean {
+  if (bytes.byteLength < MIN_PDF_BYTES) return false;
+  const end = Math.min(bytes.byteLength, PDF_OBJECT_SCAN_BYTES);
+  // "obj" preceded by whitespace and a digit (the generation number), e.g. "1 0 obj"
+  for (let i = 2; i + 2 < end; i++) {
+    if (bytes[i] === 0x6f && bytes[i + 1] === 0x62 && bytes[i + 2] === 0x6a) {
+      let j = i - 1;
+      if (bytes[j] !== 0x20 && bytes[j] !== 0x0a && bytes[j] !== 0x0d && bytes[j] !== 0x09) continue;
+      while (j > 0 && (bytes[j] === 0x20 || bytes[j] === 0x0a || bytes[j] === 0x0d || bytes[j] === 0x09)) j--;
+      if (bytes[j] >= 0x30 && bytes[j] <= 0x39) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Page count of a parsed PDF, or null when its page tree can't be read: pdf-lib loads some damaged
+ * files without throwing and only fails on getPageCount() (TypeError reading 'Pages', QA round 4).
+ */
+export function readPdfPageCount(doc: { getPageCount(): number }): number | null {
+  try {
+    const n = doc.getPageCount();
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Server-side check of the stored bytes (size + magic bytes, and a PDF's basic structure). */
 export function checkStoredBytes(bytes: Uint8Array): UploadCheck {
   if (bytes.byteLength === 0) return { ok: false, error: EMPTY_FILE_MESSAGE };
   if (bytes.byteLength > MAX_UPLOAD_BYTES) return { ok: false, error: TOO_LARGE_MESSAGE };
   const mime = sniffUploadMime(bytes);
   if (!mime) return { ok: false, error: CONTENT_MISMATCH_MESSAGE };
+  if (mime === 'application/pdf' && !hasPdfStructure(bytes)) return { ok: false, error: DAMAGED_PDF_MESSAGE };
   return { ok: true, mimeType: mime };
 }
 

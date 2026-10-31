@@ -20,7 +20,10 @@ No provider is configured in this repository.
 The browser uploads straight to Storage, so the server checks twice: `/api/invoices/upload-url` refuses
 unsupported names / declared types and sizes over 20 MB (`checkUploadDeclaration`), and
 `registerStoredDocument()` reads the stored bytes and refuses empty files, files over 20 MB and anything that
-is not a real PDF / JPG / PNG / WEBP by magic bytes (`checkStoredBytes`, [`src/shared/uploadValidation.ts`](../src/shared/uploadValidation.ts)).
+is not a real PDF / JPG / PNG / WEBP by magic bytes (`checkStoredBytes`, [`src/shared/uploadValidation.ts`](../src/shared/uploadValidation.ts)),
+including a PDF header followed by garbage (no indirect object near the start: "damaged, re-export or re-scan").
+A PDF that passes but whose page tree pdf-lib can't read (`getPageCount()` throws) fails processing at once with the
+same message, as a permanent error (no retries; QA round 4).
 A refused file gets no invoice row, its object is removed, and the upload screen shows the Hebrew reason per file.
 The migration `20261030161000_qa_pipeline.sql` also sets the `raw-invoices` bucket limits (20 MB, those four types).
 
@@ -69,11 +72,17 @@ there is no `after()` in `src`.
   latest 26 s, before Amplify's bare 504).
 - Ticks are driven by the **scheduled worker** `GET|POST /api/invoices/worker` and by the review screens
   (`/process/tick` every few seconds while an invoice shows as processing). The worker does its work
-  **inside the request** and answers `200 { stuck, enqueued, driven: [{ id, state }], due, ms, overran? }` within
+  **inside the request** and answers `200 { stuck, enqueued, driven: [{ id, state }], due, soon, next_due_in_ms, ms, overran? }` within
   `PROCESSING_WORKER_BUDGET_MS` (default 23 s, at most 24 s; at the latest budget + 3 s, listing steps that
   overran in `overran`): the sweep beside up to `PROCESSING_WORKER_MAX_JOBS` (default 6) due jobs in
   parallel, a freed slot taking the next due job while a step still fits. Call it every minute from an AWS Lambda (timeout 60 s) that calls again while
-  `due > 0`; back-to-back and concurrent calls are safe (leases). Sizing: see
+  `due > 0`; back-to-back and concurrent calls are safe (leases). **Re-call contract** (QA round 4): `due` = jobs
+  a tick can take now; `soon` = jobs not due yet that become due within 15 s (a short transient backoff, a lapsing
+  lease); `next_due_in_ms` = wait until the next of them is due (looking 20 s ahead, else `null`). Within its 60 s
+  window the Lambda calls again at once while `due > 0`, and while `due == 0 && soon > 0` it sleeps
+  `next_due_in_ms` (if that still leaves room for a call) and calls again; otherwise it stops until the next
+  minute. The worker itself also waits for a job that becomes due before its budget ends (at most 3 times a pass),
+  so a multi-part extract in a 5 s backoff no longer advances one part per minute. Sizing: see
   [`src/lib/processingWorker.ts`](../src/lib/processingWorker.ts) - 6 concurrent uploads (22- / 25-page PDFs
   included) each get an LLM step (or OCR rounds) per call, ~2 calls a minute.
   Auth: `PROCESSING_WORKER_SECRET` as `X-Ingest-Secret` / `X-Worker-Secret` / `X-Api-Key`,
@@ -81,9 +90,11 @@ there is no `after()` in `src`.
   are ignored; 503 when unset. Schedule it every minute, e.g. with EventBridge Scheduler (API destination).
 - A queued job whose lease is free is **resumed**, however long nobody drove it. A `processing` row that
   was never queued (`processing_attempts` 0: an upload whose enqueue didn't happen, rows from before the
-  queue) is **queued** by the sweep / a tick once it is a minute old, not failed. Stuck runs become `error`
+  queue) is **queued** by the sweep / a tick once it is a minute old, not failed. A run that was queued but whose job row
+  vanished before any step ran (still `queued`) is queued again after the same minute, at most twice in a row
+  (`processing_progress.requeues`), then fails with "the queued task was lost, retry" (QA round 4). Stuck runs become `error`
   with a Hebrew reason: queued rows whose job is gone and that made no progress for 10 minutes (the clock
-  starts at the latest of enqueue / job activity / row update), or runs older than 45 minutes; the user can
+  starts at the latest of enqueue / job activity / row update), or runs older than 45 minutes (only these suggest splitting the file, and only for 10+ pages); the user can
   retry ("עבד מחדש" on the review screen).
 - Concurrent `/process` calls start exactly one run: the claim is conditioned on the run token read, and a
   run claimed less than a minute ago counts as live even before its job row exists (the others get `409`).

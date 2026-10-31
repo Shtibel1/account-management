@@ -5,7 +5,7 @@ import { applySupplierRule, findSupplierRule, isGenericSupplierName, normalizeVa
 import { amountsChanged, autoApproveBlockers } from '@/shared/autoApprove';
 import { findDuplicatesForInvoice } from '@/lib/duplicates';
 import { duplicateViolationMessages } from '@/shared/duplicates';
-import { searchVatIdByName } from '@/utils/businessLookup';
+import { lookupVatIdByName, REGISTRAR_UNAVAILABLE_WARNING, type VatLookupStatus } from '@/utils/businessLookup';
 import {
   allocationThreshold,
   isAllocationNumberWellFormed,
@@ -127,6 +127,7 @@ export async function validateInvoice(
   // below, and are the trusted replacement when the extracted ID turns out to be the buyer's (1.5).
   let supplierTableVatId: string | null = null;
   let webSearchVatId: string | null = null;
+  let webSearchStatus: VatLookupStatus = 'skipped';
 
   if (corrected.supplier_name) {
     // 1.5.1 Supplier Table Lookup
@@ -155,7 +156,9 @@ export async function validateInvoice(
 
     // 1.5.2 Web Search Lookup (never for the catch-all placeholder name: any hit would be unrelated)
     if (!isGenericSupplierName(corrected.supplier_name)) try {
-      const searchResult = await searchVatIdByName(corrected.supplier_name);
+      const lookup = await lookupVatIdByName(corrected.supplier_name);
+      webSearchStatus = lookup.status;
+      const searchResult = lookup.vatId;
       if (searchResult) {
         // Pad the web search vat_id if it's 8 digits
         let cleanWeb = searchResult.replace(/\D/g, '');
@@ -166,9 +169,14 @@ export async function validateInvoice(
         }
       }
     } catch (err) {
+      webSearchStatus = 'unavailable';
       console.error('Failed to search web for supplier VAT ID:', err);
     }
   }
+  // The registrar could not be asked (timeouts / errors, QA round 4): the supplier's VAT ID was not
+  // cross-checked against it, which the reviewer should know (the supplier table, when it has the
+  // supplier, is the stronger source anyway)
+  if (webSearchStatus === 'unavailable' && !supplierTableVatId) warnings.push(REGISTRAR_UNAVAILABLE_WARNING);
 
   // 1.5 The supplier's VAT ID is the issuer's. An ID printed next to a buyer label ("לכבוד",
   // "ח.פ לקוח") or known to be the client's own ID is the buyer's: swap it for the issuer-labelled
@@ -424,6 +432,7 @@ export async function validateInvoice(
       invoice: invoiceVatId,
       supplier_table: supplierTableVatId,
       web_search: webSearchVatId,
+      web_search_status: webSearchStatus,
     },
   };
 
