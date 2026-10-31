@@ -1,16 +1,16 @@
 import { supabase } from '@/lib/supabase';
 import { DEFAULT_CATEGORY_MAPPINGS, type ClientRecordsDb, type ClientRow } from '@/lib/clientRecords';
 
-const COLUMNS = 'id, name, vat_account, org_id, inbound_alias, created_at';
+const COLUMNS = 'id, name, vat_account, org_id, inbound_alias, created_at, archived_at';
 
 /** ClientRecordsDb over the service-role client. Routes call it only after their access checks. */
 export function serviceClientRecordsDb(): ClientRecordsDb {
   return {
     async listClients(orgId) {
-      let query = supabase.from('clients').select('id, name');
+      let query = supabase.from('clients').select('id, name, archived_at');
       if (orgId) query = query.eq('org_id', orgId);
       const { data, error } = await query;
-      return { data: (data ?? null) as { id: string; name: string | null }[] | null, error };
+      return { data: (data ?? null) as { id: string; name: string | null; archived_at?: string | null }[] | null, error };
     },
     async insertClient(row) {
       const { data, error } = await supabase.from('clients').insert(row).select(COLUMNS).single();

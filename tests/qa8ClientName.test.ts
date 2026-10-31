@@ -12,7 +12,7 @@ function fakeDb(seed: ClientRow[], opts: { insertError?: { code?: string; messag
   const mappings: string[] = [];
   let n = 0;
   const db: ClientRecordsDb = {
-    listClients: async (orgId) => ({ data: rows.filter((r) => !orgId || r.org_id === orgId).map(({ id, name }) => ({ id, name })), error: null }),
+    listClients: async (orgId) => ({ data: rows.filter((r) => !orgId || r.org_id === orgId).map(({ id, name, archived_at }) => ({ id, name, archived_at })), error: null }),
     insertClient: async (row) => {
       if (opts.insertError) return { data: null, error: opts.insertError };
       const created = { id: `new-${++n}`, name: row.name, vat_account: row.vat_account, org_id: row.org_id ?? null };
@@ -94,6 +94,32 @@ describe('client names are unique per office (QA round 8)', () => {
     const r = await updateClientRecord(f.db, { id: 'd2', orgId: ORG_A, name: 'Dup', vatAccount: '1320' });
     assert.ok(r.ok);
     assert.equal(r.client.vat_account, '1320');
+  });
+
+  test('archived clients free their name; restoring onto a taken name is refused (QA round 8)', async () => {
+    const f = fakeDb([
+      { id: 'old', name: 'Shared', vat_account: '', org_id: ORG_A, archived_at: '2026-10-31T00:00:00Z' },
+      { id: 'x', name: 'Other', vat_account: '', org_id: ORG_A },
+    ]);
+    const created = await createClientRecord(f.db, { orgId: ORG_A, name: 'shared', vatAccount: '' });
+    assert.ok(created.ok);
+    assert.deepEqual(await updateClientRecord(f.db, { id: 'old', orgId: ORG_A, archived: false }), { ok: false, status: 409, error: DUPLICATE_CLIENT_NAME_MESSAGE, field: 'name' });
+    const restored = await updateClientRecord(f.db, { id: 'old', orgId: ORG_A, archived: false, name: 'Shared (old)' });
+    assert.ok(restored.ok);
+    assert.equal(restored.client.archived_at, null);
+    const archived = await updateClientRecord(f.db, { id: 'x', orgId: ORG_A, archived: true });
+    assert.ok(archived.ok);
+    assert.ok(archived.client.archived_at);
+    assert.equal((await updateClientRecord(f.db, { id: 'x', orgId: ORG_A, archived: true })).ok, false);
+    assert.equal((await updateClientRecord(f.db, { id: 'x', orgId: ORG_A, archived: 'yes' })).ok, false);
+  });
+
+  test('the archive migration keeps archived rows out of the name rule and archived_at server-only', () => {
+    const sql = readFileSync(new URL('../supabase/migrations/20261031133000_qa8_client_archive.sql', import.meta.url), 'utf8');
+    assert.match(sql, /add column if not exists archived_at timestamptz/);
+    assert.match(sql, /c\.archived_at is null/);
+    assert.match(sql, /before insert or update of name, org_id, archived_at on public\.clients/);
+    assert.match(sql, /clients\.archived_at can only be changed through the application/);
   });
 
   test('the migration guards inserts and renames with the same normalization, not a unique index', () => {

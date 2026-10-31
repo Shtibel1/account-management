@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Loader2, MoreVertical, Pencil, Trash2 } from 'lucide-react';
+import { MoreVertical, Pencil, Trash2 } from 'lucide-react';
 import type { Client } from '@/shared/types';
 import { clientNameError } from '@/shared/clientName';
 import { vatAccountError } from '@/shared/mappingValidation';
@@ -189,54 +189,36 @@ export function EditClientDialog({ client, onClose, onSaved }: { client: Client;
   );
 }
 
-/** In-app confirmation for DELETE /api/clients/[id]; a refusal shows the server's Hebrew reason. */
-export function DeleteClientDialog({ client, onClose, onDeleted }: { client: Client; onClose: () => void; onDeleted: (id: string) => void }) {
-  const [deleting, setDeleting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+/** DELETE /api/clients/[id]: ok, or the server's Hebrew reason (`reason` = the guard's blocker code). */
+export async function deleteClientRequest(id: string): Promise<{ ok: true } | { ok: false; status: number; error: string; reason?: string }> {
+  try {
+    const res = await fetch(`/api/clients/${id}`, { method: 'DELETE' });
+    if (res.ok) return { ok: true };
+    let body: { error?: unknown; reason?: unknown } = {};
+    try { body = await res.json(); } catch { /* not JSON */ }
+    return {
+      ok: false,
+      status: res.status,
+      error: typeof body.error === 'string' && body.error ? body.error : 'מחיקת הלקוח נכשלה',
+      reason: typeof body.reason === 'string' ? body.reason : undefined,
+    };
+  } catch {
+    return { ok: false, status: 0, error: 'מחיקת הלקוח נכשלה. בדקו את החיבור ונסו שוב.' };
+  }
+}
 
-  const confirmDelete = async () => {
-    if (deleting) return;
-    setDeleting(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/clients/${client.id}`, { method: 'DELETE' });
-      if (!res.ok) {
-        setError((await readError(res, 'מחיקת הלקוח נכשלה')).error);
-        return;
-      }
-      onDeleted(client.id);
-    } catch {
-      setError('מחיקת הלקוח נכשלה. בדקו את החיבור ונסו שוב.');
-    } finally {
-      setDeleting(false);
-    }
-  };
-
-  return (
-    <DialogShell titleId="delete-client-title" onClose={deleting ? () => {} : onClose}>
-      <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-        <h3 id="delete-client-title" className="text-lg font-bold text-slate-900">מחיקת לקוח</h3>
-        <button type="button" onClick={onClose} disabled={deleting} aria-label="סגור" className="text-slate-400 hover:text-slate-600 transition-colors text-lg font-bold">✕</button>
-      </div>
-      <p className="text-sm text-slate-700">
-        למחוק את הלקוח <strong className="font-semibold text-slate-900 break-words">{client.name}</strong>?
-      </p>
-      <p className="text-xs text-slate-500">
-        הלקוח, המיפויים והקבצים שלו יימחקו לצמיתות. ניתן למחוק רק לקוח שכל החשבוניות שלו נכשלו בעיבוד או ממתינות לבדיקה.
-      </p>
-      {error && <p role="alert" className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-3 py-2">{error}</p>}
-      <div className="flex gap-2 pt-1">
-        <button
-          type="button" onClick={confirmDelete} disabled={deleting}
-          className="flex items-center gap-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white px-5 py-2 rounded-xl text-sm font-semibold transition-colors"
-        >
-          {deleting && <Loader2 className="h-4 w-4 animate-spin" />}
-          {deleting ? 'מוחק...' : 'מחק לקוח'}
-        </button>
-        <button type="button" onClick={onClose} disabled={deleting} className="px-5 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors">
-          ביטול
-        </button>
-      </div>
-    </DialogShell>
-  );
+/** PATCH /api/clients/[id] { archived }: archive (hide) or restore a client. */
+export async function setClientArchivedRequest(id: string, archived: boolean): Promise<{ client: Client } | ClientApiError> {
+  const fallback = archived ? 'העברת הלקוח לארכיון נכשלה' : 'שחזור הלקוח נכשל';
+  try {
+    const res = await fetch(`/api/clients/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ archived }),
+    });
+    if (!res.ok) return readError(res, fallback);
+    return (await res.json()) as { client: Client };
+  } catch {
+    return { error: `${fallback}. בדקו את החיבור ונסו שוב.` };
+  }
 }

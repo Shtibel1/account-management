@@ -60,7 +60,7 @@ export default function BankPage() {
   const requestSeq = useRef(0);
 
   useEffect(() => {
-    supabase.from('clients').select('*').order('name').then(({ data }) => {
+    supabase.from('clients').select('*').is('archived_at', null).order('name').then(({ data }) => {
       setClients((data as Client[]) ?? []);
       if (data?.length) setClientId(data[0].id);
     });
