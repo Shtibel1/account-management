@@ -17,6 +17,7 @@ import { pageRotationsFromWords, type PageTurn } from '@/shared/orientation';
 import { PDFDocument } from 'pdf-lib';
 import { PIPELINE_URL_TTL_SECONDS, signedInvoiceFileUrl, signObjectPath, storedFileUrlFor } from '@/lib/invoiceFiles';
 import { toUserErrorMessage } from '@/shared/processing';
+import { findSplitNumberBbox } from '@/shared/ocrSplitNumber';
 
 function parseNumber(text: string): number | null {
   const clean = text.replace(/[^0-9.]/g, '');
@@ -167,7 +168,8 @@ export function matchBboxesWithOcr(
   for (const field of fields) {
     const val = extractedData[field];
     if (val != null) {
-      const match = findExactBbox(val, ocrWords);
+      // An invoice number the OCR split into adjacent words ("0941/3" -> "3", "0941") still gets its box
+      const match = findExactBbox(val, ocrWords) ?? (field === 'invoice_number' ? findSplitNumberBbox(val, ocrWords) : undefined);
       if (match) {
         bboxes[field] = match;
       } else if (dropUnmatched.has(field)) {
