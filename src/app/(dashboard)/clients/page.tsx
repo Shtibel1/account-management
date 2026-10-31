@@ -8,11 +8,12 @@ import { Plus, Building2, ChevronLeft, Users, Loader2, Plug } from 'lucide-react
 import { useSession } from '@/components/Auth/SessionContext';
 import { useToast } from '@/components/ui/Toast';
 import { ClientChannelsDialog, ClientChannelsSummary, useClientChannels } from '@/components/ClientChannels/ClientChannels';
-import { mappingDbErrorMessage, vatAccountError } from '@/shared/mappingValidation';
+import { vatAccountError } from '@/shared/mappingValidation';
+import { ClientCardMenu, createClientRequest, DeleteClientDialog, EditClientDialog } from '@/components/Clients/ClientDialogs';
 
 export default function ClientsPage() {
   const supabase = createClient();
-  const { currentOrgId } = useSession();
+  const { me, currentOrgId } = useSession();
   const { toast } = useToast();
   const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
@@ -21,6 +22,14 @@ export default function ClientsPage() {
   const [vatAccount, setVatAccount] = useState('');
   const [saving, setSaving] = useState(false);
   const [channelsClient, setChannelsClient] = useState<Client | null>(null);
+  // Server answer for the name field (e.g. 409 duplicate name), shown inline under the input.
+  const [nameServerError, setNameServerError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [editClient, setEditClient] = useState<Client | null>(null);
+  const [deleteClient, setDeleteClient] = useState<Client | null>(null);
+  // Deleting is for office owners (DELETE /api/clients/[id] checks it too); not in the local mock.
+  const canDelete = (c: Client) =>
+    !!me && !me.mock && me.organizations.some((o) => o.id === c.org_id && o.role === 'owner');
   // Reload channels whenever the client list changes (new clients get an inbound alias).
   const { settings, channels, setContacts } = useClientChannels(clients.length);
 
@@ -32,20 +41,12 @@ export default function ClientsPage() {
 
   useEffect(() => { load(); }, []);
 
-  const DEFAULT_CATEGORY_MAPPINGS = [
-    { key: 'ציוד משרדי', account_code: '4001' },
-    { key: 'שכ"ד', account_code: '4010' },
-    { key: 'תקשורת', account_code: '4020' },
-    { key: 'שיווק ופרסום', account_code: '4030' },
-    { key: 'נסיעות', account_code: '4040' },
-    { key: 'אחזקה', account_code: '4050' },
-    { key: 'שירותים מקצועיים', account_code: '4060' },
-    { key: 'חשמל ומים', account_code: '4070' },
-    { key: 'אחר', account_code: '4099' },
-  ];
-
   // Goes into the export's account column: digits only (see src/shared/mappingValidation.ts)
   const vatAccountErr = vatAccountError(vatAccount);
+
+  const closeForm = () => {
+    setShowForm(false); setNameServerError(null); setFormError(null);
+  };
 
   const handleAdd = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -55,28 +56,18 @@ export default function ClientsPage() {
       return;
     }
     setSaving(true);
-    const { data: newClient, error: insertErr } = await supabase
-      .from('clients')
-      // org_id: the user's office (RLS requires membership; the DB defaults it when omitted).
-      .insert({ name: name.trim(), vat_account: vatAccount.trim(), ...(currentOrgId ? { org_id: currentOrgId } : {}) })
-      .select('id')
-      .single();
-    if (insertErr || !newClient) {
-      // e.g. RLS: the user has no office yet.
-      console.error('[Clients] Failed to create client:', insertErr?.message);
-      toast((insertErr?.code === '23514' ? mappingDbErrorMessage(insertErr) : null) ?? 'יצירת הלקוח נכשלה. ודאו שאתם משויכים למשרד ונסו שוב.', 'error');
-      setSaving(false);
+    setNameServerError(null);
+    setFormError(null);
+    // The server creates the client and its default category mappings, and refuses a name already
+    // used in the office (409, QA round 8).
+    const result = await createClientRequest({ name, vatAccount, orgId: currentOrgId });
+    setSaving(false);
+    if ('error' in result) {
+      if (result.field === 'name') setNameServerError(result.error);
+      else setFormError(result.error);
       return;
     }
-    await supabase.from('account_mappings').insert(
-      DEFAULT_CATEGORY_MAPPINGS.map((cat) => ({
-        client_id: newClient.id,
-        mapping_type: 'category',
-        key: cat.key,
-        account_code: cat.account_code,
-      }))
-    );
-    setName(''); setVatAccount(''); setShowForm(false); setSaving(false);
+    setName(''); setVatAccount(''); closeForm();
     load();
   };
 
@@ -108,11 +99,16 @@ export default function ClientsPage() {
               <input
                 id="new-client-name"
                 required
-                value={name} onChange={(e) => setName(e.target.value)}
+                value={name} onChange={(e) => { setName(e.target.value); setNameServerError(null); }}
                 placeholder='חברת ABC בע"מ'
-                className="input-base"
+                aria-invalid={!!nameServerError || undefined}
+                aria-describedby={nameServerError ? 'new-client-name-error' : undefined}
+                className={nameServerError ? 'input-base input-error' : 'input-base'}
                 autoFocus
               />
+              {nameServerError && (
+                <p id="new-client-name-error" role="alert" className="text-xs text-red-600 mt-1">{nameServerError}</p>
+              )}
             </div>
             <div>
               <label htmlFor="new-client-vat-account" className="block text-sm font-medium text-slate-700 mb-1.5">קוד חשבון מע"מ תשומות</label>
@@ -127,18 +123,21 @@ export default function ClientsPage() {
                 className={vatAccountErr ? 'input-base input-error text-right' : 'input-base text-right'}
               />
               {vatAccountErr && (
-                <p id="new-client-vat-account-error" className="text-xs text-red-600 mt-1">{vatAccountErr}</p>
+                <p id="new-client-vat-account-error" role="alert" className="text-xs text-red-600 mt-1">{vatAccountErr}</p>
               )}
             </div>
           </div>
+          {formError && (
+            <p role="alert" className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-3 py-2">{formError}</p>
+          )}
           <div className="flex gap-2 pt-1">
             <button
-              type="submit" disabled={saving || !name.trim() || !!vatAccountErr}
+              type="submit" disabled={saving || !name.trim() || !!vatAccountErr || !!nameServerError}
               className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-5 py-2 rounded-xl text-sm font-semibold transition-colors"
             >
               {saving ? 'שומר...' : 'שמור לקוח'}
             </button>
-            <button type="button" onClick={() => setShowForm(false)} className="px-5 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors">
+            <button type="button" onClick={closeForm} className="px-5 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors">
               ביטול
             </button>
           </div>
@@ -168,8 +167,9 @@ export default function ClientsPage() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {clients.map((c) => (
-            <div key={c.id} className="card hover:shadow-card-md hover:border-blue-200 transition-all group overflow-hidden">
-              <Link href={`/upload?clientId=${c.id}`} className="block p-5 cursor-pointer">
+            <div key={c.id} className="card hover:shadow-card-md hover:border-blue-200 transition-all group">
+              <div className="flex items-start">
+              <Link href={`/upload?clientId=${c.id}`} className="block flex-1 min-w-0 p-5 pl-2 cursor-pointer">
                 <div className="flex items-start justify-between">
                   <div className="flex items-center gap-3 min-w-0">
                     <div className="bg-gradient-to-br from-blue-500 to-blue-700 rounded-xl p-2.5 shadow-sm">
@@ -182,9 +182,18 @@ export default function ClientsPage() {
                       </p>
                     </div>
                   </div>
-                  <ChevronLeft className="h-4 w-4 text-slate-400 group-hover:text-blue-500 transition-colors mt-1" />
+                  <ChevronLeft className="h-4 w-4 text-slate-400 group-hover:text-blue-500 transition-colors mt-1 shrink-0" />
                 </div>
               </Link>
+              <div className="pt-4 pl-3">
+                <ClientCardMenu
+                  clientName={c.name}
+                  canDelete={canDelete(c)}
+                  onEdit={() => setEditClient(c)}
+                  onDelete={() => setDeleteClient(c)}
+                />
+              </div>
+              </div>
               <ClientChannelsSummary
                 info={channels[c.id]}
                 settings={settings}
@@ -192,13 +201,37 @@ export default function ClientsPage() {
               />
               <Link
                 href={`/integrations?clientId=${c.id}`}
-                className="flex items-center gap-2 border-t border-slate-100 px-5 py-2.5 text-xs font-medium text-blue-600 hover:text-blue-700 hover:bg-slate-50 transition-colors"
+                className="flex items-center gap-2 border-t border-slate-100 px-5 py-2.5 text-xs font-medium text-blue-600 hover:text-blue-700 hover:bg-slate-50 rounded-b-2xl transition-colors"
               >
                 <Plug className="h-3.5 w-3.5" /> חיבור להנהלת חשבונות
               </Link>
             </div>
           ))}
         </div>
+      )}
+
+      {editClient && (
+        <EditClientDialog
+          client={editClient}
+          onClose={() => setEditClient(null)}
+          onSaved={(saved) => {
+            setClients((list) => list.map((c) => (c.id === saved.id ? { ...c, ...saved } : c)));
+            setEditClient(null);
+            toast('פרטי הלקוח עודכנו', 'success');
+          }}
+        />
+      )}
+
+      {deleteClient && (
+        <DeleteClientDialog
+          client={deleteClient}
+          onClose={() => setDeleteClient(null)}
+          onDeleted={(id) => {
+            setClients((list) => list.filter((c) => c.id !== id));
+            setDeleteClient(null);
+            toast('הלקוח נמחק', 'success');
+          }}
+        />
       )}
 
       {channelsClient && (
