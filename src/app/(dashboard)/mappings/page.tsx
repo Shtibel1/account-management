@@ -624,7 +624,6 @@ export default function MappingsPage() {
               <div className="relative w-full sm:w-64">
                 <input
                   type="text"
-                  type="search"
                   aria-label="חיפוש ספקים"
                   placeholder="חיפוש ספק, ח.פ., קוד..."
                   value={searchQuery}
