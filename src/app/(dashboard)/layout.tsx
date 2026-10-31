@@ -174,8 +174,9 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
             <h1 className="text-lg font-semibold text-slate-800 truncate">{pageTitle}</h1>
           </div>
           <div className="hidden sm:flex items-center gap-2 shrink-0">
-            <span className="text-xs text-slate-400 bg-slate-100 px-3 py-1 rounded-full">
-              {new Date().toLocaleDateString('he-IL', { weekday: 'long', day: 'numeric', month: 'long' })}
+            {/* Israel time on server and browser alike; the server (UTC) and browser can still straddle midnight */}
+            <span className="text-xs text-slate-400 bg-slate-100 px-3 py-1 rounded-full" suppressHydrationWarning>
+              {new Date().toLocaleDateString('he-IL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Asia/Jerusalem' })}
             </span>
           </div>
         </header>
