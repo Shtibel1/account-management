@@ -116,6 +116,17 @@ export default function ReviewDetailPage() {
   const [yOffset, setYOffset] = useState(0);
   // Below lg the document is a sticky panel above the form; it can be folded to its title bar
   const [docCollapsed, setDocCollapsed] = useState(false);
+  // ...stuck right under the dashboard's sticky top bar, whose height differs per breakpoint
+  const [topBarHeight, setTopBarHeight] = useState(0);
+  useEffect(() => {
+    const bar = document.querySelector<HTMLElement>('main > header');
+    if (!bar) return;
+    const update = () => setTopBarHeight(bar.offsetHeight);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(bar);
+    return () => ro.disconnect();
+  }, []);
 
   // Manual split states
   const [pageCount, setPageCount] = useState<number | null>(null);
@@ -341,7 +352,7 @@ export default function ReviewDetailPage() {
                   className="px-2 py-0.5 rounded-lg bg-white border border-amber-200 text-amber-800"
                 >
                   חלק {idx + 1}:{' '}
-                  {doc.start_page === doc.end_page ? `עמוד ${doc.start_page}` : `עמודים ${doc.start_page}-${doc.end_page}`}
+                  {doc.start_page === doc.end_page ? `עמוד ${doc.start_page}` : <>עמודים <bdi dir="ltr">{doc.start_page}-{doc.end_page}</bdi></>}
                   {doc.reason && <span className="text-amber-600"> · {doc.reason}</span>}
                 </span>
               ))}
@@ -381,7 +392,8 @@ export default function ReviewDetailPage() {
 
         {/* Left — document viewer (places it on the left side in RTL) */}
         <div
-          className={`card overflow-hidden flex flex-col order-first sticky top-[61px] md:top-[69px] z-[5] shadow-md lg:order-none lg:static lg:z-auto lg:shadow-sm lg:h-auto ${
+          style={{ top: topBarHeight }}
+          className={`card overflow-hidden flex flex-col order-first sticky z-[5] shadow-md lg:order-none lg:static lg:z-auto lg:shadow-sm lg:h-auto ${
             docCollapsed ? 'h-auto' : 'h-[42vh]'
           }`}
         >
@@ -505,7 +517,7 @@ export default function ReviewDetailPage() {
                 />
                 <div className="flex-1">
                   <p className="text-sm font-semibold text-slate-800">פיצול לפי טווחי עמודים מותאמים אישית</p>
-                  <p className="text-xs text-slate-400">הגדר טווחים מותאמים אישית (למשל, עמודים 1-2 ביחד)</p>
+                  <p className="text-xs text-slate-400">הגדר טווחים מותאמים אישית (למשל, עמודים <bdi dir="ltr">1-2</bdi> ביחד)</p>
                 </div>
               </label>
             </div>
@@ -521,7 +533,7 @@ export default function ReviewDetailPage() {
                   </p>
                 )}
                 <label htmlFor="split-ranges" className="block text-xs font-semibold text-slate-500">
-                  הזן טווחים מופרדים בפסיקים (לדוגמה: 1-2, 3, 4-{pageCount}):
+                  הזן טווחים מופרדים בפסיקים (לדוגמה: <bdi dir="ltr">1-2, 3, 4-{pageCount}</bdi>):
                 </label>
                 <input
                   id="split-ranges"
@@ -543,7 +555,7 @@ export default function ReviewDetailPage() {
                         <div key={idx} className="bg-white px-2 py-1 rounded border border-slate-200/50 flex items-center justify-between">
                           <span>חלק {idx + 1}:</span>
                           <span className="text-blue-600 font-semibold">
-                            {range.startPage === range.endPage ? `עמוד ${range.startPage}` : `עמודים ${range.startPage}-${range.endPage}`}
+                            {range.startPage === range.endPage ? `עמוד ${range.startPage}` : <>עמודים <bdi dir="ltr">{range.startPage}-{range.endPage}</bdi></>}
                           </span>
                         </div>
                       ))}

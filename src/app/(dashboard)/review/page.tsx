@@ -26,6 +26,8 @@ export default function ReviewPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [clients, setClients] = useState<Record<string, string>>({});
+  // Active (not archived) clients: all of them are offered in the client filter, also without invoices
+  const [activeClientIds, setActiveClientIds] = useState<string[]>([]);
   const prevStatuses = useRef<Record<string, string>>({});
   // The office the user is working in (sidebar), not just the oldest membership.
   const { currentOrgId } = useSession();
@@ -38,9 +40,10 @@ export default function ReviewPage() {
     // (same-named clients get their VAT account / creation date so the filter options differ)
     const { data: clientsData } = await supabase
       .from('clients')
-      .select('id, name, vat_account, created_at');
+      .select('id, name, vat_account, created_at, archived_at');
     const clientMap: Record<string, string> = Object.fromEntries(clientDisplayNames(clientsData ?? []));
     setClients(clientMap);
+    setActiveClientIds((clientsData ?? []).filter((c: { archived_at?: string | null }) => !c.archived_at).map((c: { id: string }) => c.id));
 
     const { data } = await supabase
       .from('invoices')
@@ -122,7 +125,7 @@ export default function ReviewPage() {
           <Loader2 className="h-7 w-7 animate-spin" />
         </div>
       ) : (
-        <InvoiceTable invoices={invoices} clients={clients} onExported={() => load()} showReturned={reviewLoop} />
+        <InvoiceTable invoices={invoices} clients={clients} filterClientIds={activeClientIds} onExported={() => load()} showReturned={reviewLoop} />
       )}
     </div>
   );

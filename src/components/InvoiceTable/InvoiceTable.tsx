@@ -17,6 +17,8 @@ import { inDateRange } from '@/shared/invoiceDateRange';
 interface Props {
   invoices: Invoice[];
   clients?: Record<string, string>;
+  /** Clients offered in the client filter even without invoices (the office's active clients). */
+  filterClientIds?: string[];
   onExported?: () => void;
   /** Accountant review loop flag: offers the "הוחזר ללקוח" status filter. */
   showReturned?: boolean;
@@ -53,7 +55,7 @@ function MiddleTruncate({ text, className }: { text: string; className?: string 
   );
 }
 
-export function InvoiceTable({ invoices, clients = {}, onExported, showReturned = false }: Props) {
+export function InvoiceTable({ invoices, clients = {}, filterClientIds = [], onExported, showReturned = false }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
   const [missingMappings, setMissingMappings] = useState<string[] | null>(null);
@@ -74,7 +76,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
 
   // Every client of the office (also those without invoices yet), then any other client an invoice has
   const uniqueClientIds = Array.from(new Set([
-    ...Object.keys(clients).sort((a, b) => (clients[a] || '').localeCompare(clients[b] || '', 'he')),
+    ...filterClientIds.filter((id) => id in clients).sort((a, b) => (clients[a] || '').localeCompare(clients[b] || '', 'he')),
     ...invoices.map((i) => i.client_id),
   ]));
 
@@ -352,11 +354,11 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
                         <span className="shrink-0"><StatusBadge status={inv.status} /></span>
                       </div>
                       <div className="flex items-center gap-2 min-w-0 text-xs text-slate-500">
-                        <span className="truncate text-slate-700 font-medium">{data?.supplier_name ?? 'ספק לא ידוע'}</span>
+                        <span className="truncate min-w-0 text-slate-700 font-medium">{data?.supplier_name ?? 'ספק לא ידוע'}</span>
                         {clients[inv.client_id] && (
                           <>
                             <span className="text-slate-300 shrink-0">·</span>
-                            <span className="truncate">{clients[inv.client_id]}</span>
+                            <span className="truncate min-w-0 shrink-[3]">{clients[inv.client_id]}</span>
                           </>
                         )}
                       </div>

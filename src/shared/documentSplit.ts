@@ -132,15 +132,24 @@ export function validateSplitRanges(raw: unknown, pageCount: number): RangeValid
       return { ok: false, error: `עמוד ${r.start_page} מופיע ביותר מטווח אחד` };
     }
     if (r.start_page > expectedStart) {
-      return { ok: false, error: `חסרים עמודים בפיצול: ${formatPageSpan(expectedStart, r.start_page - 1)}` };
+      return { ok: false, error: `חסרים עמודים בפיצול: ${ltrSpan(expectedStart, r.start_page - 1)}` };
     }
     expectedStart = r.end_page + 1;
   }
   if (expectedStart <= pageCount) {
-    return { ok: false, error: `חסרים עמודים בפיצול: ${formatPageSpan(expectedStart, pageCount)}` };
+    return { ok: false, error: `חסרים עמודים בפיצול: ${ltrSpan(expectedStart, pageCount)}` };
   }
 
   return { ok: true, ranges };
+}
+
+/** Unicode left-to-right isolate / pop directional isolate. */
+const LRI = String.fromCharCode(0x2066);
+const PDI = String.fromCharCode(0x2069);
+
+/** A page span inside Hebrew text: isolated left-to-right, so "3-4" doesn't show as "4-3" (RTL bidi). */
+function ltrSpan(start: number, end: number): string {
+  return LRI + formatPageSpan(start, end) + PDI;
 }
 
 function formatPageSpan(start: number, end: number): string {

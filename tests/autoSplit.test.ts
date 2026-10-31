@@ -263,3 +263,12 @@ describe('review list filter', () => {
     assert.equal(reviewListHref(null), '/review');
   });
 });
+
+describe('split page ranges in Hebrew text', () => {
+  test('a missing-pages error isolates the range left-to-right (no "4-3")', async () => {
+    const { validateSplitRanges } = await import('@/shared/documentSplit');
+    const r = validateSplitRanges([{ start_page: 1, end_page: 2 }], 4);
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.error, `חסרים עמודים בפיצול: ${String.fromCharCode(0x2066)}3-4${String.fromCharCode(0x2069)}`);
+  });
+});
