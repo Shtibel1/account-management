@@ -72,7 +72,7 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
     const container = containerRef.current;
     if (!container) return;
     setFitWidth((prev) => {
-      const next = Math.max(120, container.clientWidth - 2 * PAD.x);
+      const next = Math.max(120, container.clientWidth - 2 * PAD.x - 2);
       return Math.abs(prev - next) > 1 ? next : prev;
     });
 

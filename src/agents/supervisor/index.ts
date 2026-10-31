@@ -13,7 +13,7 @@ import { loadFewShotExamples, saveExtractionContext } from '@/lib/fewshot';
 import { saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
 import { linkResubmission, linkReturnedToResubmission, planResubmissionLink, unlinkReturnedFromResubmission } from '@/lib/returns';
 import { computeConfidence } from '@/shared/confidence';
-import { pageRotationsFromWords } from '@/shared/orientation';
+import { pageRotationsFromWords, type PageTurn } from '@/shared/orientation';
 import { PDFDocument } from 'pdf-lib';
 import { PIPELINE_URL_TTL_SECONDS, signedInvoiceFileUrl, signObjectPath, storedFileUrlFor } from '@/lib/invoiceFiles';
 import { toUserErrorMessage } from '@/shared/processing';
@@ -283,7 +283,12 @@ export interface PipelineRunOptions {
   preOcr?: PrecomputedOcr | null;
 }
 
-export type PipelineRunState = PipelineState & { runId?: string | null; splitDetectionFailed?: boolean };
+export type PipelineRunState = PipelineState & {
+  runId?: string | null;
+  splitDetectionFailed?: boolean;
+  /** Pages to show turned (whole file); undefined = derive from ocrWords. */
+  pageRotations?: Record<string, PageTurn> | null;
+};
 
 export const SPLIT_DETECTION_FAILED_WARNING = 'לא ניתן היה לבדוק אוטומטית אם הקובץ מכיל כמה מסמכים - יש לבדוק ידנית ולפצל במידת הצורך';
 
@@ -441,8 +446,10 @@ export function routeAfterValidation(result: ValidationResult | null | undefined
  * returned invoice is unlinked again. Returns true when saved.
  */
 /** Adds the pages the viewer should turn upright (from the OCR boxes, no extra call). */
-function withPageRotations(data: ExtractedData, ocrWords: OcrWord[] | undefined): ExtractedData {
-  const rotations = pageRotationsFromWords(ocrWords);
+function withPageRotations(data: ExtractedData, state: PipelineState): ExtractedData {
+  // The queue passes the whole file's rotations (its words here may cover one document of it)
+  const given = (state as PipelineRunState).pageRotations;
+  const rotations = given !== undefined ? given : pageRotationsFromWords(state.ocrWords);
   if (rotations) return { ...data, page_rotations: rotations };
   if (data.page_rotations) {
     const { page_rotations: _dropped, ...rest } = data;
@@ -452,7 +459,7 @@ function withPageRotations(data: ExtractedData, ocrWords: OcrWord[] | undefined)
 }
 
 export async function saveRunOutcome(state: PipelineState, kind: 'review' | 'approved' | 'error'): Promise<boolean> {
-  if (state.extractedData) state = { ...state, extractedData: withPageRotations(state.extractedData, state.ocrWords) };
+  if (state.extractedData) state = { ...state, extractedData: withPageRotations(state.extractedData, state) };
   if (kind === 'error') {
     console.error(`[Supervisor] ❌ Saving state: ERROR (Total Cost: $${state.costMetrics.estimatedCostUsd}). Details: ${state.error}`);
     const updateData: Record<string, unknown> = {
@@ -550,6 +557,8 @@ export interface QueuedExtractionInput {
   costMetrics: CostMetrics;
   /** Rules learned from corrections for this document (loaded with the few-shot examples). */
   learnedRules?: LearnedRule[];
+  /** Upside-down / sideways pages of the whole file (from all its OCR words). */
+  pageRotations?: Record<string, PageTurn> | null;
 }
 
 export type QueuedExtractionOutcome =
@@ -607,6 +616,7 @@ export async function finalizeQueuedExtraction(input: QueuedExtractionInput): Pr
     fewShotExampleIds: input.fewShotExampleIds,
     runId: input.runId,
     splitDetectionFailed: input.splitDetectionFailed,
+    pageRotations: input.pageRotations,
   };
   const status = route === 'save_error' ? 'error' : route === 'save_review' ? 'review' : 'approved';
   const saved = await saveRunOutcome(state, status);
