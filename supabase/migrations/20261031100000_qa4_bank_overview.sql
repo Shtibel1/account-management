@@ -258,9 +258,11 @@ grant execute on function public.bank_missing_lines(uuid, uuid, integer) to auth
 --     selected invoices but never matches it itself (no pair is accepted without seeing all of
 --     its competitors);
 --   - truncated = some invoice with candidates was not selected; skipped_invoices = how many.
--- The QA3 signature is dropped so only this one exists (an app without this change falls back to
--- the paged JS path until it's deployed).
-drop function if exists public.bank_auto_match_input(uuid, numeric, integer, integer, integer);
+-- The QA3 5-argument version is kept unchanged on purpose: the build deployed before this one
+-- calls it, and without it would fall back to paging every unmatched debit (the O(N) path QA3
+-- removed) between this migration and the deploy. The calls can't be confused: PostgREST picks
+-- the overload by the argument names sent, and this one requires p_max_per_invoice. Drop the
+-- 5-argument one in a later migration, once every deployed build sends p_max_per_invoice.
 
 create or replace function public.bank_auto_match_input(
   p_client_id uuid,
@@ -319,7 +321,8 @@ as $$
     select
       m.id as invoice_id,
       t.id as line_id,
-      p_prefer_batch_id is not null and t.import_batch_id = p_prefer_batch_id as in_batch
+      -- Never null (null would sort first under desc), whatever the line's batch
+      coalesce(t.import_batch_id = p_prefer_batch_id, false) as in_batch
     from m
     join public.bank_transactions t
       on t.client_id = p_client_id
@@ -350,19 +353,24 @@ as $$
     from pairs p
     join sel on sel.invoice_id = p.invoice_id
   ),
+  -- Lines that are also a candidate of a left-out invoice, computed once as a set (a hash
+  -- anti-join + distinct) rather than probing pairs per returned line
+  blocked_lines as (
+    select distinct p.line_id
+    from pairs p
+    left join sel s on s.invoice_id = p.invoice_id
+    where s.invoice_id is null
+  ),
   lines as (
     select
       t.id, t.txn_date, t.description, t.amount, t.rejected_invoice_ids, t.import_batch_id,
-      exists (
-        select 1 from pairs p2
-        where p2.line_id = t.id
-          and not exists (select 1 from sel s2 where s2.invoice_id = p2.invoice_id)
-      ) as blocked
+      b.line_id is not null as blocked
     from cand
     join public.bank_transactions t on t.id = cand.line_id
+    left join blocked_lines b on b.line_id = cand.line_id
   ),
   skipped as (
-    select count(*) as n from stats s where not exists (select 1 from sel where sel.invoice_id = s.invoice_id)
+    select count(*) as n from stats s left join sel on sel.invoice_id = s.invoice_id where sel.invoice_id is null
   )
   select jsonb_build_object(
     'invoices', coalesce(

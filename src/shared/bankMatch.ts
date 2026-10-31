@@ -15,16 +15,17 @@ export const MAX_CANDIDATES = 5;
 
 /**
  * Notice for an auto-match run that left invoices out (MatchRunResult.truncated): the rest was
- * matched, those invoices have too many open lines that could be them.
+ * matched. Left out = too many open lines could be the invoice, or the run's line budget ran out;
+ * a few more invoices may stay unmatched because their line is shared with a left-out one.
  */
 export function bankMatchSkippedNote(skippedInvoices: number | undefined): string {
   const who =
     skippedInvoices === 1
-      ? 'חשבונית אחת לא הותאמה אוטומטית כי יש לה'
+      ? 'חשבונית אחת לא נכללה בהתאמה האוטומטית'
       : skippedInvoices && skippedInvoices > 1
-        ? `${skippedInvoices} חשבוניות לא הותאמו אוטומטית כי יש להן`
-        : 'חלק מהחשבוניות לא הותאמו אוטומטית כי יש להן';
-  return `${who} יותר מדי תנועות פתוחות שעשויות להתאים. יש להתאים אותן ידנית במסך הבנק.`;
+        ? `${skippedInvoices} חשבוניות לא נכללו בהתאמה האוטומטית`
+        : 'חלק מהחשבוניות לא נכללו בהתאמה האוטומטית';
+  return `${who} כי יש יותר מדי תנועות פתוחות שעשויות להתאים (ייתכן שגם חשבוניות נוספות לא הותאמו מאותה סיבה). יש להתאים אותן ידנית במסך הבנק.`;
 }
 
 export interface MatchableTransaction {
