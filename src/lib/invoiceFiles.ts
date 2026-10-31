@@ -81,3 +81,63 @@ export function redactUrlForLog(url: string | null | undefined): string {
   if (!url) return '';
   return url.split('?')[0];
 }
+
+/** The part of the Supabase client relocateInvoiceFiles uses (injectable for tests). */
+export interface FileMoveDb {
+  rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
+  storage: {
+    from: (bucket: string) => {
+      copy: (from: string, to: string) => PromiseLike<{ error: { message: string } | null }>;
+      remove: (paths: string[]) => PromiseLike<{ error: { message: string } | null }>;
+    };
+  };
+}
+
+export type FileMove =
+  | { ok: true; update: { file_url?: string; original_file_url?: string }; oldPaths: string[] }
+  | { ok: false; error: string };
+
+/**
+ * Moving an invoice to another client (QA round 7): its file (and the original of a split part) must
+ * live under the new client's folder, because every reader only trusts files of the invoice's own
+ * client (isClientStorageFileUrl) and client deletion works per folder. Copies the objects to
+ * <newClientId>/<name> and returns the new file_url values; the old objects are removed afterwards
+ * by removeUnusedOldFiles (a split original may still serve sibling parts).
+ */
+export async function relocateInvoiceFiles(
+  db: FileMoveDb,
+  invoice: { client_id: string; file_url?: string | null; original_file_url?: string | null },
+  newClientId: string
+): Promise<FileMove> {
+  if (isMockMode()) return { ok: true, update: {}, oldPaths: [] };
+  const update: { file_url?: string; original_file_url?: string } = {};
+  const oldPaths: string[] = [];
+  for (const column of ['file_url', 'original_file_url'] as const) {
+    const path = invoiceObjectPath(invoice[column], invoice.client_id);
+    if (!path) continue;
+    const target = `${newClientId}/${path.slice(path.indexOf('/') + 1)}`;
+    const { error } = await db.storage.from(RAW_BUCKET).copy(path, target);
+    // Already there: a sibling split part moved the same original before
+    if (error && !/already exists|duplicate/i.test(error.message)) {
+      return { ok: false, error: `copy ${column}: ${error.message}` };
+    }
+    update[column] = storedFileUrlFor(target);
+    oldPaths.push(path);
+  }
+  return { ok: true, update, oldPaths };
+}
+
+/** Removes old objects of a moved invoice that no invoice references any more (best effort). */
+export async function removeUnusedOldFiles(db: FileMoveDb, oldPaths: string[]): Promise<void> {
+  if (oldPaths.length === 0) return;
+  const { data, error } = await db.rpc('storage_paths_in_use', { p_paths: oldPaths });
+  if (error) {
+    console.error('[invoiceFiles] File reference check failed, old files kept:', error.message);
+    return;
+  }
+  const inUse = new Set((data as string[] | null) ?? []);
+  const unused = oldPaths.filter((p) => !inUse.has(p));
+  if (unused.length === 0) return;
+  const { error: removeErr } = await db.storage.from(RAW_BUCKET).remove(unused);
+  if (removeErr) console.error(`[invoiceFiles] Removing ${unused.length} old files failed:`, removeErr.message);
+}
