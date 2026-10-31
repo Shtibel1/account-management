@@ -1,7 +1,7 @@
 import type { OcrMetadata, OcrWord } from '@/shared/types';
 import { PDFDocument } from 'pdf-lib';
-import { UserFacingError } from '@/shared/processing';
-import { DAMAGED_PDF_MESSAGE, readPdfPageCount } from '@/shared/uploadValidation';
+import { UserFacingError, isUnreadableFileError } from '@/shared/processing';
+import { DAMAGED_PDF_MESSAGE, hasPdfStructure, readPdfPageCount, sniffUploadMime } from '@/shared/uploadValidation';
 
 function extractWordsFromPage(pageRes: any, pageIndex: number): OcrWord[] {
   const words: OcrWord[] = [];
@@ -164,10 +164,18 @@ export async function ocrPdfPages(
   if (!pdfDoc) {
     return runOcrForPageRange(fileBuffer.toString('base64'), apiKey, pages, pages, options);
   }
-  const subDoc = await PDFDocument.create();
-  const copied = await subDoc.copyPages(pdfDoc, pages.map((p) => p - 1));
-  copied.forEach((page) => subDoc.addPage(page));
-  const subBytes = Buffer.from(await subDoc.save());
+  let subBytes: Buffer;
+  try {
+    const subDoc = await PDFDocument.create();
+    const copied = await subDoc.copyPages(pdfDoc, pages.map((p) => p - 1));
+    copied.forEach((page) => subDoc.addPage(page));
+    subBytes = Buffer.from(await subDoc.save());
+  } catch (e) {
+    // pdf-lib loaded the file but its objects are broken (e.g. 'Expected instance of PDFDict'):
+    // the file is damaged and retrying won't help (QA round 5 #3). Vision errors stay outside.
+    console.warn('[Preprocessor] Failed to copy PDF pages with pdf-lib:', e);
+    throw new UserFacingError(DAMAGED_PDF_MESSAGE);
+  }
   return runOcrForPageRange(subBytes.toString('base64'), apiKey, pages.map((_, i) => i + 1), pages, options);
 }
 
@@ -264,6 +272,10 @@ export async function preprocessInvoice(
     };
   }
 
+  // A truncated file may still "load" with a wrong page count (QA round 5 #3)
+  if (sniffUploadMime(fileBuffer) === 'application/pdf' && !hasPdfStructure(fileBuffer)) {
+    throw new UserFacingError(DAMAGED_PDF_MESSAGE);
+  }
   const pdfDoc = await loadPdf(fileBuffer);
   // Loaded, but its page tree can't be read (QA round 4): no reader can use this file
   const counted = pdfDoc ? readPdfPageCount(pdfDoc) : 0;
@@ -271,7 +283,14 @@ export async function preprocessInvoice(
   const pageCount = counted;
   if (!pdfDoc || pageCount === 0) {
     // pdf-lib couldn't read it: let Vision try the first page
-    const res = await ocrPdfPages(fileBuffer, null, [1]);
+    let res: Awaited<ReturnType<typeof ocrPdfPages>>;
+    try {
+      res = await ocrPdfPages(fileBuffer, null, [1]);
+    } catch (err) {
+      // Vision rejects it too: the PDF is damaged (QA round 5 #3)
+      if (!pdfDoc && isUnreadableFileError(err)) throw new UserFacingError(DAMAGED_PDF_MESSAGE);
+      throw err;
+    }
     const text = res.pageTexts[0] || '';
     return {
       rawOcrText: text,

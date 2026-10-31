@@ -27,7 +27,6 @@ import {
   STEP_SAVE_MARGIN_MS,
   TICK_OCR_BUDGET_MS,
   TICK_RESPONSE_MS,
-  TOO_MANY_ATTEMPTS_MESSAGE,
   UserFacingError,
   canProcess,
   errorDetail,
@@ -36,9 +35,11 @@ import {
   isStaleRun,
   isTimeoutError,
   isTransientError,
+  isUnreadableFileError,
   nextOcrBatches,
   orphanRunAction,
   stuckRunMessage,
+  tooManyAttemptsMessage,
   toUserErrorMessage,
   transientBackoffMs,
   transientFailureMessage,
@@ -754,7 +755,7 @@ export async function runProcessingTick(invoiceId: string, options: TickOptions 
       return { state: 'failed' };
     }
     if (job.stage_attempts >= MAX_STAGE_ATTEMPTS) {
-      await failRun(d, invoiceId, job.run_id, TOO_MANY_ATTEMPTS_MESSAGE, stepDetail(job, 'interrupted too often', INTERRUPTED_STEP_ERROR));
+      await failRun(d, invoiceId, job.run_id, tooManyAttemptsMessage(job.page_count), stepDetail(job, 'interrupted too often', INTERRUPTED_STEP_ERROR));
       return { state: 'failed' };
     }
   }
@@ -917,7 +918,15 @@ async function ocrStep(d: QueueDeps, job: JobRow, deadline: number): Promise<Tic
     const roundStarted = d.now();
     const batches = nextOcrBatches(job.pages_done, pageCount);
     const timeoutMs = callTimeoutMs(d, deadline, Number.POSITIVE_INFINITY);
-    const results = await Promise.all(batches.map((pages) => d.ocrPdfPages(file, pdf, pages, { timeoutMs })));
+    let results: Awaited<ReturnType<QueueDeps['ocrPdfPages']>>[];
+    try {
+      results = await Promise.all(batches.map((pages) => d.ocrPdfPages(file, pdf, pages, { timeoutMs })));
+    } catch (err) {
+      // pdf-lib couldn't parse the file and Vision rejects it too: it is damaged, not "not a PDF"
+      // (QA round 5 #3). Permanent: the run fails at once.
+      if (!pdf && isUnreadableFileError(err)) throw new UserFacingError(DAMAGED_PDF_MESSAGE);
+      throw err;
+    }
     const done = batches.reduce((n, b) => n + b.length, 0);
     await saveJob(d, job, {
       pages_done: job.pages_done + done,

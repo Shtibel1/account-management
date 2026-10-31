@@ -27,7 +27,9 @@ export function missingInvoiceTransactions<T extends MissingInvoiceLine>(transac
 /** Header + one row per missing invoice + a total row (amounts as positive numbers). */
 export function missingInvoicesSheetRows(transactions: MissingInvoiceLine[]): MissingInvoicesCell[][] {
   const missing = missingInvoiceTransactions(transactions);
-  const total = Math.round(missing.reduce((sum, t) => sum + Math.abs(t.amount), 0) * 100) / 100;
+  // Summed in whole agorot: float sums drift by 0.01 over ~100k lines (QA round 5 #4)
+  const totalAgorot = missing.reduce((sum, t) => sum + Math.round(Math.abs(t.amount) * 100), 0);
+  const total = totalAgorot / 100;
   return [
     [...MISSING_INVOICES_HEADERS],
     ...missing.map((t) => [
