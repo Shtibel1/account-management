@@ -11,6 +11,7 @@ import { AlertTriangle, ChevronLeft, ChevronRight, Download, ExternalLink, FileT
 import { IntegrationExportDialog } from '@/components/Integrations/IntegrationExportDialog';
 import { processingLabel } from '@/components/Processing/ProcessingStatus';
 import { toUserErrorMessage } from '@/shared/processing';
+import { inDateRange } from '@/shared/invoiceDateRange';
 
 interface Props {
   invoices: Invoice[];
@@ -44,6 +45,9 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
   const [missingMappings, setMissingMappings] = useState<string[] | null>(null);
   const [clientFilter, setClientFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  // Invoice-date range (YYYY-MM-DD, inclusive), e.g. to export one month to Move-in (QA-MV B4)
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
   const [integrationExport, setIntegrationExport] = useState<{ clientId: string; invoices: Invoice[] } | null>(null);
   const { toast } = useToast();
 
@@ -52,15 +56,26 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [clientFilter, statusFilter]);
+  }, [clientFilter, statusFilter, dateFrom, dateTo]);
 
   const uniqueClientIds = Array.from(new Set(invoices.map((i) => i.client_id)));
 
   const filteredInvoices = invoices.filter((inv) => {
     const matchClient = clientFilter === 'all' || inv.client_id === clientFilter;
     const matchStatus = statusFilter === 'all' || inv.status === statusFilter;
-    return matchClient && matchStatus;
+    return matchClient && matchStatus && inDateRange(inv, dateFrom, dateTo);
   });
+  const filterKey = filteredInvoices.map((i) => i.id).join(',');
+
+  // A selection never includes invoices the filters hide: narrowing the date range after "select
+  // all" must not export the hidden invoices (QA-MV B4).
+  useEffect(() => {
+    const visible = new Set(filterKey.split(','));
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [filterKey]);
 
   const totalItems = filteredInvoices.length;
   const totalPages = Math.ceil(totalItems / ITEMS_PER_PAGE);
@@ -70,9 +85,10 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
   const paginatedInvoices = filteredInvoices.slice(startIndex, endIndex);
 
   const approved = filteredInvoices.filter((i) => i.status === 'approved');
+  const selectedApproved = approved.filter((i) => selected.has(i.id)).length;
 
   const toggleAll = () =>
-    selected.size === approved.length
+    selectedApproved === approved.length && approved.length > 0
       ? setSelected(new Set())
       : setSelected(new Set(approved.map((i) => i.id)));
 
@@ -86,15 +102,17 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
     if (!selected.size) return;
     setExporting(true);
     try {
-      const { blob, skipped, skippedCount } = await exportInvoices([...selected]);
+      const { blob, skipped, skippedCount, exportedCount } = await exportInvoices([...selected]);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = 'movein.dat';
       a.click();
-      URL.revokeObjectURL(url);
+      // Revoking in the same tick can cancel the download in some browsers
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
       setSelected(new Set());
       setMissingMappings(null);
+      if (exportedCount > 0) toast(`הקובץ movein.dat ירד: ${exportedCount} חשבוניות יוצאו ל-Move-in`, 'success');
       if (skippedCount > 0) {
         toast(`${skippedCount} חשבוניות לא נכללו בקובץ: ${skipped.join(' · ')}`, 'error');
       }
@@ -236,10 +254,32 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
           </select>
         </div>
 
+        {/* Invoice-date range */}
+        <div className="flex items-center gap-2">
+          <label htmlFor="invoice-filter-date-from" className="text-xs font-semibold text-slate-600">מתאריך:</label>
+          <input
+            id="invoice-filter-date-from"
+            type="date"
+            value={dateFrom}
+            max={dateTo || undefined}
+            onChange={(e) => setDateFrom(e.target.value)}
+            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
+          />
+          <label htmlFor="invoice-filter-date-to" className="text-xs font-semibold text-slate-600">עד:</label>
+          <input
+            id="invoice-filter-date-to"
+            type="date"
+            value={dateTo}
+            min={dateFrom || undefined}
+            onChange={(e) => setDateTo(e.target.value)}
+            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
+          />
+        </div>
+
         {/* Clear filters button */}
-        {(clientFilter !== 'all' || statusFilter !== 'all') && (
+        {(clientFilter !== 'all' || statusFilter !== 'all' || dateFrom || dateTo) && (
           <button
-            onClick={() => { setClientFilter('all'); setStatusFilter('all'); }}
+            onClick={() => { setClientFilter('all'); setStatusFilter('all'); setDateFrom(''); setDateTo(''); }}
             className="text-xs text-blue-600 hover:text-blue-700 underline font-semibold mr-auto"
           >
             נקה מסננים
@@ -257,7 +297,9 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
                 <input
                   type="checkbox"
                   className="rounded border-slate-300 text-blue-600 accent-blue-600"
-                  checked={selected.size === approved.length && approved.length > 0}
+                  checked={selectedApproved === approved.length && approved.length > 0}
+                  disabled={approved.length === 0}
+                  title={approved.length === 0 ? 'אין חשבוניות מאושרות לייצוא בתצוגה' : 'בחירת כל החשבוניות המאושרות'}
                   onChange={toggleAll}
                 />
               </th>
@@ -282,7 +324,9 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
             ) : (
               paginatedInvoices.map((inv) => {
               const data = inv.validated_data ?? inv.extracted_data;
-              const isSelectable = inv.status === 'approved';
+              // Exported invoices can be selected too: "ייצוא להנהלת חשבונות" > Move-in with "ייצוא
+              // חוזר" downloads their file again (QA-MV B3). "ייצא ל-Move-in" never re-exports them.
+              const isSelectable = inv.status === 'approved' || inv.status === 'exported';
               return (
                 <tr key={inv.id} className="hover:bg-slate-50/60 transition-colors group">
                   <td className="p-4">

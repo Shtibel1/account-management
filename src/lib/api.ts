@@ -306,7 +306,8 @@ export async function exportInvoices(ids: string[]) {
     }
   }
   const skippedCount = Number(res.headers.get('X-Export-Skipped-Count') ?? skipped.length) || skipped.length;
-  return { blob: await res.blob(), skipped, skippedCount };
+  const exportedCount = Number(res.headers.get('X-Export-Count') ?? 0) || 0;
+  return { blob: await res.blob(), skipped, skippedCount, exportedCount };
 }
 
 export async function splitInvoice(

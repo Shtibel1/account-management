@@ -28,6 +28,24 @@ export const LEGACY_SKIP_MESSAGES = {
   already_exported: 'החשבונית כבר יוצאה ל-Move-in. להורדה חוזרת של הקובץ: "ייצוא להנהלת חשבונות" > Move-in עם "ייצוא חוזר / הורדה חוזרת של הקובץ".',
 } as const;
 
+/** POST /api/export when every selected invoice was already exported (QA-MV B3). */
+export const ALREADY_EXPORTED_ERROR = 'החשבוניות שנבחרו כבר יוצאו ל-Move-in ולא נכללו בקובץ.';
+
+/**
+ * Lines ("<invoice number>: <reason>") for selected invoices whose status is already 'exported':
+ * they are never put in a new file, and the user is told so instead of the selection vanishing.
+ */
+export function alreadyExportedLines(invoices: Invoice[]): { lines: string[]; ids: string[] } {
+  return {
+    lines: invoices.map((inv) => {
+      const data = inv.validated_data ?? inv.extracted_data;
+      const label = (typeof data?.invoice_number === 'string' && data.invoice_number.trim()) || inv.file_name || inv.id;
+      return `${label}: ${LEGACY_SKIP_MESSAGES.already_exported}`;
+    }),
+    ids: invoices.map((inv) => inv.id),
+  };
+}
+
 /**
  * Pure decision per invoice. The route only loads invoices whose status is 'approved', but that
  * snapshot may be stale (another request may have exported it meanwhile), so a `success` row is

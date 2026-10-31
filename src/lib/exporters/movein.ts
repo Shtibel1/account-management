@@ -17,6 +17,9 @@ export const MOVEIN_FIELD_WIDTHS = {
   bankDetails: 50,
 } as const;
 
+/** Characters (= Windows-1255 bytes) of one Move-in record, without the CRLF. */
+export const MOVEIN_LINE_LENGTH = 332;
+
 export interface MoveinValidationProblem {
   invoiceId: string;
   /** Invoice number (or file name) for the message. */
@@ -31,6 +34,52 @@ export class MoveinValidationError extends Error {
     super(`לא ניתן לייצא ל-Move-in: ${problems.map((p) => `${p.label} - ${p.message}`).join('; ')}`);
     this.name = 'MoveinValidationError';
   }
+}
+
+/**
+ * A value as it may be written into the fixed-width Move-in line (QA-MV B1). Every record is ONE
+ * CRLF-terminated line, so a CR / LF / TAB (or any other control character) inside a value - e.g. a
+ * supplier name the AI read over two lines, or pasted text - would split the record and shift every
+ * following field. Control and line / paragraph separators become a space, invisible bidi marks and
+ * Hebrew points / cantillation (not in the 332-byte layout, they would turn into "?") are dropped, the
+ * Hebrew maqaf becomes "-", and runs of spaces collapse. Pure.
+ */
+export function moveinText(value: string | null | undefined): string {
+  if (typeof value !== 'string' || value === '') return '';
+  return value
+    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, ' ')
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF\u061C]/g, '')
+    .replace(/[\u0591-\u05BD\u05BF-\u05C7]/g, '')
+    .replace(/\u05BE/g, '-')
+    .replace(/ {2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * Bank details for the 50-character free-text field: "<bank> <branch name> מס' סניף : <code> מספר
+ * חשבון : <account>". When that is too long the NAMES are dropped first (branch name, then bank
+ * name), so the branch code and account number are never cut in the middle (QA-MV B2: a long
+ * branch name used to leave "מספר חשבון : 1" of account 12345/67).
+ */
+export function moveinBankDetails(
+  data: { bank_name?: string | null; bank_branch_name?: string | null; bank_branch_code?: string | null; bank_account?: string | null },
+  width: number = MOVEIN_FIELD_WIDTHS.bankDetails
+): string {
+  const bank = moveinText(data.bank_name);
+  const branchName = moveinText(data.bank_branch_name);
+  const code = moveinText(data.bank_branch_code);
+  const account = moveinText(data.bank_account);
+  const tail: string[] = [];
+  if (code) tail.push(`מס' סניף : ${code}`);
+  if (account) tail.push(`מספר חשבון : ${account}`);
+  const candidates = [[bank, branchName, ...tail], [bank, ...tail], tail];
+  for (const parts of candidates) {
+    const text = parts.filter(Boolean).join(' ');
+    if (text.length <= width) return text;
+  }
+  // Even code + account alone don't fit: keep the account number whole, shorten the labels.
+  const short = [code && `סניף ${code}`, account && `חשבון ${account}`].filter(Boolean).join(' ');
+  return short.length <= width ? short : (account || short).slice(0, width);
 }
 
 function lookupCode(mappings: AccountMapping[], type: 'supplier' | 'category', key: string | null | undefined): string {
@@ -60,14 +109,15 @@ export function validateMoveinInvoice(inv: Invoice, mappings: AccountMapping[], 
     if (value.length > width) problems.push({ invoiceId: inv.id, label, message });
   };
   const W = MOVEIN_FIELD_WIDTHS;
-  check((data.invoice_number ?? '').trim(), W.invoiceNumber,
-    `מספר החשבונית "${(data.invoice_number ?? '').trim()}" ארוך מ-${W.invoiceNumber} תווים (שדה האסמכתא ב-Move-in). יש לקצר אותו בבדיקת החשבונית לפני הייצוא.`);
+  const invoiceNumber = moveinText(data.invoice_number);
+  check(invoiceNumber, W.invoiceNumber,
+    `מספר החשבונית "${invoiceNumber}" ארוך מ-${W.invoiceNumber} תווים (שדה האסמכתא ב-Move-in). יש לקצר אותו בבדיקת החשבונית לפני הייצוא.`);
   const supplierAccount = lookupCode(mappings, 'supplier', data.supplier_name);
-  check(supplierAccount === '???' ? '' : supplierAccount, W.account, `קוד חשבון הספק "${supplierAccount}" ארוך מ-${W.account} תווים`);
+  check(supplierAccount === '???' ? '' : moveinText(supplierAccount), W.account, `קוד חשבון הספק "${supplierAccount}" ארוך מ-${W.account} תווים`);
   const expenseAccount = lookupCode(mappings, 'category', data.expense_category);
-  check(expenseAccount === '???' ? '' : expenseAccount, W.account, `קוד חשבון ההוצאה "${expenseAccount}" ארוך מ-${W.account} תווים`);
-  check((data.supplier_vat_id ?? '').trim(), W.vatId, `מספר העוסק של הספק ארוך מ-${W.vatId} תווים`);
-  check((clientVatAccount ?? '').trim(), W.account, `חשבון המע"מ של הלקוח ארוך מ-${W.account} תווים`);
+  check(expenseAccount === '???' ? '' : moveinText(expenseAccount), W.account, `קוד חשבון ההוצאה "${expenseAccount}" ארוך מ-${W.account} תווים`);
+  check(moveinText(data.supplier_vat_id), W.vatId, `מספר העוסק של הספק ארוך מ-${W.vatId} תווים`);
+  check(moveinText(clientVatAccount), W.account, `חשבון המע"מ של הלקוח ארוך מ-${W.account} תווים`);
   for (const [value, name] of [
     [data.total_amount, 'הסכום הכולל'],
     [data.amount_before_vat, 'הסכום לפני מע"מ'],
@@ -96,39 +146,41 @@ export class MoveinExporter {
 
       const supplierAccount = this.lookupCode(mappings, 'supplier', data.supplier_name);
       const expenseAccount  = this.lookupCode(mappings, 'category', data.expense_category);
-      const invoiceNumber   = (data.invoice_number ?? '').trim();
+      const invoiceNumber   = moveinText(data.invoice_number);
       const invoiceDate     = this.formatDate(data.invoice_date);
       
-      const supplierName    = data.supplier_name ?? '';
-      const supplierVatId   = (data.supplier_vat_id ?? '').trim();
+      const supplierName    = moveinText(data.supplier_name);
+      const supplierVatId   = moveinText(data.supplier_vat_id);
       
       const totalAmount     = data.total_amount ?? 0;
       const netAmount       = data.amount_before_vat ?? 0;
       const vatAmount       = data.vat_amount ?? 0;
 
-      // Construct bank details string: Bank Name Branch Name מס' סניף : Branch Code מספר חשבון : Account Number
-      const bankParts: string[] = [];
-      if (data.bank_name) bankParts.push(data.bank_name);
-      if (data.bank_branch_name) bankParts.push(data.bank_branch_name);
-      if (data.bank_branch_code) bankParts.push(`מס' סניף : ${data.bank_branch_code}`);
-      if (data.bank_account) bankParts.push(`מספר חשבון : ${data.bank_account}`);
-      const bankDetails = bankParts.join(' ');
+      // "<bank> <branch name> מס' סניף : <code> מספר חשבון : <account>", names dropped first when too long
+      const bankDetails = moveinBankDetails(data);
 
       lines.push(
         this.buildLine(
           invoiceNumber,
           invoiceDate,
-          supplierAccount === '???' ? '' : supplierAccount,
-          expenseAccount === '???' ? '' : expenseAccount,
+          supplierAccount === '???' ? '' : moveinText(supplierAccount),
+          expenseAccount === '???' ? '' : moveinText(expenseAccount),
           supplierName,
           supplierVatId,
-          (clientVatAccount ?? '').trim(),
+          moveinText(clientVatAccount),
           totalAmount,
           netAmount,
           vatAmount,
           bankDetails
         )
       );
+    }
+
+    // Defensive (QA-MV B1): every record must be exactly one 332-character line.
+    for (const line of lines) {
+      if (line.length !== MOVEIN_LINE_LENGTH || /[\r\n]/.test(line)) {
+        throw new Error(`Move-in line is ${line.length} characters (expected ${MOVEIN_LINE_LENGTH}) or contains a line break`);
+      }
     }
 
     // Join with CR-LF and convert to a Windows-1255 encoded buffer
