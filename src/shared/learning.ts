@@ -244,12 +244,37 @@ function columnValueLine(lines: string[], j: number): number | null {
   return vi >= vs ? vi : null;
 }
 
-/** Where a value is printed in the OCR text (first occurrence), with the label next to it. */
+/**
+ * A value distinctive enough to anchor a rule: a short number ('20', '3') is printed all over an
+ * invoice (quantities, percentages, line numbers), so finding it next to some label means nothing.
+ */
+export function isDistinctive(kind: ValueKind, value: string | number): boolean {
+  if (kind === 'date') return true;
+  if (kind === 'id') return String(value).length >= 3;
+  const n = Math.abs(Number(value));
+  const hasCents = Math.round(n * 100) % 100 !== 0;
+  return n >= 100 || (n >= 10 && hasCents);
+}
+
+/**
+ * Where a value is printed in the OCR text (first occurrence), with the label next to it. The label
+ * is null when it can't anchor a rule: none found, a non-distinctive value, or the value printed in
+ * several places under different labels (ambiguous).
+ */
 export function locateValue(kind: ValueKind, value: unknown, ocrText: string | null | undefined): ValueLocation | null {
   if (!ocrText) return null;
   const target = normalizeValue(kind, value);
   if (target === null) return null;
-  const lines = splitLines(ocrText);
+  const all = locateAll(kind, target, splitLines(ocrText));
+  if (all.length === 0) return null;
+  const first = all[0];
+  const labels = new Set(all.map((l) => l.label ?? ''));
+  if (!isDistinctive(kind, target) || labels.size > 1) return { ...first, label: null };
+  return first;
+}
+
+function locateAll(kind: ValueKind, target: string | number, lines: string[]): ValueLocation[] {
+  const out: ValueLocation[] = [];
   for (let i = 0; i < lines.length; i++) {
     const tokens = tokensOf(kind, lines[i]);
     const index = tokens.findIndex((t) => sameValue(kind, t.value, target));
@@ -280,9 +305,9 @@ export function locateValue(kind: ValueKind, value: unknown, ocrText: string | n
         }
       }
     }
-    return { lineIndex: i, label, lineOffset, shape };
+    out.push({ lineIndex: i, label, lineOffset, shape });
   }
-  return null;
+  return out;
 }
 
 /** Same as locateValue for identifiers glued differently in the OCR ('3 0941' read as '30941'). */

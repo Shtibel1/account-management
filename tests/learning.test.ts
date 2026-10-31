@@ -133,6 +133,16 @@ describe('classifying a correction', () => {
     assert.equal(d.label, 'תאריך');
   });
 
+  test('short or ambiguous values never anchor a rule (QA: "20" found under "כמות")', () => {
+    const ocr = ['כמות', '20', 'סה"כ לתשלום 627.11', 'חשבונית מס 40012', 'הזמנה 40012'].join('\n');
+    const short = classifyCorrection('amount_before_vat', 627.11, 20, ocr);
+    assert.equal(short.classification, 'in_document');
+    assert.equal(short.label, null);
+    const twice = classifyCorrection('invoice_number', '7', '40012', ocr);
+    assert.equal(twice.label, null, 'printed next to two different labels');
+    assert.equal(decideRule([{ label: short.label, value_shape: short.shape }]), null);
+  });
+
   test('values that are not printed are not_in_document', () => {
     assert.equal(classifyCorrection('expense_category', 'אחר', 'נסיעות', P2_OCR).classification, 'not_in_document');
     assert.equal(classifyCorrection('invoice_number', '30941', 'QA-999', P2_OCR).classification, 'not_in_document');
