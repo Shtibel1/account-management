@@ -159,7 +159,7 @@ async function checkClient(ctx: AuthContext, clientId: unknown): Promise<Guard<C
 
   const orgId = (data as { org_id: string | null }).org_id;
   // Another office's client answers like a missing one (QA round 5 #2): a 403 would tell existing
-  // client ids apart. Invoice / bank-line guards map this 404 back to their own 403.
+  // client ids apart. Invoice / bank-line guards answer their own 404 the same way.
   if (!(await hasOrgAccess(ctx, orgId))) return deny(404, 'לקוח לא נמצא');
   return ok({ ctx, clientId, orgId });
 }
@@ -211,8 +211,8 @@ export async function requireInvoiceAccess<T extends Record<string, unknown> = {
     const invoice = data as unknown as T;
     const client = await checkClient(ctx, invoice.client_id);
     if (!client.ok) {
-      // The invoice exists but its client isn't the user's: don't reveal more than "forbidden".
-      return client.response.status === 404 ? deny(403, MSG_FORBIDDEN) : client;
+      // The invoice exists but its client isn't the user's: answer like a missing one (no id probing)
+      return client.response.status === 404 ? deny(404, 'החשבונית לא נמצאה') : client;
     }
     return ok({ ...client.value, invoice });
   });
@@ -240,7 +240,7 @@ export async function requireBankTransactionAccess(transactionId: unknown, exist
     if (error) throw new Error(`Bank transaction lookup failed: ${error.message}`);
     if (!data) return deny(404, 'התנועה לא נמצאה');
     const client = await checkClient(ctx, (data as { client_id: string }).client_id);
-    if (!client.ok) return client.response.status === 404 ? deny(403, MSG_FORBIDDEN) : client;
+    if (!client.ok) return client.response.status === 404 ? deny(404, 'התנועה לא נמצאה') : client;
     return ok({ ...client.value, transactionId });
   });
 }

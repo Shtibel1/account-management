@@ -4,7 +4,9 @@
  * failed ('error') or awaiting review, none was ever exported, none has status audit events and no
  * bank statement was imported for it, so approved / exported books are never wiped by the cascade. delete_client_guarded() checks and
  * deletes in one transaction; the files under raw-invoices/<client_id>/ are then removed through
- * the Storage API (SQL can't delete storage objects). Office owners only (checked by the route);
+ * the Storage API (SQL can't delete storage objects), together with the client's invoice files kept
+ * in other folders, except files another invoice still references (an invoice moved to another
+ * client keeps its file under the old folder - QA round 6). Office owners only (checked by the route);
  * browser sessions have no delete policy on clients, so this is the only way to delete one.
  */
 
@@ -68,6 +70,11 @@ export async function listClientFiles(db: ClientDeletionDb, bucket: string, clie
  * gone either way, an orphaned file is only wasted storage, and it is logged).
  */
 export async function deleteClientWithFiles(db: ClientDeletionDb, bucket: string, clientId: string): Promise<ClientDeleteResult> {
+  // Read before the cascade removes the rows: files of the client's invoices outside its folder
+  const own = await db.rpc('client_invoice_file_paths', { p_client_id: clientId });
+  if (own.error) return { ok: false, error: own.error.message };
+  const ownPaths = Array.isArray(own.data) ? (own.data as string[]) : [];
+
   const { data, error } = await db.rpc('delete_client_guarded', { p_client_id: clientId });
   if (error) return { ok: false, error: error.message };
   if (isClientDeleteBlocker(data)) return { ok: false, blocker: data };
@@ -76,7 +83,15 @@ export async function deleteClientWithFiles(db: ClientDeletionDb, bucket: string
   let filesRemoved = 0;
   let filesFailed = 0;
   try {
-    const paths = await listClientFiles(db, bucket, clientId);
+    const candidates = [...new Set([...(await listClientFiles(db, bucket, clientId)), ...ownPaths])];
+    const inUse = new Set<string>();
+    for (let i = 0; i < candidates.length; i += LIST_PAGE) {
+      const { data: used, error: usedErr } = await db.rpc('storage_paths_in_use', { p_paths: candidates.slice(i, i + LIST_PAGE) });
+      if (usedErr) throw new Error(`File reference check failed: ${usedErr.message}`);
+      for (const p of (used as string[] | null) ?? []) inUse.add(p);
+    }
+    if (inUse.size > 0) console.log(`[clients/delete] Kept ${inUse.size} files of client ${clientId} that other invoices still use.`);
+    const paths = candidates.filter((p) => !inUse.has(p));
     for (let i = 0; i < paths.length; i += REMOVE_CHUNK) {
       const chunk = paths.slice(i, i + REMOVE_CHUNK);
       const { error: removeErr } = await db.storage.from(bucket).remove(chunk);
