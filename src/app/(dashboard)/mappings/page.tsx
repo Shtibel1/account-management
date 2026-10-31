@@ -20,6 +20,7 @@ import { Plus, Trash2, Info, Upload, Loader2, X, ChevronLeft, ChevronRight, User
 import clsx from 'clsx';
 import { clientDisplayNames } from '@/shared/clientLabels';
 import { LearnedRulesPanel } from '@/components/LearnedRulesPanel';
+import { ruleReappliedMessage } from '@/shared/hebrewCount';
 
 function getPageNumbers(currentPage: number, totalPages: number) {
   const pages: (number | string)[] = [];
@@ -133,7 +134,7 @@ export default function MappingsPage() {
   const reapplyRules = async (suppliers?: { name?: string | null; vatId?: string | null }[]) => {
     try {
       const { updated } = await reapplySupplierRules(selectedClient, suppliers);
-      if (updated > 0) toast(`כללי הספק הוחלו על ${updated} חשבוניות הממתינות לבדיקה`, 'info');
+      if (updated > 0) toast(ruleReappliedMessage(updated, { plural: true }), 'info');
     } catch (err) {
       console.error('[Mappings] Failed to re-apply supplier rules:', err);
       toast('המיפוי נשמר, אך עדכון החשבוניות הממתינות לבדיקה נכשל', 'error');

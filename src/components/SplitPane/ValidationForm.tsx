@@ -9,6 +9,7 @@ import { allocationThreshold, isAllocationRequired } from '@/shared/allocation';
 import { isAllocationNumberAcceptable } from '@/shared/approvalValidation';
 import { APPROVABLE_STATUSES, REJECTABLE_STATUSES, REOPENABLE_STATUSES } from '@/shared/invoiceStatus';
 import { findSupplierRule, normalizeVatId, VARIOUS_SUPPLIERS_ACCOUNT } from '@/shared/supplierRules';
+import { ruleReappliedMessage } from '@/shared/hebrewCount';
 import { accountCodeError, mappingDbErrorMessage } from '@/shared/mappingValidation';
 import { dismissDuplicateInFlags } from '@/shared/duplicates';
 import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
@@ -467,7 +468,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
       if (changedRules.length > 0) {
         try {
           const { updated } = await reapplySupplierRules(invoice.client_id, changedRules);
-          if (updated > 0) toast(`כלל הספק הוחל על ${updated} חשבוניות נוספות הממתינות לבדיקה`, 'info');
+          if (updated > 0) toast(ruleReappliedMessage(updated, { others: true }), 'info');
         } catch (reapplyErr) {
           console.error('[ValidationForm] Failed to re-apply supplier rule to invoices in review:', reapplyErr);
         }

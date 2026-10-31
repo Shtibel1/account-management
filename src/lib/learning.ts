@@ -18,6 +18,7 @@ import {
   type LearningSignal,
 } from '@/shared/learning';
 import { normalizeVatId } from '@/shared/vatId';
+import { isGenericSupplierName } from '@/shared/supplierRules';
 
 const SIGNALS = 'extraction_learning_signals';
 const RULES = 'extraction_learned_rules';
@@ -132,14 +133,20 @@ export async function recordLearningSignals(
   }
 ): Promise<LearningOutcome> {
   try {
-    const { data: inv, error: invError } = await db.from('invoices').select('ocr_text').eq('id', invoiceId).single();
+    const { data: inv, error: invError } = await db.from('invoices').select('ocr_text, extracted_data').eq('id', invoiceId).single();
     if (invError) throw new Error(`invoice query failed: ${invError.message}`);
-    const ocrText = (inv as { ocr_text: string | null } | null)?.ocr_text ?? null;
+    const invoiceRow = inv as { ocr_text: string | null; extracted_data: Partial<ExtractedData> | null } | null;
+    const ocrText = invoiceRow?.ocr_text ?? null;
     const orgId = await clientOrg(db, input.clientId);
     if (!orgId) throw new Error('client has no office');
 
     const vat = normalizeVatId(asText(input.approvedData.supplier_vat_id ?? input.before?.supplier_vat_id));
-    const name = normalizeSupplierName(input.approvedData.supplier_name ?? input.before?.supplier_name);
+    // The supplier's own name: 'ספקים שונים' (the catch-all ledger name the form puts on unmapped
+    // suppliers) would merge every unmapped supplier into one key
+    const name =
+      [input.approvedData.supplier_name, input.before?.supplier_name, invoiceRow?.extracted_data?.supplier_name]
+        .map((n) => (isGenericSupplierName(n) ? null : normalizeSupplierName(n)))
+        .find((n) => n) ?? null;
     const supplier = supplierKey(vat, name);
 
     // Keys of the previous approval's signals must be recomputed too (they are replaced below)

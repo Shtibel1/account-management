@@ -180,3 +180,26 @@ export function systemProposal(
   if (!aiData || !applied || Object.keys(applied).length === 0) return aiData;
   return { ...aiData, ...applied };
 }
+
+/**
+ * What the review form proposed to the reviewer: the system proposal plus the form's own supplier
+ * name substitution (src/components/SplitPane/ValidationForm.tsx, on load): the matching supplier
+ * rule's name, or 'ספקים שונים' for an unmapped supplier / one booked to the catch-all account.
+ * That substitution is the system's, not the reviewer's, so it is not a correction (nor a learning
+ * signal). `mappings` are the client's account_mappings at approval time (null = unknown: no substitution).
+ */
+export function reviewFormProposal(
+  aiData: Partial<ExtractedData> | null | undefined,
+  validatedData: Partial<ExtractedData> | null | undefined,
+  mappings: readonly AccountMapping[] | null | undefined
+): Partial<ExtractedData> | null | undefined {
+  const base = systemProposal(aiData, validatedData);
+  if (!base || !mappings) return base;
+  const initial = validatedData ?? aiData;
+  const mapping = findSupplierRule(mappings, {
+    supplier_name: aiData?.supplier_name,
+    supplier_vat_id: initial?.supplier_vat_id,
+  });
+  const name = !mapping || mapping.account_code === VARIOUS_SUPPLIERS_ACCOUNT ? VARIOUS_SUPPLIERS_NAME : normalizeText(mapping.key);
+  return name ? { ...base, supplier_name: name } : base;
+}

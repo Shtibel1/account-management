@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { ExtractedData } from '@/shared/types';
-import { normalizeVatId, systemProposal } from '@/shared/supplierRules';
+import type { AccountMapping } from '@/shared/types';
+import { normalizeVatId, reviewFormProposal } from '@/shared/supplierRules';
 
 // Keep in sync with the field list in the field_accuracy view (supabase/migrations).
 export const TRACKED_FIELDS = [
@@ -84,6 +85,22 @@ export interface CorrectionsBase {
   validated_data: ExtractedData | null;
 }
 
+/** The client's supplier rules (null when they can't be read: then the form substitution isn't assumed). */
+async function loadSupplierMappings(db: SupabaseClient, clientId: string): Promise<AccountMapping[] | null> {
+  try {
+    const { data, error } = await db
+      .from('account_mappings')
+      .select('id, client_id, mapping_type, key, account_code, vat_id, expense_category')
+      .eq('client_id', clientId)
+      .eq('mapping_type', 'supplier');
+    if (error) throw error;
+    return (data ?? []) as AccountMapping[];
+  } catch (err) {
+    console.error(`[corrections] Could not load the supplier rules of client ${clientId}:`, err);
+    return null;
+  }
+}
+
 export async function recordCorrections(
   db: SupabaseClient,
   invoiceId: string,
@@ -107,7 +124,9 @@ export async function recordCorrections(
       invoice = data as CorrectionsBase;
     }
 
-    const corrections = diffCorrections(systemProposal(invoice.extracted_data, invoice.validated_data), approvedData);
+    // The review form's supplier-name substitution (rule name / 'ספקים שונים') is part of the proposal
+    const mappings = await loadSupplierMappings(db, invoice.client_id);
+    const corrections = diffCorrections(reviewFormProposal(invoice.extracted_data, invoice.validated_data, mappings), approvedData);
     // Same key as supplier_automation / eligibility (digits only, 8 digits padded to 9).
     const supplierVatId = normalizeVatId(approvedData.supplier_vat_id ?? invoice.extracted_data?.supplier_vat_id);
 

@@ -323,6 +323,21 @@ describe('recording signals and loading rules (DB, office separation)', () => {
     assert.equal(db.tables.extraction_learning_signals.filter((s) => s.field === 'invoice_number' && s.client_id === 'cB').length, 0);
   });
 
+  test('the catch-all name ספקים שונים never becomes the supplier of a rule', async () => {
+    const db = seed();
+    db.tables.invoices[0].extracted_data = { supplier_name: 'צ.ל.ה דימונה' };
+    await recordLearningSignals(db.client, 'i1', {
+      clientId: 'cB',
+      approvedData: data({ supplier_vat_id: null, supplier_name: 'ספקים שונים', invoice_number: '40012' }),
+      before: data({ supplier_vat_id: null, supplier_name: 'ספקים שונים', invoice_number: '7781' }),
+      corrections: [{ field: 'invoice_number', ai_value: '7781', corrected_value: '40012' }],
+    });
+    const rules = db.tables.extraction_learned_rules;
+    assert.equal(rules.length, 1);
+    assert.equal(rules[0].supplier_key, 'name:צלה דימונה');
+    assert.equal(rules[0].supplier_name, 'צלה דימונה');
+  });
+
   test('learning never throws (missing table)', async () => {
     const db = createFakeDb({ extraction_learning_signals: ['supplier_key'] });
     db.tables.clients = [{ id: 'cB', org_id: 'orgB' }];
