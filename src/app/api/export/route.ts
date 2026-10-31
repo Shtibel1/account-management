@@ -5,7 +5,7 @@ import { MoveinExporter, MoveinValidationError, validateMoveinInvoices } from '@
 import type { Invoice, AccountMapping } from '@/shared/types';
 import { accessibleClientIds, isUuid, requireUser } from '@/lib/auth';
 import { MOVEIN_FILE_NAME, moveinDownloadHeaders } from '@/lib/exporters/moveinResponse';
-import { claimMoveinInvoices, LEGACY_CLAIM_CONCURRENCY, mapWithLimit, releaseClaims } from '@/lib/exporters/moveinClaim';
+import { alreadyExportedLines, ALREADY_EXPORTED_ERROR, claimMoveinInvoices, LEGACY_CLAIM_CONCURRENCY, mapWithLimit, releaseClaims } from '@/lib/exporters/moveinClaim';
 import { supabaseExportStore } from '@/integrations/store';
 
 const NOT_FOUND = 'לא נמצאו חשבוניות מאושרות';
@@ -34,16 +34,26 @@ export async function POST(request: Request) {
     if (allowedClients !== null && allowedClients.length === 0) {
       return NextResponse.json({ error: NOT_FOUND }, { status: 400 });
     }
-    let query = supabase.from('invoices').select('*').in('id', uniqueIds).eq('status', 'approved');
+    // Exported invoices are loaded too, only to TELL the user they were left out (QA-MV B3: they
+    // used to vanish silently, and a selection of exported invoices answered "no approved invoices").
+    let query = supabase.from('invoices').select('*').in('id', uniqueIds).in('status', ['approved', 'exported']);
     if (allowedClients !== null) query = query.in('client_id', allowedClients);
-    const { data: invoices, error: fetchErr } = await query;
+    const { data: rows, error: fetchErr } = await query;
 
     if (fetchErr) {
       console.error('[Export] Failed to load invoices:', fetchErr.message);
       return NextResponse.json({ error: 'שגיאה בטעינת החשבוניות' }, { status: 500 });
     }
 
-    if (!invoices || invoices.length === 0) {
+    const invoices = ((rows ?? []) as Invoice[]).filter((inv) => inv.status === 'approved');
+    const alreadyExported = alreadyExportedLines(((rows ?? []) as Invoice[]).filter((inv) => inv.status === 'exported'));
+    if (invoices.length === 0) {
+      if (alreadyExported.lines.length > 0) {
+        return NextResponse.json(
+          { error: ALREADY_EXPORTED_ERROR, invalid: alreadyExported.lines, invoiceIds: alreadyExported.ids },
+          { status: 409 }
+        );
+      }
       return NextResponse.json({ error: NOT_FOUND }, { status: 400 });
     }
 
@@ -104,13 +114,13 @@ export async function POST(request: Request) {
     const problems = validateMoveinInvoices(invoices as Invoice[], mappings, client.vat_account ?? '');
     const invalidIds = new Set(problems.map((p) => p.invoiceId));
     const valid = (invoices as Invoice[]).filter((inv) => !invalidIds.has(inv.id));
-    const skippedLines = problems.map((p) => `${p.label}: ${p.message}`);
+    const skippedLines = [...problems.map((p) => `${p.label}: ${p.message}`), ...alreadyExported.lines];
     if (valid.length === 0) {
       return NextResponse.json(
         {
           error: 'אף חשבונית לא יוצאה: החשבוניות לא מתאימות לפורמט Move-in. תקנו אותן ונסו שוב.',
           invalid: skippedLines,
-          invoiceIds: [...invalidIds],
+          invoiceIds: [...invalidIds, ...alreadyExported.ids],
         },
         { status: 422 }
       );

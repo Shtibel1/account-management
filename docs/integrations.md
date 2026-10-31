@@ -75,7 +75,15 @@ amounts 12, supplier name 50, bank details 50.
   jsonb_typeof(validated_data->'vat_amount') is distinct from 'number' or coalesce(validated_data->>'invoice_date',
   '') !~ '^\d{4}-\d{2}-\d{2}$');` (a regex match still lets e.g. 2026-02-31 through; the export check catches it).
 - **Free text is cut to its width on purpose:** supplier name and bank details keep their first 50 characters
-  (cut before the visual-order conversion, so the start of the name is kept).
+  (cut before the visual-order conversion, so the start of the name is kept). Bank details drop the branch name,
+  then the bank name, before the branch code / account number would be cut (`moveinBankDetails`, QA-MV B2).
+- **One record = one line** (QA-MV B1): every text value goes through `moveinText` first - CR / LF / TAB and other
+  control characters become a space, bidi marks and Hebrew points are dropped, maqaf -> "-" - so a supplier name
+  read over two lines can't split the record. The exporter refuses to write a line that isn't exactly 332 characters.
+- **Already exported** (QA-MV B3): `/api/export` leaves invoices with status `exported` out of the file and lists
+  them in `X-Export-Skipped`; a selection of only exported invoices answers 409 with the re-download hint. The
+  review table lets you select exported invoices for "ייצוא להנהלת חשבונות" > Move-in > "ייצוא חוזר", and has an
+  invoice-date range filter (מתאריך / עד) - the selection is pruned to what the filters show.
 - **Visual order** (`toVisualHebrew`, QA N7): the line is read left-to-right, so RTL runs are reversed, but Latin
   and number runs keep their order ("QA-ספק" -> "קפס-QA", "IKEA ישראל" -> "לארשי IKEA"); spaces / punctuation
   between two Latin / digit characters stay inside that run ("IKEA Ltd", "12.50"); brackets in Hebrew runs are
