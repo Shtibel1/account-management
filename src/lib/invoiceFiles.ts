@@ -94,7 +94,7 @@ export interface FileMoveDb {
 }
 
 export type FileMove =
-  | { ok: true; update: { file_url?: string; original_file_url?: string }; oldPaths: string[] }
+  | { ok: true; update: { file_url?: string; original_file_url?: string }; oldPaths: string[]; created: string[] }
   | { ok: false; error: string };
 
 /**
@@ -109,9 +109,10 @@ export async function relocateInvoiceFiles(
   invoice: { client_id: string; file_url?: string | null; original_file_url?: string | null },
   newClientId: string
 ): Promise<FileMove> {
-  if (isMockMode()) return { ok: true, update: {}, oldPaths: [] };
+  if (isMockMode()) return { ok: true, update: {}, oldPaths: [], created: [] };
   const update: { file_url?: string; original_file_url?: string } = {};
   const oldPaths: string[] = [];
+  const created: string[] = [];
   for (const column of ['file_url', 'original_file_url'] as const) {
     const path = invoiceObjectPath(invoice[column], invoice.client_id);
     if (!path) continue;
@@ -119,12 +120,21 @@ export async function relocateInvoiceFiles(
     const { error } = await db.storage.from(RAW_BUCKET).copy(path, target);
     // Already there: a sibling split part moved the same original before
     if (error && !/already exists|duplicate/i.test(error.message)) {
+      await discardCopies(db, created);
       return { ok: false, error: `copy ${column}: ${error.message}` };
     }
+    if (!error) created.push(target);
     update[column] = storedFileUrlFor(target);
     oldPaths.push(path);
   }
-  return { ok: true, update, oldPaths };
+  return { ok: true, update, oldPaths, created };
+}
+
+/** Removes the copies a move made when the invoice update itself then failed (best effort). */
+export async function discardCopies(db: FileMoveDb, created: string[]): Promise<void> {
+  if (created.length === 0) return;
+  const { error } = await db.storage.from(RAW_BUCKET).remove(created);
+  if (error) console.error(`[invoiceFiles] Removing ${created.length} copies of a failed move failed:`, error.message);
 }
 
 /** Removes old objects of a moved invoice that no invoice references any more (best effort). */

@@ -5,7 +5,7 @@ import type { FileMoveDb } from '@/lib/invoiceFiles';
 process.env.SUPABASE_URL = 'https://proj.supabase.co';
 process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://proj.supabase.co';
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'test-anon';
-const { relocateInvoiceFiles, removeUnusedOldFiles } = await import('@/lib/invoiceFiles');
+const { relocateInvoiceFiles, removeUnusedOldFiles, discardCopies } = await import('@/lib/invoiceFiles');
 
 const ref = (path: string) => `https://proj.supabase.co/storage/v1/object/authenticated/raw-invoices/${path}`;
 
@@ -53,6 +53,15 @@ describe('moving an invoice to another client moves its files (QA round 7)', () 
     assert.ok(r.ok);
     assert.deepEqual(r.update, {});
     assert.deepEqual(f.copies, []);
+  });
+
+  test('copies made by a move are listed and can be discarded when the update fails', async () => {
+    const f = fakeDb();
+    const r = await relocateInvoiceFiles(f.db, { client_id: 'c1', file_url: ref('c1/a.png') }, 'c2');
+    assert.ok(r.ok);
+    assert.deepEqual(r.created, ['c2/a.png']);
+    await discardCopies(f.db, r.created);
+    assert.deepEqual(f.removed, [['c2/a.png']]);
   });
 
   test('old files still used by another invoice are kept', async () => {
