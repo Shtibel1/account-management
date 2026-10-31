@@ -390,6 +390,7 @@ export default function ReviewDetailPage() {
                 activeField={activeField}
                 showAll={showAll}
                 yOffset={yOffset}
+                pageRotations={invoice?.extracted_data?.page_rotations}
               />
             ) : (
               <div className="flex items-center justify-center h-full text-slate-400">

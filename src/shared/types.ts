@@ -59,6 +59,7 @@ export interface ExtractedData {
   bboxes?: BboxMap;
   split_suggestion?: SplitSuggestion | null; // file looks like several documents (set by the pipeline)
   supplier_rule?: SupplierRuleTrace | null; // validated_data only: what the supplier rule filled in
+  page_rotations?: Record<string, 90 | 180 | 270> | null; // pages scanned sideways / upside down (viewer turns them)
 }
 
 // Fields a supplier rule (account_mappings row of type 'supplier') may fill on an invoice.
@@ -285,6 +286,8 @@ export interface OcrWord {
   text: string;
   bbox: { x1: number; y1: number; x2: number; y2: number };
   page: number;
+  /** Clockwise turn that makes the word upright (src/shared/orientation.ts); absent = upright. */
+  rot?: 90 | 180 | 270;
 }
 
 export interface CostMetrics {

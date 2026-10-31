@@ -12,6 +12,7 @@ import { loadFewShotExamples, saveExtractionContext } from '@/lib/fewshot';
 import { saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
 import { linkResubmission, linkReturnedToResubmission, planResubmissionLink, unlinkReturnedFromResubmission } from '@/lib/returns';
 import { computeConfidence } from '@/shared/confidence';
+import { pageRotationsFromWords } from '@/shared/orientation';
 import { PDFDocument } from 'pdf-lib';
 import { PIPELINE_URL_TTL_SECONDS, signedInvoiceFileUrl, signObjectPath, storedFileUrlFor } from '@/lib/invoiceFiles';
 import { toUserErrorMessage } from '@/shared/processing';
@@ -438,7 +439,19 @@ export function routeAfterValidation(result: ValidationResult | null | undefined
  * once it left 'processing' sees it unlinked. If that save doesn't happen (superseded run), the
  * returned invoice is unlinked again. Returns true when saved.
  */
+/** Adds the pages the viewer should turn upright (from the OCR boxes, no extra call). */
+function withPageRotations(data: ExtractedData, ocrWords: OcrWord[] | undefined): ExtractedData {
+  const rotations = pageRotationsFromWords(ocrWords);
+  if (rotations) return { ...data, page_rotations: rotations };
+  if (data.page_rotations) {
+    const { page_rotations: _dropped, ...rest } = data;
+    return rest;
+  }
+  return data;
+}
+
 export async function saveRunOutcome(state: PipelineState, kind: 'review' | 'approved' | 'error'): Promise<boolean> {
+  if (state.extractedData) state = { ...state, extractedData: withPageRotations(state.extractedData, state.ocrWords) };
   if (kind === 'error') {
     console.error(`[Supervisor] ❌ Saving state: ERROR (Total Cost: $${state.costMetrics.estimatedCostUsd}). Details: ${state.error}`);
     const updateData: Record<string, unknown> = {
