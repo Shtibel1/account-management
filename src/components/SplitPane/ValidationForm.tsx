@@ -10,10 +10,10 @@ import { isAllocationNumberAcceptable } from '@/shared/approvalValidation';
 import { APPROVABLE_STATUSES, REJECTABLE_STATUSES, REOPENABLE_STATUSES } from '@/shared/invoiceStatus';
 import { findSupplierRule, normalizeVatId, VARIOUS_SUPPLIERS_ACCOUNT } from '@/shared/supplierRules';
 import { accountCodeError, mappingDbErrorMessage } from '@/shared/mappingValidation';
-import { VAT_RATE_WARNING_PREFIX, vatRateWarning } from '@/shared/vatRate';
 import { dismissDuplicateInFlags } from '@/shared/duplicates';
 import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
-import { checkLineItemsSum, hasMixedVat, isLineItemWarning, lineItemWarnings, normalizeLineItems } from '@/shared/lineItems';
+import { checkLineItemsSum, hasMixedVat, isLineItemWarning, normalizeLineItems } from '@/shared/lineItems';
+import { lineItemsSumMismatch, liveReviewWarnings } from '@/shared/reviewWarnings';
 import { createClient } from '@/utils/supabase/client';
 import { isSpecificSupplierName } from '@/shared/supplierNameMatch';
 import { LineItemsTable } from '@/components/SplitPane/LineItemsTable';
@@ -219,7 +219,8 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
 
   const flags = initial?.validation_flags;
   const mathOk = flags?.math_ok ?? true;
-  const warnings = flags?.warnings ?? [];
+  // Follows the current data while editing (a date entered, line items changed), not the stored run
+  const warnings = liveReviewWarnings(flags?.warnings, data);
 
   // Supplier rule (account_mappings) defaults: show which value came from the rule, and offer to
   // make the reviewer's category the supplier's default.
@@ -335,6 +336,22 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
       setError(supplierCodeError ?? categoryCodeError ?? '');
       return;
     }
+    // Line items that don't add up don't block approval, but the reviewer confirms it first
+    if (lineItemsSumMismatch(data)) {
+      setError('');
+      const ok = await askConfirm({
+        title: 'שורות הפריטים אינן תואמות לסכומים',
+        message: (
+          <span className="block space-y-1">
+            {warnings.filter(isLineItemWarning).map((w, i) => <span key={i} className="block text-amber-800">{w}</span>)}
+            <span className="block">לאשר את החשבונית בכל זאת?</span>
+          </span>
+        ),
+        confirmLabel: 'אשר בכל זאת',
+        cancelLabel: 'חזרה לעריכה',
+      });
+      if (!ok) return;
+    }
     setSaving(true); setError('');
     try {
       const originalName = invoice.extracted_data?.supplier_name;
@@ -425,16 +442,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
           math_ok: mathOk,
           rule_violations: ruleViolations,
           allocation_required: allocationRequired,
-          warnings: (() => {
-            const rateWarning = vatRateWarning({ ...amounts, invoice_date: updatedData.invoice_date ?? null });
-            return [
-              ...(updatedData.validation_flags.warnings ?? []).filter(
-                (w) => !isLineItemWarning(w) && !w.startsWith(VAT_RATE_WARNING_PREFIX)
-              ),
-              ...lineItemWarnings(amounts),
-              ...(rateWarning ? [rateWarning] : []),
-            ];
-          })(),
+          warnings: liveReviewWarnings(updatedData.validation_flags.warnings, { ...amounts, invoice_date: updatedData.invoice_date ?? null }),
           line_items_sum_ok: checkLineItemsSum(amounts).ok,
           mixed_vat: hasMixedVat(lineItems),
         };
@@ -1222,7 +1230,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
               {rejecting ? 'פוסל...' : 'לא מאושר'}
             </button>
             <button
-              onClick={handleApprove}
+              onClick={() => handleApprove()}
               disabled={isApproveDisabled}
               className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm rounded-xl shadow-sm transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
             >

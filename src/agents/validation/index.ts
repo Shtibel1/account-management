@@ -1,4 +1,5 @@
 import type { DuplicateMatch, ExtractedData, OcrWord, SupplierRuleTrace, TenantRules, ValidationResult } from '@/shared/types';
+import { CREDIT_NOTE_WARNING, MISSING_DATE_WARNING } from '@/shared/reviewWarnings';
 import { supabase } from '@/lib/supabase';
 import { fetchSupplierMappings, isAutoApproveEnabled } from '@/lib/supplierAutomation';
 import { applySupplierRule, findSupplierRule, isGenericSupplierName, normalizeVatId } from '@/shared/supplierRules';
@@ -68,12 +69,12 @@ function runEdgeCaseHandlers(data: ExtractedData): EdgeCaseResult {
 
   // 3. Credit Note (Negative Amount)
   if (current.total_amount != null && current.total_amount < 0) {
-    warnings.push('זוהתה חשבונית זיכוי (סכום שלילי) — בדוק שהקטגוריה נכונה');
+    warnings.push(CREDIT_NOTE_WARNING);
   }
 
   // 4. Missing Date
   if (current.invoice_date == null) {
-    warnings.push('לא נמצא תאריך בחשבונית — ייתכן שמדובר בקבלה בלבד');
+    warnings.push(MISSING_DATE_WARNING);
   }
 
   return { data: current, warnings, corrected };

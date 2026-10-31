@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useListFilters } from './listFilters';
 import Link from 'next/link';
 import { Invoice } from '@/shared/types';
 import { StatusBadge } from '@/components/ui/Badge';
@@ -43,8 +44,8 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
   const [missingMappings, setMissingMappings] = useState<string[] | null>(null);
-  const [clientFilter, setClientFilter] = useState<string>('all');
-  const [statusFilter, setStatusFilter] = useState<string>('all');
+  // Remembered across leaving the list (open / split / approve an invoice) and in the URL
+  const { clientFilter, setClientFilter, statusFilter, setStatusFilter } = useListFilters();
   // Invoice-date range (YYYY-MM-DD, inclusive), e.g. to export one month to Move-in (QA-MV B4)
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
@@ -58,7 +59,11 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
     setCurrentPage(1);
   }, [clientFilter, statusFilter, dateFrom, dateTo]);
 
-  const uniqueClientIds = Array.from(new Set(invoices.map((i) => i.client_id)));
+  // Every client of the office (also those without invoices yet), then any other client an invoice has
+  const uniqueClientIds = Array.from(new Set([
+    ...Object.keys(clients).sort((a, b) => (clients[a] || '').localeCompare(clients[b] || '', 'he')),
+    ...invoices.map((i) => i.client_id),
+  ]));
 
   const filteredInvoices = invoices.filter((inv) => {
     const matchClient = clientFilter === 'all' || inv.client_id === clientFilter;
