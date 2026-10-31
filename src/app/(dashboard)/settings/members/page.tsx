@@ -5,6 +5,7 @@ import { Loader2, Mail, ShieldAlert, Trash2, UserCog, UserPlus, X } from 'lucide
 import clsx from 'clsx';
 import { useSession } from '@/components/Auth/SessionContext';
 import { useToast } from '@/components/ui/Toast';
+import { useConfirm } from '@/components/ui/ConfirmDialog';
 import type { MemberRole } from '@/shared/authModel';
 import {
   cancelOrgInvitation,
@@ -20,6 +21,7 @@ import {
 export default function OrgMembersPage() {
   const { me, loading: sessionLoading, currentOrgId } = useSession();
   const { toast } = useToast();
+  const askConfirm = useConfirm();
 
   const orgs = useMemo(() => me?.organizations ?? [], [me]);
   const [orgId, setOrgId] = useState<string | null>(null);
@@ -83,7 +85,7 @@ export default function OrgMembersPage() {
 
   const handleRemove = async (userId: string, label: string) => {
     if (!orgId) return;
-    if (!window.confirm(`להסיר את ${label} מהמשרד? הגישה שלו/ה לנתוני המשרד תיחסם מיד.`)) return;
+    if (!(await askConfirm({ title: 'הסרת משתמש', message: `להסיר את ${label} מהמשרד? הגישה שלו/ה לנתוני המשרד תיחסם מיד.`, confirmLabel: 'הסר', tone: 'danger' }))) return;
     setBusyKey(`member:${userId}`);
     try {
       await removeOrgMember(orgId, userId);
@@ -98,7 +100,7 @@ export default function OrgMembersPage() {
 
   const handleCancelInvite = async (address: string) => {
     if (!orgId) return;
-    if (!window.confirm(`לבטל את ההזמנה של ${address}?`)) return;
+    if (!(await askConfirm({ title: 'ביטול הזמנה', message: `לבטל את ההזמנה של ${address}?`, confirmLabel: 'בטל הזמנה', cancelLabel: 'חזרה', tone: 'danger' }))) return;
     setBusyKey(`invite:${address}`);
     try {
       await cancelOrgInvitation(orgId, address);

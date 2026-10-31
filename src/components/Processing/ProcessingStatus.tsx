@@ -6,6 +6,7 @@ import type { Invoice } from '@/shared/types';
 import { reopenInvoice, reprocessInvoice, tickProcessing } from '@/lib/api';
 import { describeProgress } from '@/shared/processing';
 import { useToast } from '@/components/ui/Toast';
+import { useConfirm } from '@/components/ui/ConfirmDialog';
 
 /** How often a screen advances the queued runs of the invoices it shows as processing. */
 const TICK_INTERVAL_MS = 5_000;
@@ -73,6 +74,7 @@ export function processingLabel(invoice: Pick<Invoice, 'processing_stage' | 'pro
  */
 export function ProcessingBanner({ invoice, onChanged }: { invoice: Invoice; onChanged: () => void }) {
   const { toast } = useToast();
+  const askConfirm = useConfirm();
   const [busy, setBusy] = useState(false);
   useProcessingTicks([invoice], () => onChanged());
 
@@ -92,7 +94,7 @@ export function ProcessingBanner({ invoice, onChanged }: { invoice: Invoice; onC
 
   const handleReprocess = async () => {
     const reopen = invoice.status === 'approved';
-    if (reopen && !window.confirm('החשבונית כבר אושרה. לפתוח אותה מחדש ולהריץ שוב את הניתוח? הערכים שאושרו יישמרו, והחשבונית תחזור לבדיקה.')) {
+    if (reopen && !(await askConfirm({ title: 'עיבוד מחדש של חשבונית מאושרת', message: 'החשבונית כבר אושרה. לפתוח אותה מחדש ולהריץ שוב את הניתוח? הערכים שאושרו יישמרו, והחשבונית תחזור לבדיקה.', confirmLabel: 'פתח ועבד מחדש' }))) {
       return;
     }
     setBusy(true);

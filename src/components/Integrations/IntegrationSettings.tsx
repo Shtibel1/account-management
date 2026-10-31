@@ -17,6 +17,7 @@ import {
 } from '@/lib/integrationsApi';
 import { Button } from '@/components/ui/Button';
 import { useToast } from '@/components/ui/Toast';
+import { useConfirm } from '@/components/ui/ConfirmDialog';
 
 const CAPABILITY_LABELS: Record<keyof PluginInfo['capabilities'], string> = {
   attachPdf: 'צירוף PDF',
@@ -63,6 +64,7 @@ function PluginForm({
   onDeleted: () => void;
 }) {
   const { toast } = useToast();
+  const askConfirm = useConfirm();
   const [values, setValues] = useState<FormValues>(() => initialValues(plugin, integration));
   const [cleared, setCleared] = useState<Set<string>>(new Set());
   const [enabled, setEnabled] = useState(integration?.enabled ?? true);
@@ -125,7 +127,7 @@ function PluginForm({
   };
 
   const handleDelete = async () => {
-    if (!window.confirm(`להסיר את החיבור ל-${plugin.displayName}? ההגדרות והסודות השמורים יימחקו.`)) return;
+    if (!(await askConfirm({ title: 'הסרת חיבור', message: `להסיר את החיבור ל-${plugin.displayName}? ההגדרות והסודות השמורים יימחקו.`, confirmLabel: 'הסר חיבור', tone: 'danger' }))) return;
     setDeleting(true);
     try {
       await deleteClientIntegration(clientId, plugin.id);

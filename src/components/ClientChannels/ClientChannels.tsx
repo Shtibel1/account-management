@@ -11,6 +11,7 @@ import {
 } from '@/lib/api';
 import { formatPhoneForDisplay, normalizePhone } from '@/lib/phone';
 import { useToast } from '@/components/ui/Toast';
+import { useConfirm } from '@/components/ui/ConfirmDialog';
 import type { ClientContact } from '@/shared/types';
 import { ClientNotifyEmailSection } from '@/components/ReviewLoop/ClientNotifyEmail';
 import { useEscapeKey } from '@/components/ui/useEscapeKey';
@@ -128,6 +129,7 @@ export function ClientChannelsDialog({
   onClose: () => void;
 }) {
   const { toast } = useToast();
+  const askConfirm = useConfirm();
   const [phone, setPhone] = useState('');
   const [name, setName] = useState('');
   const [saving, setSaving] = useState(false);
@@ -154,7 +156,7 @@ export function ClientChannelsDialog({
 
   const handleRemove = async (contact: ClientContact) => {
     const label = formatPhoneForDisplay(contact.phone) + (contact.name ? ` (${contact.name})` : '');
-    if (!window.confirm(`להסיר את המספר ${label}? מסמכים שיישלחו ממנו לא ייקלטו עוד ללקוח זה.`)) return;
+    if (!(await askConfirm({ title: 'הסרת מספר', message: `להסיר את המספר ${label}? מסמכים שיישלחו ממנו לא ייקלטו עוד ללקוח זה.`, confirmLabel: 'הסר', tone: 'danger' }))) return;
     const contactId = contact.id;
     setRemovingId(contactId);
     try {
