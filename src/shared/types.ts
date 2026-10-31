@@ -139,6 +139,8 @@ export interface Client {
   org_id?: string;
   /** Where "returned to client" notifications are emailed (accountant_review_loop). */
   contact_email?: string | null;
+  /** Set when an owner archived the client (hidden from lists and pickers, restorable). */
+  archived_at?: string | null;
   created_at: string;
 }
 

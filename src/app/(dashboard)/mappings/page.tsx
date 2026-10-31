@@ -85,7 +85,7 @@ export default function MappingsPage() {
   }, [searchQuery, selectedClient]);
 
   useEffect(() => {
-    supabase.from('clients').select('*').order('name').then(({ data }) => {
+    supabase.from('clients').select('*').is('archived_at', null).order('name').then(({ data }) => {
       setClients(data ?? []);
       if (data?.length) setSelectedClient(data[0].id);
     });

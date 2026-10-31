@@ -20,7 +20,7 @@ export function useSelectedClient() {
 
   useEffect(() => {
     const supabase = createClient();
-    supabase.from('clients').select('*').order('name').then(({ data, error }) => {
+    supabase.from('clients').select('*').is('archived_at', null).order('name').then(({ data, error }) => {
       if (error) console.error('[Integrations] Failed to load clients:', error.message);
       setClients((data as Client[]) ?? []);
       setLoaded(true);
