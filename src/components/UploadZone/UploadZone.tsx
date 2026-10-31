@@ -126,20 +126,20 @@ export function UploadZone({ clientId, disabled = false }: { clientId: string; d
       <div
         {...getRootProps()}
         className={clsx(
-          'relative border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all duration-200',
+          'relative border-2 border-dashed rounded-2xl p-8 sm:p-12 text-center cursor-pointer transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2',
           isDragActive
             ? 'border-blue-500 bg-blue-50 scale-[1.01]'
             : 'border-slate-300 hover:border-blue-400 hover:bg-slate-50'
         )}
       >
-        <input {...getInputProps()} />
+        <input {...getInputProps()} aria-label="בחירת קבצי חשבוניות להעלאה" />
         <div className={clsx('mx-auto mb-4 rounded-2xl p-4 w-fit transition-colors', isDragActive ? 'bg-blue-100' : 'bg-slate-100')}>
           <CloudUpload className={clsx('h-10 w-10 transition-colors', isDragActive ? 'text-blue-600' : 'text-slate-400')} />
         </div>
         <p className="text-lg font-semibold text-slate-700">
-          {isDragActive ? 'שחרר כאן...' : 'גרור קבצים לכאן'}
+          {isDragActive ? 'שחררו כאן...' : 'גררו קבצים לכאן'}
         </p>
-        <p className="text-sm text-slate-500 mt-1">או <span className="text-blue-600 font-medium">לחץ לבחירה</span></p>
+        <p className="text-sm text-slate-500 mt-1">או <span className="text-blue-600 font-medium">לחצו לבחירה</span></p>
         <p className="text-xs text-slate-400 mt-3">PDF, JPG, PNG, WEBP · עד 20MB לקובץ · מרובים בו-זמנית</p>
       </div>
 
@@ -149,7 +149,7 @@ export function UploadZone({ clientId, disabled = false }: { clientId: string; d
           <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
             <span className="text-sm font-medium text-slate-700">{filesLabel(files.length)}</span>
             {!uploading && files.some(f => f.status === 'pending' || f.status === 'error') && (
-              <button onClick={() => setFiles([])} className="text-xs text-slate-400 hover:text-slate-600">נקה הכל</button>
+              <button type="button" onClick={() => setFiles([])} className="text-xs text-slate-500 hover:text-slate-700 px-2 -mx-2 min-h-[44px] md:min-h-0 md:py-1">נקה הכל</button>
             )}
           </div>
           <div className="divide-y divide-slate-50">
@@ -168,10 +168,10 @@ export function UploadZone({ clientId, disabled = false }: { clientId: string; d
                     <p className="text-xs text-slate-400">{formatSize(f.file.size)}</p>
                   )}
                 </div>
-                {f.status === 'pending'   && <button onClick={() => removeFile(i)} className="text-slate-300 hover:text-slate-500"><XCircle className="h-4 w-4" /></button>}
+                {f.status === 'pending'   && <button type="button" onClick={() => removeFile(i)} aria-label={`הסרת ${f.file.name} מהרשימה`} className="-m-2 p-2 max-md:p-3.5 max-md:-m-3.5 text-slate-400 hover:text-slate-600 rounded-lg"><XCircle className="h-4 w-4" /></button>}
                 {f.status === 'uploading' && <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />}
                 {f.status === 'done'      && <CheckCircle2 className="h-4 w-4 text-emerald-500" />}
-                {f.status === 'error'     && <button onClick={() => removeFile(i)} title="הסר מהרשימה"><XCircle className="h-4 w-4 text-red-500" /></button>}
+                {f.status === 'error'     && <button type="button" onClick={() => removeFile(i)} title="הסר מהרשימה" aria-label={`הסרת ${f.file.name} מהרשימה`} className="-m-2 p-2 max-md:p-3.5 max-md:-m-3.5 rounded-lg"><XCircle className="h-4 w-4 text-red-500" /></button>}
               </div>
             ))}
           </div>
@@ -187,7 +187,7 @@ export function UploadZone({ clientId, disabled = false }: { clientId: string; d
           {uploading ? (
             <span className="flex items-center justify-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> מעלה...</span>
           ) : (
-            `העלה ${filesLabel(pendingFiles.length)} לעיבוד AI`
+            `העלאת ${filesLabel(pendingFiles.length)} לסריקה`
           )}
         </button>
       )}
@@ -201,7 +201,7 @@ export function UploadZone({ clientId, disabled = false }: { clientId: string; d
               {files.some((f) => f.status === 'error') ? 'חלק מהקבצים הועלו' : 'ההעלאה הושלמה!'}
             </p>
             <p className="text-xs mt-0.5">
-              {'החשבוניות נשלחות לניתוח AI. עבור ל'}
+              {'החשבוניות נשלחו לסריקה אוטומטית. המשיכו ל'}
               <a href="/review" className="underline mx-1">בדיקה ואישור</a>
               {' - כשהניתוח יסתיים תקבל התראה.'}
             </p>

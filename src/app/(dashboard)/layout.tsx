@@ -90,6 +90,12 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex flex-row min-h-screen bg-slate-100">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:right-2 focus:z-50 focus:bg-white focus:text-blue-700 focus:px-4 focus:py-2 focus:rounded-lg focus:shadow-lg"
+      >
+        דילוג לתוכן הראשי
+      </a>
       {/* Drawer backdrop (mobile only) */}
       {drawerOpen && (
         <div
@@ -104,8 +110,10 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
         id="dashboard-sidebar"
         className={clsx(
           'w-64 shrink-0 bg-slate-900 flex flex-col h-screen',
-          'fixed inset-y-0 right-0 z-40 transition-transform duration-200 md:sticky md:top-0 md:right-auto md:translate-x-0',
-          drawerOpen ? 'translate-x-0 shadow-2xl' : 'translate-x-full'
+          'fixed inset-y-0 right-0 z-40 duration-200 md:sticky md:top-0 md:right-auto md:translate-x-0',
+          // Closed drawer is also hidden from keyboard / screen readers on phones (it is only moved off-screen otherwise)
+          drawerOpen ? 'translate-x-0 shadow-2xl visible' : 'translate-x-full invisible md:visible',
+          'transition-[transform,visibility]'
         )}
         aria-label="ניווט ראשי"
       >
@@ -115,7 +123,7 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
           <button
             type="button"
             onClick={() => setDrawerOpen(false)}
-            className="md:hidden text-slate-400 hover:text-white p-1 rounded-lg"
+            className="md:hidden -ml-2 h-11 w-11 inline-flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 rounded-lg"
             aria-label="סגור תפריט"
           >
             <X className="h-5 w-5" />
@@ -156,7 +164,7 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
             <button
               type="button"
               onClick={() => setDrawerOpen(true)}
-              className="md:hidden -mr-1 p-2 rounded-lg text-slate-600 hover:bg-slate-100"
+              className="md:hidden -mr-2 h-11 w-11 inline-flex items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100"
               aria-label="פתח תפריט"
               aria-controls="dashboard-sidebar"
               aria-expanded={drawerOpen}
@@ -180,7 +188,7 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
           </div>
         )}
 
-        <div className="flex-1 min-w-0 p-4 sm:p-6 md:p-8">
+        <div id="main-content" tabIndex={-1} className="flex-1 min-w-0 p-4 sm:p-6 md:p-8 focus:outline-none">
           {children}
         </div>
 

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { format } from 'date-fns';
-import { Loader2, RefreshCw, ScrollText, X } from 'lucide-react';
+import { Loader2, RefreshCw, ScrollText, Search, X } from 'lucide-react';
 import type { IntegrationLogRecord, PluginInfo } from '@/integrations/types';
 import {
   fetchIntegrationLog,
@@ -183,7 +183,7 @@ export function IntegrationLogs({
           <select
             id="log-plugin" value={filters.pluginId}
             onChange={(e) => onFiltersChange({ ...filters, pluginId: e.target.value })}
-            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 min-w-[140px]"
+            className="text-xs border border-slate-300 rounded-lg bg-white px-2.5 py-1.5 min-w-[140px] max-md:min-h-[44px]"
           >
             <option value="">הכול</option>
             {plugins.map((p) => <option key={p.id} value={p.id}>{p.displayName}</option>)}
@@ -194,7 +194,7 @@ export function IntegrationLogs({
           <select
             id="log-outcome" value={filters.outcome}
             onChange={(e) => onFiltersChange({ ...filters, outcome: e.target.value })}
-            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 min-w-[120px]"
+            className="text-xs border border-slate-300 rounded-lg bg-white px-2.5 py-1.5 min-w-[120px] max-md:min-h-[44px]"
           >
             <option value="">הכול</option>
             <option value="ok">הצליח</option>
@@ -211,27 +211,36 @@ export function IntegrationLogs({
           <input
             id="log-invoice" dir="ltr" value={invoiceDraft} onChange={(e) => setInvoiceDraft(e.target.value)}
             placeholder="מזהה חשבונית"
-            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 flex-1 min-w-0 sm:flex-none sm:w-72 font-mono text-left"
+            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 flex-1 min-w-0 sm:flex-none sm:w-72 font-mono placeholder:font-sans text-left max-md:min-h-[44px]"
           />
+          <button
+            type="submit"
+            aria-label="חיפוש לפי מזהה חשבונית"
+            className="shrink-0 inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-100 h-[30px] w-[30px] max-md:h-11 max-md:w-11"
+          >
+            <Search className="h-3.5 w-3.5" />
+          </button>
         </form>
         {filters.correlationId && (
           <span className="text-xs bg-blue-50 text-blue-700 border border-blue-100 rounded-full px-2.5 py-1 flex items-center gap-1" dir="ltr">
-            run {filters.correlationId.slice(0, 8)}
+            <span dir="rtl">ריצה</span> {filters.correlationId.slice(0, 8)}
             <button type="button" aria-label="הסר סינון ריצה" onClick={() => onFiltersChange({ ...filters, correlationId: '' })}><X className="h-3 w-3" /></button>
           </span>
         )}
         <div className="flex-1" />
         {hasFilters && (
           <button
+            type="button"
             onClick={() => onFiltersChange({ pluginId: '', outcome: '', invoiceId: '', correlationId: '' })}
-            className="text-xs text-blue-600 hover:text-blue-700 underline font-semibold"
+            className="text-xs text-blue-600 hover:text-blue-700 underline font-semibold px-2 min-h-[44px] md:min-h-0 md:py-1"
           >
             נקה מסננים
           </button>
         )}
         <button
+          type="button"
           onClick={() => load(null)} disabled={loading}
-          className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700 px-2 py-1 rounded-lg hover:bg-slate-100"
+          className="flex items-center gap-1.5 text-xs text-slate-600 hover:text-slate-800 px-3 min-h-[44px] md:min-h-0 md:py-1.5 rounded-lg hover:bg-slate-100"
         >
           <RefreshCw className={clsx('h-3.5 w-3.5', loading && 'animate-spin')} /> רענן
         </button>

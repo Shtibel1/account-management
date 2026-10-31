@@ -120,7 +120,7 @@ export default function ExperimentalFeaturesPage() {
                     type="button"
                     onClick={() => update(f.flag, null)}
                     disabled={saving === f.flag}
-                    className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 disabled:opacity-50"
+                    className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 disabled:opacity-50 min-h-[44px] md:min-h-0 md:py-1"
                   >
                     <RotateCcw className="h-3 w-3" /> חזרה לברירת המחדל
                   </button>
@@ -133,17 +133,22 @@ export default function ExperimentalFeaturesPage() {
                 aria-label={f.label}
                 onClick={() => update(f.flag, !f.enabled)}
                 disabled={saving === f.flag}
-                className={clsx(
-                  'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-60 mt-1',
-                  f.enabled ? 'bg-blue-600' : 'bg-slate-300'
-                )}
+                // 44x44 hit area around the 44x24 track
+                className="group shrink-0 -my-2.5 inline-flex h-11 w-14 items-center justify-center rounded-full focus:outline-none disabled:opacity-60"
               >
                 <span
                   className={clsx(
-                    'inline-block h-5 w-5 rounded-full bg-white shadow transition-transform',
-                    f.enabled ? '-translate-x-[22px]' : '-translate-x-0.5'
+                    'relative inline-flex h-6 w-11 items-center rounded-full transition-colors group-focus-visible:ring-2 group-focus-visible:ring-blue-500 group-focus-visible:ring-offset-2',
+                    f.enabled ? 'bg-blue-600' : 'bg-slate-300'
                   )}
-                />
+                >
+                  <span
+                    className={clsx(
+                      'inline-block h-5 w-5 rounded-full bg-white shadow transition-transform',
+                      f.enabled ? '-translate-x-[22px]' : '-translate-x-0.5'
+                    )}
+                  />
+                </span>
               </button>
             </div>
           ))}

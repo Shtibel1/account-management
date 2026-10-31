@@ -18,7 +18,7 @@ export function AuthShell({ title, subtitle, children, footer }: Props) {
             <Logo size="lg" />
           </Link>
         </div>
-        <div className="card p-8 space-y-6">
+        <div className="card p-6 sm:p-8 space-y-6">
           <div className="space-y-1 text-center">
             <h1 className="text-2xl font-bold text-slate-900">{title}</h1>
             {subtitle && <p className="text-sm text-slate-500">{subtitle}</p>}
@@ -55,5 +55,10 @@ export function authErrorHe(message: string | null | undefined): string {
   if (m.includes('signups not allowed') || m.includes('user not found') || m.includes('otp_disabled')) return 'לא נמצא חשבון עם אימייל זה';
   if (m.includes('rate limit') || m.includes('too many') || m.includes('security purposes')) return 'יותר מדי ניסיונות. נסה שוב בעוד כמה דקות.';
   if (m.includes('expired') || (m.includes('invalid') && m.includes('token'))) return 'הקישור פג תוקף או אינו תקין. בקש קישור חדש.';
-  return message ?? 'אירעה שגיאה. נסה שוב.';
+  if (m.includes('failed to fetch') || m.includes('network')) return 'אין חיבור לשרת. בדקו את החיבור לאינטרנט ונסו שוב.';
+  if (m.includes('invalid email') || m.includes('unable to validate email')) return 'כתובת האימייל אינה תקינה';
+  // Never show Supabase's English text as is: an unknown message gets a generic Hebrew one (details in the console)
+  if (/[֐-׿]/.test(message ?? '')) return message as string;
+  console.warn('[auth] Unmapped auth error:', message);
+  return 'אירעה שגיאה. נסו שוב.';
 }

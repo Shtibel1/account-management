@@ -22,7 +22,7 @@ const sizes = {
 export function Button({ variant = 'primary', size = 'md', className, children, ...props }: Props) {
   return (
     <button
-      className={clsx('rounded-xl font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5', variants[variant], sizes[size], className)}
+      className={clsx('max-md:min-h-[44px] rounded-xl font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5', variants[variant], sizes[size], className)}
       {...props}
     >
       {children}

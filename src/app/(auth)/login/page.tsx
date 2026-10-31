@@ -30,7 +30,7 @@ function LoginForm() {
         <FormMessage kind="info">
           Supabase אינו מוגדר, ולכן המערכת רצה ללא התחברות (פיתוח מקומי בלבד).
         </FormMessage>
-        <Link href={next} className="block text-center bg-blue-600 hover:bg-blue-700 text-white rounded-xl py-2.5 text-sm font-semibold">
+        <Link href={next} className="block text-center bg-blue-600 hover:bg-blue-700 text-white rounded-xl py-2.5 min-h-[44px] text-sm font-semibold">
           כניסה למערכת
         </Link>
       </AuthShell>
@@ -78,7 +78,7 @@ function LoginForm() {
       footer={
         <>
           עדיין אין לכם חשבון?{' '}
-          <Link href={`/signup${next !== '/clients' ? `?next=${encodeURIComponent(next)}` : ''}`} className="font-semibold text-blue-600 hover:text-blue-700">
+          <Link href={`/signup${next !== '/clients' ? `?next=${encodeURIComponent(next)}` : ''}`} className="inline-block py-3 font-semibold text-blue-600 hover:text-blue-700 underline-offset-4 hover:underline">
             פתיחת משרד חדש
           </Link>
         </>
@@ -95,7 +95,7 @@ function LoginForm() {
             role="tab"
             aria-selected={mode === value}
             onClick={() => { setMode(value); setError(null); setMagicSent(false); }}
-            className={clsx('py-2 rounded-lg transition-colors', mode === value ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700')}
+            className={clsx('py-2 min-h-[44px] rounded-lg transition-colors', mode === value ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700')}
           >
             {label}
           </button>
@@ -144,7 +144,7 @@ function LoginForm() {
           <button
             type="submit"
             disabled={busy}
-            className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors shadow-sm"
+            className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-xl py-2.5 min-h-[44px] text-sm font-semibold transition-colors shadow-sm"
           >
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : mode === 'password' ? <LogIn className="h-4 w-4" /> : <Mail className="h-4 w-4" />}
             {mode === 'password' ? 'התחברות' : 'שליחת קישור התחברות'}
