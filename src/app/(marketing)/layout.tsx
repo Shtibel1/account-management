@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Menu, X, Camera, FileText, Home, Shield } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -33,6 +33,8 @@ function MarketingLogo() {
 export default function MarketingLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
+  // Navigating closes the menu
+  useEffect(() => { setMenuOpen(false); }, [pathname]);
 
   return (
     <div className="min-h-screen flex flex-col bg-stone-50">
@@ -64,9 +66,12 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
 
           {/* Mobile hamburger */}
           <button
+            type="button"
             onClick={() => setMenuOpen(!menuOpen)}
-            className="sm:hidden p-2 rounded-lg text-stone-600 hover:bg-stone-100 transition-colors"
+            className="sm:hidden -ml-2 h-11 w-11 inline-flex items-center justify-center rounded-lg text-stone-600 hover:bg-stone-100 transition-colors"
             aria-label={menuOpen ? 'סגור תפריט' : 'פתח תפריט'}
+            aria-expanded={menuOpen}
+            aria-controls="marketing-mobile-nav"
           >
             {menuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
           </button>
@@ -74,7 +79,7 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
 
         {/* Mobile menu */}
         {menuOpen && (
-          <nav className="sm:hidden border-t border-stone-100 bg-white px-4 py-3 space-y-1">
+          <nav id="marketing-mobile-nav" aria-label="ניווט ראשי" className="sm:hidden border-t border-stone-100 bg-white px-4 py-3 space-y-1">
             {navItems.map(({ href, label, icon: Icon }) => {
               const active = pathname === href;
               return (
@@ -83,7 +88,7 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
                   href={href}
                   onClick={() => setMenuOpen(false)}
                   className={clsx(
-                    'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors',
+                    'flex items-center gap-3 px-3 py-2.5 min-h-[44px] rounded-lg text-sm font-medium transition-colors',
                     active
                       ? 'bg-blue-50 text-blue-700'
                       : 'text-stone-600 hover:bg-stone-100'
@@ -112,13 +117,13 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
             </div>
             <span className="font-semibold text-white">סריקה בעברית</span>
           </div>
-          <div className="flex justify-center gap-6 text-sm">
-            <Link href="/" className="hover:text-white transition-colors">בית</Link>
-            <Link href="/order" className="hover:text-white transition-colors">הזמנה</Link>
-            <Link href="/privacy" className="hover:text-white transition-colors">פרטיות</Link>
-          </div>
-          <p className="text-xs text-stone-500">
-            © {new Date().getFullYear()} סריקה בעברית · contact@nadav-shtibel.com
+          <nav aria-label="קישורים בתחתית העמוד" className="flex justify-center gap-2 text-sm">
+            <Link href="/" className="px-3 py-3 hover:text-white transition-colors">בית</Link>
+            <Link href="/order" className="px-3 py-3 hover:text-white transition-colors">הזמנה</Link>
+            <Link href="/privacy" className="px-3 py-3 hover:text-white transition-colors">פרטיות</Link>
+          </nav>
+          <p className="text-xs text-stone-400">
+            © {new Date().getFullYear()} סריקה בעברית · <bdi dir="ltr">contact@nadav-shtibel.com</bdi>
           </p>
         </div>
       </footer>
