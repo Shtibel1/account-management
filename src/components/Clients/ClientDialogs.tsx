@@ -65,7 +65,7 @@ export function ClientCardMenu({ clientName, canDelete, onEdit, onDelete }: {
         aria-label={`פעולות ללקוח ${clientName}`}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+        className="h-11 w-11 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
       >
         <MoreVertical className="h-4 w-4" />
       </button>
@@ -74,7 +74,7 @@ export function ClientCardMenu({ clientName, canDelete, onEdit, onDelete }: {
           <button
             type="button" role="menuitem"
             onClick={() => { setOpen(false); onEdit(); }}
-            className="w-full flex items-center gap-2 px-3 py-2 text-right text-slate-700 hover:bg-slate-50"
+            className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-right text-slate-700 hover:bg-slate-50"
           >
             <Pencil className="h-3.5 w-3.5" /> עריכת לקוח
           </button>
@@ -82,7 +82,7 @@ export function ClientCardMenu({ clientName, canDelete, onEdit, onDelete }: {
             <button
               type="button" role="menuitem"
               onClick={() => { setOpen(false); onDelete(); }}
-              className="w-full flex items-center gap-2 px-3 py-2 text-right text-red-600 hover:bg-red-50"
+              className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-right text-red-600 hover:bg-red-50"
             >
               <Trash2 className="h-3.5 w-3.5" /> מחיקת לקוח
             </button>

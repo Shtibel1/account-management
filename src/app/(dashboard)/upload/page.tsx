@@ -24,6 +24,7 @@ function ClientPicker({ title, text }: { title: string; text: string }) {
     createClient()
       .from('clients')
       .select('id, name, vat_account, created_at')
+      .is('archived_at', null)
       .order('name')
       .then(({ data, error }: { data: ClientLabelSource[] | null; error: unknown }) => {
         if (cancelled) return;
