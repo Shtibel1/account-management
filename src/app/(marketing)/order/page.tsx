@@ -107,8 +107,15 @@ export default function OrderPage() {
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6 sm:p-8 space-y-6">
-          {/* Honeypot: invisible to people and screen readers, not focusable */}
-          <div aria-hidden="true" style={{ position: 'absolute', left: '-10000px', width: 1, height: 1, overflow: 'hidden' }}>
+          {/* Honeypot: invisible to people and screen readers, not focusable. Visually-hidden (clipped
+              1px box), not moved off-screen: a large negative left offset widened the page sideways in RTL. */}
+          <div
+            aria-hidden="true"
+            style={{
+              position: 'absolute', width: 1, height: 1, margin: -1, padding: 0, border: 0,
+              overflow: 'hidden', clipPath: 'inset(50%)', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap',
+            }}
+          >
             <label htmlFor="website">אתר</label>
             <input type="text" id="website" name="website" tabIndex={-1} autoComplete="off" defaultValue="" />
           </div>

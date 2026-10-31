@@ -16,6 +16,10 @@ const nextConfig: NextConfig = {
   async headers() {
     return SECURITY_HEADER_RULES;
   },
+  // There is no /dashboard page: the office's home is the client list (QA: /dashboard was a 404)
+  async redirects() {
+    return [{ source: '/dashboard', destination: '/clients', permanent: false }];
+  },
 };
 
 export default nextConfig;

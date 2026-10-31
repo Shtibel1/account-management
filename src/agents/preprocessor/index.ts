@@ -1,6 +1,7 @@
 import type { OcrMetadata, OcrWord } from '@/shared/types';
 import { PDFDocument } from 'pdf-lib';
 import { UserFacingError, isUnreadableFileError } from '@/shared/processing';
+import { uprightRotationOfBox } from '@/shared/orientation';
 import { DAMAGED_PDF_MESSAGE, hasPdfStructure, readPdfPageCount, sniffUploadMime } from '@/shared/uploadValidation';
 
 function extractWordsFromPage(pageRes: any, pageIndex: number): OcrWord[] {
@@ -32,10 +33,13 @@ function extractWordsFromPage(pageRes: any, pageIndex: number): OcrWord[] {
             const x2 = Math.max(...xs) / (isNormalized ? 1 : pageWidth);
             const y2 = Math.max(...ys) / (isNormalized ? 1 : pageHeight);
 
+            // Vertex order follows the text's reading direction: an upside-down scan shows here
+            const rot = uprightRotationOfBox(vertices, isNormalized ? pageWidth : 1, isNormalized ? pageHeight : 1);
             words.push({
               text,
               bbox: { x1, y1, x2, y2 },
               page: pageIndex,
+              ...(rot ? { rot } : {}),
             });
           }
         }

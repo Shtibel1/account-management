@@ -1,9 +1,11 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { BboxMap, FieldBbox } from '@/shared/types';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { RotateCw } from 'lucide-react';
+import { Minus, Plus, RotateCw } from 'lucide-react';
+import { readPageRotations } from '@/shared/orientation';
+import { MAX_ZOOM, MIN_ZOOM, ZOOM_STEP, clampZoom, rotatedPoint, zoomScrollFor } from '@/shared/viewerZoom';
 
 // Import react-pdf styles for correct page layouts
 import 'react-pdf/dist/Page/AnnotationLayer.css';
@@ -23,26 +25,56 @@ const FIELD_COLORS: Record<string, string> = {
   expense_category:  '#ec4899', // pink
 };
 
+/** Padding of the scroll area: px-4, pt-12 (room for the toolbar). */
+const PAD = { x: 16, y: 48 };
+/** A ctrl+wheel / pinch gesture is committed (pages re-rendered) after this much quiet. */
+const GESTURE_COMMIT_MS = 180;
+
 interface Props {
   fileUrl: string;
   bboxes?: BboxMap;
   activeField: string | null;
   showAll: boolean;
   yOffset?: number; // היסט אנכי לכיול (ערך 0-1, ברירת מחדל 0)
+  /** Pages scanned sideways / upside down: `{ "<page>": 90 | 180 | 270 }` (extracted_data.page_rotations). */
+  pageRotations?: unknown;
 }
 
-export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0 }: Props) {
+interface Anchor { cx: number; cy: number; from: number }
+
+export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0, pageRotations }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const [numPages, setNumPages] = useState<number | null>(null);
   const [pageSizes, setPageSizes] = useState<Record<number, { w: number; h: number }>>({});
-  const [rotation, setRotation] = useState(0); // 0, 90, 180, 270
+  /** Height / width of each page at rotation 0 (from the PDF page or the image's natural size). */
+  const [aspects, setAspects] = useState<Record<number, number>>({});
+  const [rotation, setRotation] = useState(0); // the reviewer's turns, on top of the automatic one
+  const [zoom, setZoom] = useState(1); // 1 = page width fits the pane
+  const [preview, setPreview] = useState<{ scale: number; ox: number; oy: number } | null>(null);
+  const [fitWidth, setFitWidth] = useState(0);
 
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const anchorRef = useRef<Anchor | null>(null);
+  const gestureRef = useRef<{ scale: number; cx: number; cy: number; timer: ReturnType<typeof setTimeout> | null } | null>(null);
+  const pinchRef = useRef<{ dist: number; cx: number; cy: number } | null>(null);
+  const panRef = useRef<{ x: number; y: number; left: number; top: number; id: number } | null>(null);
+  const [panning, setPanning] = useState(false);
+
+  const autoRotations = readPageRotations(pageRotations);
   const isPdf = fileUrl.toLowerCase().includes('.pdf') || fileUrl.includes('content-type=application%2Fpdf');
 
+  const pageRotation = (pageNum: number) => ((autoRotations[String(pageNum)] ?? 0) + rotation) % 360;
+
   // central measurement trigger
-  const updateSizes = () => {
+  const updateSizes = useCallback(() => {
     const container = containerRef.current;
     if (!container) return;
+    setFitWidth((prev) => {
+      const next = Math.max(120, container.clientWidth - 2 * PAD.x);
+      return Math.abs(prev - next) > 1 ? next : prev;
+    });
 
     // Find all PDF canvas elements or image element
     const elements = container.querySelectorAll('.react-pdf__Page canvas, img');
@@ -73,7 +105,7 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
 
       return changed ? next : prev;
     });
-  };
+  }, []);
 
   // Unified layout observer to handle client-side rendering size updates
   useEffect(() => {
@@ -88,15 +120,175 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
 
     // MutationObserver detects when react-pdf finishes async page renders and inserts canvas tags
     const mo = new MutationObserver(updateSizes);
-    mo.observe(container, { childList: true, subtree: true });
+    mo.observe(container, { childList: true, subtree: true, attributes: true, attributeFilter: ['width', 'height', 'style'] });
 
     return () => {
       ro.disconnect();
       mo.disconnect();
     };
-  }, [fileUrl, numPages]);
+  }, [fileUrl, numPages, updateSizes]);
 
-  // Auto-scroll to center the active highlighted field in the viewport
+  // A new file starts at "fit" again
+  useEffect(() => {
+    setZoom(1);
+    setRotation(0);
+    setAspects({});
+    setPageSizes({});
+  }, [fileUrl]);
+
+  // ── Zoom ────────────────────────────────────────────────────────────────────
+
+  /** Zooms to `next`, keeping the content point under (cx, cy) (container coords) in place. */
+  const zoomTo = useCallback((next: number, cx?: number, cy?: number) => {
+    const container = containerRef.current;
+    const from = zoomRef.current;
+    const target = clampZoom(next);
+    if (!container || target === from) return;
+    anchorRef.current = {
+      cx: cx ?? container.clientWidth / 2,
+      cy: cy ?? container.clientHeight / 2,
+      from,
+    };
+    setZoom(target);
+  }, []);
+
+  // After a zoom, scroll so the anchor point stays under the pointer / pane center
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    const anchor = anchorRef.current;
+    if (!container || !anchor) return;
+    anchorRef.current = null;
+    const pos = zoomScrollFor(
+      { left: container.scrollLeft, top: container.scrollTop },
+      { x: anchor.cx, y: anchor.cy },
+      zoom / anchor.from,
+      PAD
+    );
+    container.scrollLeft = pos.left;
+    container.scrollTop = pos.top;
+  }, [zoom]);
+
+  /** Live gesture (ctrl+wheel / pinch): scale with CSS first, re-render the pages when it settles. */
+  const gestureScale = useCallback((factor: number, cx: number, cy: number, commitAfterMs: number | null) => {
+    const container = containerRef.current;
+    if (!container) return;
+    const g = gestureRef.current ?? { scale: 1, cx, cy, timer: null };
+    const from = zoomRef.current;
+    g.scale = clampZoom(from * g.scale * factor) / from;
+    g.cx = cx;
+    g.cy = cy;
+    gestureRef.current = g;
+    setPreview({ scale: g.scale, ox: container.scrollLeft + cx, oy: container.scrollTop + cy });
+    if (g.timer) clearTimeout(g.timer);
+    g.timer = commitAfterMs === null ? null : setTimeout(() => commitGesture(), commitAfterMs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const commitGesture = useCallback(() => {
+    const g = gestureRef.current;
+    gestureRef.current = null;
+    setPreview(null);
+    if (!g) return;
+    if (g.timer) clearTimeout(g.timer);
+    zoomTo(zoomRef.current * g.scale, g.cx, g.cy);
+  }, [zoomTo]);
+
+  // ctrl+wheel (and a laptop trackpad's pinch, which arrives as ctrl+wheel); pinch on touch screens.
+  // Native listeners: React's wheel / touch handlers are passive, so they can't stop the page zoom.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const local = (clientX: number, clientY: number) => {
+      const r = container.getBoundingClientRect();
+      return { x: clientX - r.left, y: clientY - r.top };
+    };
+
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? container.clientHeight : 1;
+      const factor = Math.exp(-e.deltaY * unit * 0.002);
+      const p = local(e.clientX, e.clientY);
+      gestureScale(factor, p.x, p.y, GESTURE_COMMIT_MS);
+    };
+
+    const touchInfo = (t: TouchList) => {
+      const a = t[0];
+      const b = t[1];
+      const p = local((a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2);
+      return { dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), cx: p.x, cy: p.y };
+    };
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        pinchRef.current = touchInfo(e.touches);
+        e.preventDefault();
+      }
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      const start = pinchRef.current;
+      if (!start || e.touches.length !== 2) return;
+      e.preventDefault();
+      const now = touchInfo(e.touches);
+      if (start.dist <= 0) return;
+      // gestureScale multiplies: pass the change since the last move
+      const current = gestureRef.current?.scale ?? 1;
+      gestureScale(now.dist / start.dist / current, start.cx, start.cy, null);
+    };
+    const onTouchEnd = (e: TouchEvent) => {
+      if (pinchRef.current && e.touches.length < 2) {
+        pinchRef.current = null;
+        commitGesture();
+      }
+    };
+
+    container.addEventListener('wheel', onWheel, { passive: false });
+    container.addEventListener('touchstart', onTouchStart, { passive: false });
+    container.addEventListener('touchmove', onTouchMove, { passive: false });
+    container.addEventListener('touchend', onTouchEnd);
+    container.addEventListener('touchcancel', onTouchEnd);
+    return () => {
+      container.removeEventListener('wheel', onWheel);
+      container.removeEventListener('touchstart', onTouchStart);
+      container.removeEventListener('touchmove', onTouchMove);
+      container.removeEventListener('touchend', onTouchEnd);
+      container.removeEventListener('touchcancel', onTouchEnd);
+    };
+  }, [gestureScale, commitGesture]);
+
+  // Drag to pan with the mouse while zoomed in (touch screens pan by scrolling natively)
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const container = containerRef.current;
+    if (!container || e.pointerType !== 'mouse' || e.button !== 0 || zoom <= 1) return;
+    panRef.current = { x: e.clientX, y: e.clientY, left: container.scrollLeft, top: container.scrollTop, id: e.pointerId };
+    container.setPointerCapture?.(e.pointerId);
+    setPanning(true);
+    e.preventDefault();
+  };
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const container = containerRef.current;
+    const pan = panRef.current;
+    if (!container || !pan || pan.id !== e.pointerId) return;
+    container.scrollLeft = pan.left - (e.clientX - pan.x);
+    container.scrollTop = pan.top - (e.clientY - pan.y);
+  };
+  const endPan = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!panRef.current || panRef.current.id !== e.pointerId) return;
+    panRef.current = null;
+    containerRef.current?.releasePointerCapture?.(e.pointerId);
+    setPanning(false);
+  };
+
+  // Keyboard: ctrl/cmd + "+" / "-" / "0" while the viewer has focus
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomTo(zoom * ZOOM_STEP); }
+    else if (e.key === '-') { e.preventDefault(); zoomTo(zoom / ZOOM_STEP); }
+    else if (e.key === '0') { e.preventDefault(); zoomTo(1); }
+  };
+
+  // ── Active field: scroll it to the center of the pane ───────────────────────
+
   useEffect(() => {
     if (!activeField || !bboxes) return;
     const b = bboxes[activeField as keyof BboxMap];
@@ -106,40 +298,66 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
     if (!container) return;
 
     const pageNum = b.page ?? 1;
-    let pageElement: HTMLElement | null = null;
-    if (isPdf) {
-      pageElement = container.querySelector(`.react-pdf__Page[data-page-number="${pageNum}"] canvas`);
-    } else {
-      pageElement = container.querySelector('img');
-    }
-
+    const pageWrapper = container.querySelector<HTMLElement>(`[data-viewer-page="${pageNum}"]`);
     const size = pageSizes[pageNum];
-    if (!pageElement || !size || size.h === 0) return;
+    if (!pageWrapper || !size || size.h === 0) return;
 
-    const rect = pageElement.getBoundingClientRect();
+    // The wrapper is rotated around its center: map the box center through the same turn
+    const rect = pageWrapper.getBoundingClientRect();
     const containerRect = container.getBoundingClientRect();
-    const elementTop = rect.top - containerRect.top + container.scrollTop;
-
-    // Calculate vertical position of bounding box on the page/image
-    const y1 = (b.y1 + yOffset) * size.h;
-    const y2 = (b.y2 + yOffset) * size.h;
-    const fieldCenter = (y1 + y2) / 2;
-
-    // Absolute center in the scroll container
-    const absoluteCenter = elementTop + fieldCenter;
-
-    // Center in the container viewport
-    const containerHeight = container.clientHeight;
-    const targetScrollTop = absoluteCenter - containerHeight / 2;
+    const local = {
+      x: ((b.x1 + b.x2) / 2) * size.w - size.w / 2,
+      y: ((b.y1 + b.y2) / 2 + yOffset) * size.h - size.h / 2,
+    };
+    const turned = rotatedPoint(local, pageRotation(pageNum));
+    const absoluteX = rect.left + rect.width / 2 - containerRect.left + container.scrollLeft + turned.x;
+    const absoluteY = rect.top + rect.height / 2 - containerRect.top + container.scrollTop + turned.y;
 
     container.scrollTo({
-      top: Math.max(0, targetScrollTop),
+      top: Math.max(0, absoluteY - container.clientHeight / 2),
+      left: Math.max(0, absoluteX - container.clientWidth / 2),
       behavior: 'smooth',
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeField, bboxes, pageSizes, yOffset, isPdf]);
 
   const onDocumentLoadSuccess = ({ numPages }: { numPages: number }) => {
     setNumPages(numPages);
+  };
+
+  const rememberAspect = (pageNum: number, w: number, h: number) => {
+    if (!(w > 0 && h > 0)) return;
+    const aspect = h / w;
+    setAspects((prev) => (Math.abs((prev[pageNum] ?? 0) - aspect) < 1e-4 ? prev : { ...prev, [pageNum]: aspect }));
+  };
+
+  /** Rendered width of a page (before its rotation): its on-screen width fits the pane at zoom 1. */
+  const pageWidth = (pageNum: number): number | undefined => {
+    if (fitWidth <= 0) return undefined;
+    const rot = pageRotation(pageNum);
+    const aspect = aspects[pageNum];
+    const sideways = rot === 90 || rot === 270;
+    const fit = sideways && aspect ? fitWidth / aspect : fitWidth;
+    return Math.max(40, Math.round(fit * zoom));
+  };
+
+  const pageStyle = (pageNum: number): React.CSSProperties => {
+    const rot = pageRotation(pageNum);
+    const size = pageSizes[pageNum] || { w: 0, h: 0 };
+    const sideways = rot === 90 || rot === 270;
+    return {
+      direction: 'ltr',
+      transform: rot ? `rotate(${rot}deg)` : undefined,
+      transformOrigin: 'center center',
+      transition: 'transform 0.2s ease-in-out',
+      // Layout margin adjustments to swap aspect ratios smoothly inside scroll bounds
+      ...(sideways && size.w > 0 && size.h > 0 ? {
+        marginTop: `${(size.w - size.h) / 2}px`,
+        marginBottom: `${(size.w - size.h) / 2}px`,
+        marginLeft: `${(size.h - size.w) / 2}px`,
+        marginRight: `${(size.h - size.w) / 2}px`,
+      } : {}),
+    };
   };
 
   const renderOverlayForPage = (pageNum: number, size: { w: number; h: number }) => {
@@ -196,20 +414,54 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
     );
   };
 
-  const isRotated90 = rotation === 90 || rotation === 270;
+  const shownZoom = Math.round(zoom * (preview?.scale ?? 1) * 100);
+  const toolButton =
+    'pointer-events-auto flex items-center justify-center h-8 min-w-8 px-2 bg-white/95 hover:bg-white text-slate-700 text-xs font-semibold border border-slate-200 transition-colors select-none disabled:opacity-40 disabled:cursor-not-allowed';
 
   return (
-    <div
-      ref={containerRef}
-      dir="ltr"
-      className="relative w-full h-full overflow-auto bg-gray-100 flex flex-col items-center p-4 gap-4"
-      style={{ direction: 'ltr' }}
-    >
-      {/* Floating Toolbar */}
-      <div className="sticky top-2 self-end z-10 mr-2 -mb-10 pointer-events-none">
+    <div className="relative w-full h-full" dir="ltr">
+      {/* Floating toolbar (outside the scroll area, so it stays put while panning) */}
+      <div
+        dir="rtl"
+        className="absolute top-2 right-2 z-10 flex items-center gap-2 pointer-events-none"
+        role="toolbar"
+        aria-label="כלי תצוגת מסמך"
+      >
+        <div className="flex items-center rounded-xl shadow-md overflow-hidden backdrop-blur-sm" data-testid="viewer-zoom-controls">
+          <button
+            type="button"
+            onClick={() => zoomTo(zoom * ZOOM_STEP)}
+            disabled={zoom >= MAX_ZOOM}
+            className={`${toolButton} rounded-r-xl`}
+            title="הגדל (Ctrl + גלגלת)"
+            aria-label="הגדל"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => zoomTo(1)}
+            className={`${toolButton} border-x-0 tabular-nums w-14`}
+            title="התאם לרוחב (איפוס זום)"
+            aria-label={`איפוס זום (${shownZoom}%)`}
+          >
+            {shownZoom}%
+          </button>
+          <button
+            type="button"
+            onClick={() => zoomTo(zoom / ZOOM_STEP)}
+            disabled={zoom <= MIN_ZOOM}
+            className={`${toolButton} rounded-l-xl`}
+            title="הקטן"
+            aria-label="הקטן"
+          >
+            <Minus className="h-3.5 w-3.5" />
+          </button>
+        </div>
         <button
+          type="button"
           onClick={() => setRotation((r) => (r + 90) % 360)}
-          className="pointer-events-auto flex items-center gap-1.5 px-3 py-2 bg-white/95 hover:bg-white text-slate-700 text-xs font-semibold rounded-xl border border-slate-200 shadow-md hover:shadow-lg transition-all backdrop-blur-sm select-none"
+          className="pointer-events-auto flex items-center gap-1.5 h-8 px-3 bg-white/95 hover:bg-white text-slate-700 text-xs font-semibold rounded-xl border border-slate-200 shadow-md hover:shadow-lg transition-all backdrop-blur-sm select-none"
           title="סובב מסמך 90 מעלות"
         >
           <RotateCw className="h-3.5 w-3.5" />
@@ -217,85 +469,83 @@ export function ImageViewer({ fileUrl, bboxes, activeField, showAll, yOffset = 0
         </button>
       </div>
 
-      {isPdf ? (
-        <Document
-          file={fileUrl}
-          onLoadSuccess={onDocumentLoadSuccess}
-          loading={<div dir="rtl" className="text-slate-400 py-4 text-center">טוען קובץ PDF...</div>}
-          error={<div dir="rtl" className="text-rose-500 py-4 text-center">שגיאה בטעינת קובץ ה-PDF</div>}
-          className="flex flex-col items-center gap-4 w-full"
+      <div
+        ref={containerRef}
+        dir="ltr"
+        tabIndex={0}
+        data-testid="document-viewer"
+        className={`w-full h-full overflow-auto bg-gray-100 outline-none ${zoom > 1 ? (panning ? 'cursor-grabbing' : 'cursor-grab') : ''}`}
+        // Pan with one finger, pinch handled here (not by the browser's page zoom)
+        style={{ direction: 'ltr', touchAction: 'pan-x pan-y' }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endPan}
+        onPointerCancel={endPan}
+        onKeyDown={onKeyDown}
+      >
+        {/* w-max + min-w-full: a zoomed page widens the scroll area to the right only, so all of it can be reached */}
+        <div
+          ref={contentRef}
+          className="w-max min-w-full flex flex-col items-center gap-4 pt-12 pb-4 px-4"
+          style={preview ? { transform: `scale(${preview.scale})`, transformOrigin: `${preview.ox}px ${preview.oy}px` } : undefined}
         >
-          {Array.from(new Array(numPages ?? 0), (el, index) => {
-            const pageNum = index + 1;
-            const pageSize = pageSizes[pageNum] || { w: 0, h: 0 };
-            
-            // Layout margin adjustments to swap aspect ratios smoothly inside scroll bounds
-            const pageStyle: React.CSSProperties = {
-              direction: 'ltr',
-              transform: `rotate(${rotation}deg)`,
-              transformOrigin: 'center center',
-              transition: 'transform 0.2s ease-in-out',
-              ...(isRotated90 && pageSize.w > 0 && pageSize.h > 0 ? {
-                marginTop: `${(pageSize.w - pageSize.h) / 2}px`,
-                marginBottom: `${(pageSize.w - pageSize.h) / 2}px`,
-                marginLeft: `${(pageSize.h - pageSize.w) / 2}px`,
-                marginRight: `${(pageSize.h - pageSize.w) / 2}px`,
-              } : {})
-            };
-
-            return (
-              <div
-                key={pageNum}
-                className="relative bg-white shadow-md border border-slate-200 rounded max-w-full"
-                dir="ltr"
-                style={pageStyle}
-              >
-                <Page
-                  pageNumber={pageNum}
-                  renderTextLayer={false}
-                  renderAnnotationLayer={false}
-                  className="max-w-full h-auto"
-                />
-                {renderOverlayForPage(pageNum, pageSize)}
-              </div>
-            );
-          })}
-        </Document>
-      ) : (
-        (() => {
-          const imgPageSize = pageSizes[1] || { w: 0, h: 0 };
-          const imgStyle: React.CSSProperties = {
-            direction: 'ltr',
-            transform: `rotate(${rotation}deg)`,
-            transformOrigin: 'center center',
-            transition: 'transform 0.2s ease-in-out',
-            ...(isRotated90 && imgPageSize.w > 0 && imgPageSize.h > 0 ? {
-              marginTop: `${(imgPageSize.w - imgPageSize.h) / 2}px`,
-              marginBottom: `${(imgPageSize.w - imgPageSize.h) / 2}px`,
-              marginLeft: `${(imgPageSize.h - imgPageSize.w) / 2}px`,
-              marginRight: `${(imgPageSize.h - imgPageSize.w) / 2}px`,
-            } : {})
-          };
-
-          return (
+          {isPdf ? (
+            <Document
+              file={fileUrl}
+              onLoadSuccess={onDocumentLoadSuccess}
+              loading={<div dir="rtl" className="text-slate-400 py-4 text-center">טוען קובץ PDF...</div>}
+              error={<div dir="rtl" className="text-rose-500 py-4 text-center">שגיאה בטעינת קובץ ה-PDF</div>}
+              className="flex flex-col items-center gap-4"
+            >
+              {Array.from(new Array(numPages ?? 0), (el, index) => {
+                const pageNum = index + 1;
+                const pageSize = pageSizes[pageNum] || { w: 0, h: 0 };
+                return (
+                  <div
+                    key={pageNum}
+                    data-viewer-page={pageNum}
+                    data-rotation={pageRotation(pageNum)}
+                    className="relative bg-white shadow-md border border-slate-200 rounded"
+                    dir="ltr"
+                    style={pageStyle(pageNum)}
+                  >
+                    <Page
+                      pageNumber={pageNum}
+                      width={pageWidth(pageNum)}
+                      renderTextLayer={false}
+                      renderAnnotationLayer={false}
+                      onLoadSuccess={(page) => rememberAspect(pageNum, page.originalWidth, page.originalHeight)}
+                    />
+                    {renderOverlayForPage(pageNum, pageSize)}
+                  </div>
+                );
+              })}
+            </Document>
+          ) : (
             <div
-              className="relative inline-block bg-white shadow-md border border-slate-200 rounded max-w-full"
+              data-viewer-page={1}
+              data-rotation={pageRotation(1)}
+              className="relative inline-block bg-white shadow-md border border-slate-200 rounded"
               dir="ltr"
-              style={imgStyle}
+              style={pageStyle(1)}
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={fileUrl}
                 alt="חשבונית מקורית"
-                className="block max-w-full h-auto rounded select-none"
+                className="block h-auto rounded select-none max-w-none"
+                style={{ width: pageWidth(1) }}
                 draggable={false}
-                onLoad={updateSizes}
+                onLoad={(e) => {
+                  rememberAspect(1, e.currentTarget.naturalWidth, e.currentTarget.naturalHeight);
+                  updateSizes();
+                }}
               />
-              {renderOverlayForPage(1, imgPageSize)}
+              {renderOverlayForPage(1, pageSizes[1] || { w: 0, h: 0 })}
             </div>
-          );
-        })()
-      )}
+          )}
+        </div>
+      </div>
     </div>
   );
 }
