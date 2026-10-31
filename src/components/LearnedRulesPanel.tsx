@@ -74,7 +74,7 @@ export function LearnedRulesPanel({ clientId }: { clientId: string }) {
       {open && (
         <div className="mt-3 space-y-2">
           <p className="text-xs text-slate-500">
-            כשמתקנים שדה וערך הנכון מודפס בחשבונית, המערכת זוכרת היכן הספק מדפיס אותו ומשתמשת בזה בחשבוניות הבאות שלו.
+            כשמתקנים שדה והערך הנכון מודפס בחשבונית, המערכת זוכרת היכן הספק מדפיס אותו ומשתמשת בזה בחשבוניות הבאות שלו.
             תיקון יחיד לא משנה כלל קיים; כלל עם תיקונים סותרים מושהה עד שיש רוב ברור.
           </p>
           <ul className="divide-y divide-slate-100 border border-slate-100 rounded-lg">
