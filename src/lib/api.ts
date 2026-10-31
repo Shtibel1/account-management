@@ -1,9 +1,9 @@
 import type { BankTransaction, ClientContact, ClientNotification, ExtractedData, Invoice, NormalizedBankRow, SupplierAutomation, SupplierAutomationStatus, ValidationResult } from '@/shared/types';
 import type { FeatureFlag, FeatureFlagsResponse, OrgFeatureFlagsResponse } from '@/shared/featureFlags';
 import type { NotificationOutcome, ReturnReasonCode } from '@/shared/returns';
-import type { BankAction, BankLinesPage, BankOverview, ImportResult, MatchRunResult } from '@/lib/bankTransactions';
+import type { BankAction, BankOverview, ImportResult, MatchRunResult, MissingExportLine, MissingExportPage } from '@/lib/bankTransactions';
 import { mimeFromFileName } from '@/shared/uploadValidation';
-import { MAX_BANK_PAGE_SIZE, type BankListQuery } from '@/shared/bankOverview';
+import type { BankListQuery } from '@/shared/bankOverview';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -430,18 +430,20 @@ export function fetchBankOverview(clientId: string, query: Partial<BankListQuery
   return bankRequest<BankOverviewResponse>(`/api/bank?${bankListParams(clientId, query)}`);
 }
 
-/** Every line matching the filters, fetched page by page (e.g. the full missing-invoices list). */
-export async function fetchAllBankLines(
-  clientId: string,
-  query: Partial<Pick<BankListQuery, 'mode' | 'status' | 'account' | 'search'>>
-): Promise<BankTransaction[]> {
-  const lines: BankTransaction[] = [];
-  for (let page = 1; ; page++) {
-    const params = bankListParams(clientId, { ...query, page, pageSize: MAX_BANK_PAGE_SIZE });
-    params.set('view', 'lines');
-    const res = await bankRequest<BankLinesPage>(`/api/bank?${params}`);
-    lines.push(...res.transactions);
-    if (res.page >= res.totalPages || res.transactions.length === 0) return lines;
+/**
+ * Every unmatched debit of the client (the full missing-invoices list), with the sheet's columns
+ * only, fetched page by page from /api/bank/missing (keyset paging: each call is equally cheap).
+ */
+export async function fetchMissingBankLines(clientId: string): Promise<MissingExportLine[]> {
+  const lines: MissingExportLine[] = [];
+  let after: string | null = null;
+  for (;;) {
+    const params = new URLSearchParams({ clientId });
+    if (after) params.set('after', after);
+    const res: MissingExportPage = await bankRequest<MissingExportPage>(`/api/bank/missing?${params}`);
+    lines.push(...res.lines);
+    if (!res.next || res.lines.length === 0) return lines;
+    after = res.next;
   }
 }
 

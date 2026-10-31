@@ -13,6 +13,21 @@ export const DATE_MARGIN_DAYS = 7;
 /** How many alternatives to keep for an ambiguous line (shown first in the manual picker). */
 export const MAX_CANDIDATES = 5;
 
+/**
+ * Notice for an auto-match run that left invoices out (MatchRunResult.truncated): the rest was
+ * matched. Left out = too many open lines could be the invoice, or the run's line budget ran out;
+ * a few more invoices may stay unmatched because their line is shared with a left-out one.
+ */
+export function bankMatchSkippedNote(skippedInvoices: number | undefined): string {
+  const who =
+    skippedInvoices === 1
+      ? 'חשבונית אחת לא נכללה בהתאמה האוטומטית'
+      : skippedInvoices && skippedInvoices > 1
+        ? `${skippedInvoices} חשבוניות לא נכללו בהתאמה האוטומטית`
+        : 'חלק מהחשבוניות לא נכללו בהתאמה האוטומטית';
+  return `${who} כי יש יותר מדי תנועות פתוחות שעשויות להתאים (ייתכן שגם חשבוניות נוספות לא הותאמו מאותה סיבה). יש להתאים אותן ידנית במסך הבנק.`;
+}
+
 export interface MatchableTransaction {
   id: string;
   txn_date: string;               // YYYY-MM-DD
@@ -21,6 +36,11 @@ export interface MatchableTransaction {
   match_status: BankMatchStatus;
   matched_invoice_id: string | null;
   rejected_invoice_ids?: string[] | null;
+  /**
+   * Its candidate list is known to be incomplete (it's also a candidate of an invoice left out of
+   * the run): it still competes for the invoices it can see, but is never matched itself.
+   */
+  blocked?: boolean;
 }
 
 /** 0 = supplier name not in the description, 1 = some of it, 2 = most/all of it. */
@@ -196,7 +216,8 @@ export function findCandidates(
  * Pairs unmatched debits with invoices. A pair is accepted only when the invoice is the line's clear
  * favourite AND the line is the invoice's clear favourite among all competing lines, so one invoice
  * is never matched twice and ties stay for a human. Accepting a pair can resolve other lines (their
- * rival candidate is gone), so it repeats until nothing changes.
+ * rival candidate is gone), so it repeats until nothing changes. A `blocked` line is a rival but is
+ * never accepted (its own favourite can't be checked).
  */
 export function autoMatch(transactions: MatchableTransaction[], invoices: MatchableInvoice[]): AutoMatchResult {
   const index = indexByAmount(invoices);
@@ -220,6 +241,7 @@ export function autoMatch(transactions: MatchableTransaction[], invoices: Matcha
 
     const accepted: AutoMatch[] = [];
     for (const txn of pending) {
+      if (txn.blocked) continue;
       const list = candidates.get(txn.id) ?? [];
       if (list.length === 0) continue;
       const best = list[0];

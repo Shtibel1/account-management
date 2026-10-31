@@ -3,6 +3,7 @@ import { supabase } from '@/lib/supabase';
 import { bankImportErrorMessage, BankImportSchema } from '@/shared/schemas';
 import { BankTableMissingError, importBankRows, runAutoMatch, type ImportResult, type MatchRunResult } from '@/lib/bankTransactions';
 import { requireClientAccess } from '@/lib/auth';
+import { bankMatchSkippedNote } from '@/shared/bankMatch';
 
 // Stores normalized statement rows (parsed + column-mapped in the browser) and auto-matches them.
 // The import is all or nothing: a bad row is a 400 naming the row, and nothing is stored.
@@ -13,8 +14,6 @@ import { requireClientAccess } from '@/lib/auth';
 const AUTO_MATCH_TIME_BUDGET_MS = 15_000;
 const AUTO_MATCH_DEADLINE_MS = 20_000;
 const MATCH_LATER = 'אפשר להשלים אותה בכפתור "הרץ התאמה אוטומטית" במסך הבנק.';
-const MATCH_TOO_MANY_LINES =
-  'ההתאמה האוטומטית לא הורצה כי יש יותר מדי תנועות פתוחות שעשויות להתאים לחשבוניות. יש להתאים אותן ידנית במסך הבנק.';
 
 export async function POST(request: Request) {
   const startedAt = Date.now();
@@ -66,13 +65,17 @@ export async function POST(request: Request) {
         deadline: startedAt + AUTO_MATCH_DEADLINE_MS,
         preferBatchId: imported.batchId,
       });
-      if (match.truncated) {
-        console.warn(`[bank] Auto-match after import of ${rows.length} rows skipped: too many candidate lines`);
-        matchNote = `התנועות נשמרו. ${MATCH_TOO_MANY_LINES}`;
-      } else if (!match.complete) {
+      const notes: string[] = [];
+      if (!match.complete) {
         console.warn(`[bank] Auto-match after import of ${rows.length} rows stopped at the deadline (${match.matched} matched)`);
-        matchNote = `התנועות נשמרו. ההתאמה האוטומטית הושלמה חלקית (${match.matched} הותאמו) - ${MATCH_LATER}`;
+        notes.push(`ההתאמה האוטומטית הושלמה חלקית (${match.matched} הותאמו) - ${MATCH_LATER}`);
       }
+      if (match.truncated) {
+        // The rest was matched; only these invoices were left out (another run leaves out the same ones)
+        console.warn(`[bank] Auto-match after import of ${rows.length} rows left out ${match.skippedInvoices ?? '?'} invoice(s): too many candidate lines`);
+        notes.push(bankMatchSkippedNote(match.skippedInvoices));
+      }
+      if (notes.length > 0) matchNote = `התנועות נשמרו. ${notes.join(' ')}`;
     } catch (err) {
       console.error('[bank] Auto-match after import failed:', err);
       matchError = `התנועות נשמרו, אך ההתאמה האוטומטית נכשלה. ${MATCH_LATER}`;
