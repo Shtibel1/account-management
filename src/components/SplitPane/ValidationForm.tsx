@@ -453,6 +453,13 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
       if (approval?.autoApproveDisabled) {
         toast('האישור האוטומטי לספק זה כובה בעקבות התיקונים', 'info');
       }
+      // Corrected values printed in the document: where this supplier prints them was learned
+      const learnedRules = Array.isArray(approval?.learning?.rules) && approval.learning.in_document?.length > 0
+        ? (approval.learning.rules as { active?: boolean; removed?: boolean }[]).filter((r) => r.active && !r.removed).length
+        : 0;
+      if (learnedRules > 0) {
+        toast(learnedRules === 1 ? 'המערכת למדה מהתיקון ותשתמש בו בחשבוניות הבאות של הספק' : `המערכת למדה ${learnedRules} כללים מהתיקונים ותשתמש בהם בחשבוניות הבאות של הספק`, 'info');
+      }
       if (Array.isArray(approval?.warnings)) {
         for (const w of approval.warnings as unknown[]) if (typeof w === 'string') toast(w, 'info');
       }

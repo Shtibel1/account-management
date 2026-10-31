@@ -11,6 +11,8 @@ import {
   type FewShotSourceInvoice,
 } from '@/shared/fewshot';
 import { normalizeVatId } from '@/shared/vatId';
+import type { LearnedRule } from '@/shared/learning';
+import { loadLearnedRules } from '@/lib/learning';
 
 /** Rows fetched per query; a few spares cover rows the selection drops (empty OCR, duplicates). */
 const QUERY_LIMIT = 10;
@@ -22,6 +24,8 @@ const MAX_STORED_OCR_CHARS = 50000;
 export interface FewShotLookup {
   examples: FewShotExample[];
   supplierVatId: string | null;
+  /** Rules learned from corrections that may apply to this document (src/shared/learning.ts). */
+  learnedRules?: LearnedRule[];
 }
 
 const EMPTY: FewShotLookup = { examples: [], supplierVatId: null };
@@ -140,13 +144,25 @@ export async function loadFewShotExamples(
   db: SupabaseClient,
   params: { invoiceId: string; tenantId: string; ocrText: string | null }
 ): Promise<FewShotLookup> {
-  if (!isFewShotEnabled() || !params.ocrText?.trim()) return EMPTY;
-  try {
-    return await withTimeout(lookup(db, params.invoiceId, params.tenantId, params.ocrText), LOOKUP_TIMEOUT_MS);
-  } catch (err) {
-    console.error(`[FewShot] Example lookup failed for invoice ${params.invoiceId}, extracting without examples:`, err);
-    return EMPTY;
+  if (!params.ocrText?.trim()) return EMPTY;
+  const ocrText = params.ocrText;
+  // Both lookups run side by side under the same time limit (the processing tick's budget)
+  const [examples, learnedRules] = await Promise.all([
+    isFewShotEnabled()
+      ? withTimeout(lookup(db, params.invoiceId, params.tenantId, ocrText), LOOKUP_TIMEOUT_MS).catch((err) => {
+          console.error(`[FewShot] Example lookup failed for invoice ${params.invoiceId}, extracting without examples:`, err);
+          return EMPTY;
+        })
+      : Promise.resolve(EMPTY),
+    withTimeout(loadLearnedRules(db, { clientId: params.tenantId, ocrText }), LOOKUP_TIMEOUT_MS).catch((err) => {
+      console.error(`[Learning] Rule lookup failed for invoice ${params.invoiceId}, extracting without learned rules:`, err);
+      return [] as LearnedRule[];
+    }),
+  ]);
+  if (learnedRules.length > 0) {
+    console.log(`[Learning] ${learnedRules.length} learned rule(s) for invoice ${params.invoiceId}: ${learnedRules.map((r) => `${r.field}@"${r.label}"`).join(', ')}`);
   }
+  return learnedRules.length > 0 ? { ...examples, learnedRules } : examples;
 }
 
 /**

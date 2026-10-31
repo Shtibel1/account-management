@@ -8,6 +8,7 @@ import { detectDocumentBoundaries } from '../splitter';
 import { isMultiDocument, shouldAutoSplit, usableSuggestion, type SplitSuggestion } from '@/shared/documentSplit';
 import { supabase } from '@/lib/supabase';
 import { withSupplierRule } from '@/shared/supplierRules';
+import { applyLearnedRules, type LearnedRule } from '@/shared/learning';
 import { loadFewShotExamples, saveExtractionContext } from '@/lib/fewshot';
 import { saveInvoiceFileHash, sha256Hex } from '@/lib/fileHash';
 import { linkResubmission, linkReturnedToResubmission, planResubmissionLink, unlinkReturnedFromResubmission } from '@/lib/returns';
@@ -547,6 +548,8 @@ export interface QueuedExtractionInput {
   splitDetectionFailed: boolean;
   fewShotExampleIds: string[];
   costMetrics: CostMetrics;
+  /** Rules learned from corrections for this document (loaded with the few-shot examples). */
+  learnedRules?: LearnedRule[];
 }
 
 export type QueuedExtractionOutcome =
@@ -561,7 +564,12 @@ export type QueuedExtractionOutcome =
  */
 export async function finalizeQueuedExtraction(input: QueuedExtractionInput): Promise<QueuedExtractionOutcome> {
   const tenantRules = await getTenantRules();
-  const extracted: ExtractedData = { ...input.extractedData };
+  // Learned rules first, so the boxes are snapped to the values the reviewer will see
+  const learned = applyLearnedRules(input.extractedData, input.learnedRules, input.rawOcrText);
+  if (learned.applied.length > 0) {
+    console.log(`[Supervisor] Learned rules applied to invoice ${input.invoiceId}: ${learned.applied.map((a) => `${a.field} ${a.from ?? 'null'} -> ${a.to}`).join(', ')}`);
+  }
+  const extracted: ExtractedData = { ...learned.data };
   if (input.ocrWords.length > 0) extracted.bboxes = matchBboxesWithOcr(extracted, input.ocrWords);
 
   const validation = await applyRunValidation({
@@ -860,7 +868,7 @@ const graph = new StateGraph<any>({
       ocrText: state.rawOcrText,
     });
 
-    const { extractedData, inputTokens, outputTokens, fewShotInvoiceIds } = await extractInvoiceData(
+    const { extractedData: modelData, inputTokens, outputTokens, fewShotInvoiceIds } = await extractInvoiceData(
       state.rawOcrText,
       state.fileUrl,
       state.mimeType,
@@ -876,6 +884,9 @@ const graph = new StateGraph<any>({
         ? ` (supplier ${fewShot.supplierVatId}, invoices ${fewShotInvoiceIds.join(', ')})`
         : '')
     );
+
+    // Rules learned from earlier corrections of this supplier (src/shared/learning.ts)
+    const extractedData = applyLearnedRules(modelData, fewShot.learnedRules, state.rawOcrText).data;
 
     // Overwrite bounding boxes with coordinates from Google Vision OCR for pixel-perfect accuracy
     if (extractedData && state.ocrWords && state.ocrWords.length > 0) {

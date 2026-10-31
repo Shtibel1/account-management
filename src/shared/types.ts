@@ -1,5 +1,6 @@
 import type { SplitSuggestion } from '@/shared/documentSplit';
 import type { FewShotExample } from '@/shared/fewshot';
+import type { LearnedRule, LearnedRulesTrace } from '@/shared/learning';
 
 /** 'returned' = sent back to the client for a corrected document (feature flag accountant_review_loop). */
 export type InvoiceStatus = 'processing' | 'review' | 'approved' | 'exported' | 'error' | 'rejected' | 'returned';
@@ -60,6 +61,7 @@ export interface ExtractedData {
   split_suggestion?: SplitSuggestion | null; // file looks like several documents (set by the pipeline)
   supplier_rule?: SupplierRuleTrace | null; // validated_data only: what the supplier rule filled in
   page_rotations?: Record<string, 90 | 180 | 270> | null; // pages scanned sideways / upside down (viewer turns them)
+  learned_rules?: LearnedRulesTrace | null; // values set by rules learned from corrections (src/shared/learning.ts)
 }
 
 // Fields a supplier rule (account_mappings row of type 'supplier') may fill on an invoice.
@@ -325,6 +327,8 @@ export interface PipelineState {
 export interface FewShotLookupState {
   examples: FewShotExample[];
   supplierVatId: string | null;
+  /** Active rules learned from corrections that may apply to this document (absent in old queue states). */
+  learnedRules?: LearnedRule[];
 }
 
 

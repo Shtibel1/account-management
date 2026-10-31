@@ -9,6 +9,7 @@ import type { SplitSuggestion } from '@/shared/documentSplit';
 import { usableSuggestion } from '@/shared/documentSplit';
 import { MAX_LINE_ITEMS } from '@/shared/lineItems';
 import type { FewShotExample } from '@/shared/fewshot';
+import type { LearnedRule } from '@/shared/learning';
 
 /** Pages sent to the model in one extraction call when a document is long. */
 export const EXTRACT_PAGES_PER_CHUNK = 3;
@@ -40,7 +41,7 @@ export interface ExtractState {
   /** One per chunk; null until that chunk's call finished. */
   results: (ChunkResult | null)[];
   /** Few-shot examples, looked up once per run (null = not looked up yet). */
-  few_shot: { examples: FewShotExample[]; supplierVatId: string | null } | null;
+  few_shot: { examples: FewShotExample[]; supplierVatId: string | null; learnedRules?: LearnedRule[] } | null;
   few_shot_ids: string[];
   /** Math retries done (the pipeline retries a sum mismatch once). */
   retry_count: number;
