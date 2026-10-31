@@ -352,11 +352,11 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
                         <span className="shrink-0"><StatusBadge status={inv.status} /></span>
                       </div>
                       <div className="flex items-center gap-2 min-w-0 text-xs text-slate-500">
-                        <span className="truncate text-slate-700 font-medium">{data?.supplier_name ?? 'ספק לא ידוע'}</span>
+                        <span className="truncate min-w-0 text-slate-700 font-medium">{data?.supplier_name ?? 'ספק לא ידוע'}</span>
                         {clients[inv.client_id] && (
                           <>
                             <span className="text-slate-300 shrink-0">·</span>
-                            <span className="truncate">{clients[inv.client_id]}</span>
+                            <span className="truncate min-w-0 shrink-[3]">{clients[inv.client_id]}</span>
                           </>
                         )}
                       </div>
