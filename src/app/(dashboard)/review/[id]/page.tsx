@@ -6,7 +6,7 @@ import dynamic from 'next/dynamic';
 import { createClient } from '@/utils/supabase/client';
 import { Invoice } from '@/shared/types';
 import { ValidationForm } from '@/components/SplitPane/ValidationForm';
-import { ArrowLeftRight, ArrowRight, Loader2, Eye, EyeOff, SlidersHorizontal, Scissors, Sparkles } from 'lucide-react';
+import { ArrowLeftRight, ArrowRight, ChevronDown, ChevronUp, Loader2, Eye, EyeOff, SlidersHorizontal, Scissors, Sparkles } from 'lucide-react';
 import { getInvoiceFileUrl, splitInvoice } from '@/lib/api';
 import { reviewListHref } from '@/components/InvoiceTable/listFilters';
 import { formatRangesForInput, usableSuggestion } from '@/shared/documentSplit';
@@ -114,6 +114,8 @@ export default function ReviewDetailPage() {
   const [activeField, setActiveField] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
   const [yOffset, setYOffset] = useState(0);
+  // Below lg the document is a sticky panel above the form; it can be folded to its title bar
+  const [docCollapsed, setDocCollapsed] = useState(false);
 
   // Manual split states
   const [pageCount, setPageCount] = useState<number | null>(null);
@@ -363,7 +365,8 @@ export default function ReviewDetailPage() {
       )}
 
       {/* Split pane */}
-      {/* Stacked on small screens (form first, then the document); side by side from lg */}
+      {/* Stacked below lg: the document first, as a sticky (foldable) panel under the top bar, so fields
+          can be checked against it while scrolling the form; side by side from lg */}
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-4 min-h-0">
         {/* Right — validation form (places it on the right side in RTL) */}
         {/* Mobile: natural height (the page scrolls; see ValidationForm). lg: fills the grid row */}
@@ -377,9 +380,23 @@ export default function ReviewDetailPage() {
         </div>
 
         {/* Left — document viewer (places it on the left side in RTL) */}
-        <div className="card overflow-hidden flex flex-col h-[70vh] lg:h-auto">
+        <div
+          className={`card overflow-hidden flex flex-col order-first sticky top-[61px] md:top-[69px] z-[5] shadow-md lg:order-none lg:static lg:z-auto lg:shadow-sm lg:h-auto ${
+            docCollapsed ? 'h-auto' : 'h-[42vh]'
+          }`}
+        >
           <div className="px-4 py-3 border-b border-slate-100 bg-slate-50 text-sm font-medium text-slate-700 flex items-center justify-between gap-2 flex-wrap">
             <span>מסמך מקורי</span>
+            <button
+              type="button"
+              onClick={() => setDocCollapsed((v) => !v)}
+              aria-expanded={!docCollapsed}
+              aria-controls="review-document-body"
+              className="lg:hidden flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 mr-auto"
+            >
+              {docCollapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+              {docCollapsed ? 'הצג מסמך' : 'הסתר מסמך'}
+            </button>
             {pageCount && pageCount > 1 && (
               <button
                 onClick={openSplitModal}
@@ -396,7 +413,7 @@ export default function ReviewDetailPage() {
               </span>
             )}
           </div>
-          <div className="flex-1 overflow-hidden">
+          <div id="review-document-body" className={`flex-1 overflow-hidden ${docCollapsed ? 'hidden lg:block' : ''}`}>
             {fileViewUrl ? (
               <ImageViewer
                 fileUrl={fileViewUrl}

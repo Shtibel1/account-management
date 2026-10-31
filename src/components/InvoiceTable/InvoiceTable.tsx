@@ -40,6 +40,19 @@ function getPageNumbers(currentPage: number, totalPages: number) {
   return pages;
 }
 
+/** Ellipsis in the middle, so both the start and the extension of a long file name stay visible. */
+function MiddleTruncate({ text, className }: { text: string; className?: string }) {
+  const TAIL = 12;
+  const head = text.length > TAIL + 4 ? text.slice(0, -TAIL) : text;
+  const tail = head === text ? '' : text.slice(-TAIL);
+  return (
+    <span dir="auto" title={text} className={`flex min-w-0 ${className ?? ''}`}>
+      <span className="truncate">{head}</span>
+      {tail && <span className="shrink-0 whitespace-pre">{tail}</span>}
+    </span>
+  );
+}
+
 export function InvoiceTable({ invoices, clients = {}, onExported, showReturned = false }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
@@ -292,9 +305,86 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
         )}
       </div>
 
-      {/* Table */}
       <div className="card overflow-hidden">
-        <div className="overflow-x-auto">
+        {/* Phones (<640px): one stacked card per invoice instead of the wide table */}
+        <div className="sm:hidden" style={{ direction: 'rtl' }}>
+          {approved.length > 0 && (
+            <label className="flex items-center gap-2 px-4 py-3 bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-600">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-blue-600"
+                checked={selectedApproved === approved.length}
+                onChange={toggleAll}
+              />
+              בחירת כל החשבוניות המאושרות ({approved.length})
+            </label>
+          )}
+          {filteredInvoices.length === 0 ? (
+            <p className="p-8 text-center text-slate-400 font-medium">לא נמצאו חשבוניות התואמות את הסינון המבוקש.</p>
+          ) : (
+            <ul className="divide-y divide-slate-100">
+              {paginatedInvoices.map((inv) => {
+                const data = inv.validated_data ?? inv.extracted_data;
+                const isSelectable = inv.status === 'approved' || inv.status === 'exported';
+                const date = data?.invoice_date
+                  ? data.invoice_date.split('-').reverse().join('/')
+                  : inv.created_at ? format(new Date(inv.created_at), 'dd/MM/yyyy') : null;
+                return (
+                  <li key={inv.id} data-testid="invoice-card" className="relative px-4 py-3 hover:bg-slate-50 active:bg-slate-100 transition-colors">
+                    {/* The whole card opens the invoice; the checkbox sits above this link */}
+                    <Link
+                      href={`/review/${inv.id}`}
+                      aria-label={`פתח את ${inv.file_name}`}
+                      className="absolute inset-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-600"
+                    />
+                    <div className="pointer-events-none space-y-1.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        {isSelectable && (
+                          <input
+                            type="checkbox"
+                            aria-label={`בחירת ${inv.file_name}`}
+                            className="pointer-events-auto relative z-10 h-5 w-5 shrink-0 rounded border-slate-300 accent-blue-600"
+                            checked={selected.has(inv.id)}
+                            onChange={() => toggle(inv.id)}
+                          />
+                        )}
+                        <MiddleTruncate text={inv.file_name} className="flex-1 text-sm font-semibold text-slate-800" />
+                        <span className="shrink-0"><StatusBadge status={inv.status} /></span>
+                      </div>
+                      <div className="flex items-center gap-2 min-w-0 text-xs text-slate-500">
+                        <span className="truncate text-slate-700 font-medium">{data?.supplier_name ?? 'ספק לא ידוע'}</span>
+                        {clients[inv.client_id] && (
+                          <>
+                            <span className="text-slate-300 shrink-0">·</span>
+                            <span className="truncate">{clients[inv.client_id]}</span>
+                          </>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="text-sm font-semibold text-slate-800 tabular-nums">
+                          {data?.total_amount != null
+                            ? `₪${data.total_amount.toLocaleString('he-IL', { minimumFractionDigits: 2 })}`
+                            : <span className="text-slate-400 font-normal">—</span>}
+                        </span>
+                        <span className="text-slate-500 tabular-nums">{date ?? '—'}</span>
+                      </div>
+                      {showReturned && inv.status === 'returned' && inv.return_reason && (
+                        <p className="text-xs text-orange-600 truncate">{inv.return_reason}</p>
+                      )}
+                      {inv.status === 'processing' && <p className="text-xs text-blue-600 truncate">{processingLabel(inv)}</p>}
+                      {inv.status === 'error' && inv.error_message && (
+                        <p className="text-xs text-red-500 truncate">{toUserErrorMessage(inv.error_message)}</p>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        {/* Table (from 640px) */}
+        <div className="hidden sm:block overflow-x-auto">
         <table className="w-full min-w-[760px] text-sm">
           <thead>
             <tr className="bg-slate-50 border-b border-slate-200">
