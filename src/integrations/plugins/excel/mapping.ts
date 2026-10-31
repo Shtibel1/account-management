@@ -1,4 +1,5 @@
 import type { ExportInvoice, InvoiceMapping } from '@/integrations/types';
+import { countHe } from '@/shared/hebrewCount';
 
 export const EXCEL_HEADERS = [
   'מספר חשבונית', 'תאריך חשבונית', 'ספק', 'ע.מ / ח.פ ספק', 'מספר הקצאה', 'קטגוריה',
@@ -63,6 +64,6 @@ export function toExcelRows(items: { invoice: ExportInvoice; mapping: InvoiceMap
   return [
     [...EXCEL_HEADERS],
     ...rows,
-    ['', '', `סה"כ (${rows.length} חשבוניות)`, '', '', '', '', '', '', sum(9), sum(10), sum(11), ''],
+    ['', '', `סה"כ (${countHe(rows.length, 'invoice')})`, '', '', '', '', '', '', sum(9), sum(10), sum(11), ''],
   ];
 }

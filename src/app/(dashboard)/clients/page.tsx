@@ -11,6 +11,7 @@ import { ClientChannelsDialog, ClientChannelsSummary, useClientChannels } from '
 import { vatAccountError } from '@/shared/mappingValidation';
 import { ClientCardMenu, createClientRequest, deleteClientRequest, EditClientDialog, setClientArchivedRequest } from '@/components/Clients/ClientDialogs';
 import { useConfirm } from '@/components/ui/ConfirmDialog';
+import { countHe } from '@/shared/hebrewCount';
 
 export default function ClientsPage() {
   const supabase = createClient();
@@ -148,7 +149,7 @@ export default function ClientsPage() {
         <div>
           <h2 className="text-2xl font-bold text-slate-900">לקוחות המשרד</h2>
           <p className="text-sm text-slate-500 mt-1">
-            {loading ? 'טוען...' : `${clients.length} לקוחות פעילים`}
+            {loading ? 'טוען...' : countHe(clients.length, 'client', { one: 'פעיל', many: 'פעילים' })}
           </p>
         </div>
         <button

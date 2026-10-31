@@ -16,6 +16,7 @@ import {
 import { Button } from '@/components/ui/Button';
 import { useToast } from '@/components/ui/Toast';
 import { useEscapeKey } from '@/components/ui/useEscapeKey';
+import { countHe } from '@/shared/hebrewCount';
 
 const STATUS_STYLES: Record<InvoiceOutcomeStatus, { label: string; className: string }> = {
   success: { label: 'יוצאה', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
@@ -98,7 +99,7 @@ export function IntegrationExportDialog({
       <div role="dialog" aria-modal="true" aria-label="ייצוא להנהלת חשבונות" className="bg-white rounded-2xl border border-slate-100 shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto p-6 space-y-5 text-right" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-slate-100 pb-3">
           <h3 className="text-lg font-bold text-slate-900">
-            ייצוא להנהלת חשבונות{clientName ? ` · ${clientName}` : ''} ({invoices.length} חשבוניות)
+            ייצוא להנהלת חשבונות{clientName ? ` · ${clientName}` : ''} ({countHe(invoices.length, 'invoice')})
           </h3>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors text-lg font-bold" aria-label="סגור">✕</button>
         </div>

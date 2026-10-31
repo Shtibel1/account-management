@@ -24,6 +24,7 @@ import { downloadMissingInvoicesXlsx } from '@/lib/exporters/missingInvoices';
 import { DEFAULT_BANK_PAGE_SIZE, summarizeBankTransactions } from '@/shared/bankOverview';
 import { clientDisplayNames } from '@/shared/clientLabels';
 import { bankMatchSkippedNote } from '@/shared/bankMatch';
+import { byCountHe, countHe } from '@/shared/hebrewCount';
 
 const EMPTY: BankOverviewResponse = {
   transactions: [],
@@ -155,7 +156,7 @@ export default function BankPage() {
     try {
       const result = await runBankAutoMatch(clientId);
       toast(
-        result.matched > 0 ? `הותאמו ${result.matched} תנועות נוספות` : 'לא נמצאו התאמות חדשות',
+        result.matched > 0 ? `${byCountHe(result.matched, 'הותאמה', 'הותאמו')} ${countHe(result.matched, 'transaction', { one: 'נוספת', many: 'נוספות' })}` : 'לא נמצאו התאמות חדשות',
         result.matched > 0 ? 'success' : 'info'
       );
       // Invoices with too many candidate lines were left out; another click leaves out the same ones

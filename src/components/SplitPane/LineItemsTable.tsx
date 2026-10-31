@@ -5,6 +5,7 @@ import clsx from 'clsx';
 import { ChevronDown, ListOrdered, Plus, Trash2, CheckCircle2, AlertTriangle } from 'lucide-react';
 import type { LineItem } from '@/shared/types';
 import { MAX_LINE_ITEMS, checkLineItemsSum, expectedLineTotal, hasMixedVat, isLineTotalMismatch, lineTotalMismatches, updateLineItem } from '@/shared/lineItems';
+import { byCountHe, countHe } from '@/shared/hebrewCount';
 
 interface Props {
   items: LineItem[];
@@ -68,7 +69,7 @@ export function LineItemsTable({ items, amountBeforeVat, totalAmount, onChange }
         )}
         {rowMismatches.length > 0 && (
           <span className="flex items-center gap-1 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full">
-            <AlertTriangle className="h-3 w-3" /> {rowMismatches.length === 1 ? 'שורה אחת לא תואמת' : `${rowMismatches.length} שורות לא תואמות`} לכמות × מחיר
+            <AlertTriangle className="h-3 w-3" /> {countHe(rowMismatches.length, 'row')} {byCountHe(rowMismatches.length, 'לא תואמת', 'לא תואמות')} לכמות × מחיר
           </span>
         )}
         {mixedVat && (

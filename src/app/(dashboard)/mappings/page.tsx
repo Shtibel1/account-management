@@ -20,7 +20,7 @@ import { Plus, Trash2, Info, Upload, Loader2, X, ChevronLeft, ChevronRight, User
 import clsx from 'clsx';
 import { clientDisplayNames } from '@/shared/clientLabels';
 import { LearnedRulesPanel } from '@/components/LearnedRulesPanel';
-import { ruleReappliedMessage } from '@/shared/hebrewCount';
+import { byCountHe, countHe, ruleReappliedMessage } from '@/shared/hebrewCount';
 
 function getPageNumbers(currentPage: number, totalPages: number) {
   const pages: (number | string)[] = [];
@@ -378,10 +378,10 @@ export default function MappingsPage() {
           // Refresh mappings
           await loadMappings(selectedClient);
           loadAutomation(selectedClient);
-          toast(`יובאו בהצלחה ${parsedRows.length} ספקים (${toInsert.length} חדשים, ${toUpdate.length} עודכנו)`, 'success');
+          toast(`${byCountHe(parsedRows.length, 'יובא', 'יובאו')} בהצלחה ${countHe(parsedRows.length, 'supplier')} (${toInsert.length} חדשים, ${toUpdate.length} עודכנו)`, 'success');
           if (invalidRows.length > 0) {
             setImportError(
-              `${invalidRows.length} שורות לא יובאו: ${invalidRows.slice(0, 5).join('; ')}${invalidRows.length > 5 ? ' ...' : ''}`
+              `${countHe(invalidRows.length, 'row')} ${byCountHe(invalidRows.length, 'לא יובאה', 'לא יובאו')}: ${invalidRows.slice(0, 5).join('; ')}${invalidRows.length > 5 ? ' ...' : ''}`
             );
           }
           // Imported rules apply to every invoice still in review

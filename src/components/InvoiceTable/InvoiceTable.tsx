@@ -13,6 +13,7 @@ import { IntegrationExportDialog } from '@/components/Integrations/IntegrationEx
 import { processingLabel } from '@/components/Processing/ProcessingStatus';
 import { toUserErrorMessage } from '@/shared/processing';
 import { inDateRange } from '@/shared/invoiceDateRange';
+import { byCountHe, countHe } from '@/shared/hebrewCount';
 
 interface Props {
   invoices: Invoice[];
@@ -132,9 +133,9 @@ export function InvoiceTable({ invoices, clients = {}, filterClientIds = [], onE
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
       setSelected(new Set());
       setMissingMappings(null);
-      if (exportedCount > 0) toast(`הקובץ movein.dat ירד: ${exportedCount} חשבוניות יוצאו ל-Move-in`, 'success');
+      if (exportedCount > 0) toast(`הקובץ movein.dat ירד: ${countHe(exportedCount, 'invoice')} ${byCountHe(exportedCount, 'יוצאה', 'יוצאו')} ל-Move-in`, 'success');
       if (skippedCount > 0) {
-        toast(`${skippedCount} חשבוניות לא נכללו בקובץ: ${skipped.join(' · ')}`, 'error');
+        toast(`${countHe(skippedCount, 'invoice')} ${byCountHe(skippedCount, 'לא נכללה', 'לא נכללו')} בקובץ: ${skipped.join(' · ')}`, 'error');
       }
       onExported?.();
     } catch (err) {
@@ -177,7 +178,7 @@ export function InvoiceTable({ invoices, clients = {}, filterClientIds = [], onE
       {/* Bulk action bar */}
       {selected.size > 0 && (
         <div className="flex items-center gap-3 px-4 py-3 bg-blue-600 rounded-xl text-white shadow-sm">
-          <span className="text-sm font-medium">{selected.size} חשבוניות נבחרו</span>
+          <span className="text-sm font-medium">{countHe(selected.size, 'invoice')} {byCountHe(selected.size, 'נבחרה', 'נבחרו')}</span>
           <div className="flex-1" />
           <button
             onClick={handleExport} disabled={exporting}

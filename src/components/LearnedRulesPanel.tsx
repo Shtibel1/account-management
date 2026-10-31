@@ -7,6 +7,7 @@ import { fetchLearnedRules, forgetLearnedRule, type LearnedRuleRow } from '@/lib
 import { learnableFieldName } from '@/shared/learning';
 import { useToast } from '@/components/ui/Toast';
 import { useConfirm } from '@/components/ui/ConfirmDialog';
+import { countHe } from '@/shared/hebrewCount';
 
 /**
  * "The system learned X rules from your corrections" (mappings page): rules learned from corrected
@@ -67,7 +68,7 @@ export function LearnedRulesPanel({ clientId }: { clientId: string }) {
       >
         <span className="flex items-center gap-2 font-semibold text-slate-900 min-w-0">
           <Brain className="h-4 w-4 shrink-0 text-violet-500" />
-          <span>המערכת למדה {active === 1 ? 'כלל אחד' : `${active} כללים`} מהתיקונים שלך{rules.length > active && ` (ועוד ${rules.length - active} מושהים)`}</span>
+          <span>המערכת למדה {countHe(active, 'rule')} מהתיקונים שלך{rules.length > active && (rules.length - active === 1 ? ' (ועוד אחד מושהה)' : ` (ועוד ${rules.length - active} מושהים)`)}</span>
         </span>
         {open ? <ChevronUp className="h-4 w-4 shrink-0 text-slate-400" /> : <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />}
       </button>

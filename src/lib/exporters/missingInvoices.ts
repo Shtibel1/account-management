@@ -1,5 +1,6 @@
 import type { BankTransaction } from '@/shared/types';
 import { isMatchableDebit } from '@/shared/bankMatch';
+import { countHe } from '@/shared/hebrewCount';
 
 // "Missing invoices" sheet the accountant sends to the client: every debit without a matching invoice.
 
@@ -40,7 +41,7 @@ export function missingInvoicesSheetRows(transactions: MissingInvoiceLine[]): Mi
       Math.abs(t.amount),
       '',
     ]),
-    ['', '', `סה"כ (${missing.length} תנועות)`, '', total, ''],
+    ['', '', `סה"כ (${countHe(missing.length, 'transaction')})`, '', total, ''],
   ];
 }
 

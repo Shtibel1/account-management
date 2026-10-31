@@ -17,6 +17,7 @@ import {
   StatementCell,
   validateMapping,
 } from '@/shared/bankStatement';
+import { byCountHe, countHe } from '@/shared/hebrewCount';
 
 interface Props {
   clientId: string;
@@ -114,9 +115,9 @@ export function StatementImport({ clientId, existingAccountLabels = [], onImport
         fileName: file.name,
         rows: normalized.rows,
       });
-      const parts = [`יובאו ${result.inserted} תנועות`];
-      if (result.duplicates > 0) parts.push(`${result.duplicates} כבר קיימות ודולגו`);
-      parts.push(`${result.matched} הותאמו אוטומטית`);
+      const parts = [`${byCountHe(result.inserted, 'יובאה', 'יובאו')} ${countHe(result.inserted, 'transaction')}`];
+      if (result.duplicates > 0) parts.push(result.duplicates === 1 ? 'אחת כבר קיימת ודולגה' : `${result.duplicates} כבר קיימות ודולגו`);
+      parts.push(result.matched === 1 ? 'אחת הותאמה אוטומטית' : `${result.matched} הותאמו אוטומטית`);
       toast(parts.join(' · '), 'success');
       if (result.matchError) toast(result.matchError, 'error');
       else if (result.matchNote) toast(result.matchNote, 'info');
@@ -188,7 +189,7 @@ export function StatementImport({ clientId, existingAccountLabels = [], onImport
             <div className="flex items-center gap-2 text-sm text-slate-700 min-w-0">
               <FileSpreadsheet className="h-4 w-4 text-emerald-600 shrink-0" />
               <span className="font-medium truncate">{file.name}</span>
-              <span className="text-slate-400 shrink-0">· {file.rows.length} שורות</span>
+              <span className="text-slate-400 shrink-0">· {countHe(file.rows.length, 'row')}</span>
             </div>
             <button onClick={() => inputRef.current?.click()} className="text-xs text-blue-600 hover:underline shrink-0">
               קובץ אחר
@@ -284,7 +285,7 @@ export function StatementImport({ clientId, existingAccountLabels = [], onImport
                 <span className="text-rose-700"><b>{debits.length}</b> חיובים</span>
                 <span className="text-emerald-700"><b>{normalized.rows.length - debits.length}</b> זיכויים</span>
                 {Object.entries(skippedByReason).map(([reason, count]) => (
-                  <span key={reason} className="text-slate-400">{count} שורות דולגו ({reason})</span>
+                  <span key={reason} className="text-slate-400">{countHe(count, 'row')} {byCountHe(count, 'דולגה', 'דולגו')} ({reason})</span>
                 ))}
               </div>
 
@@ -331,7 +332,7 @@ export function StatementImport({ clientId, existingAccountLabels = [], onImport
               disabled={importing || !normalized || normalized.rows.length === 0 || !accountLabel.trim()}
             >
               {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-              {normalized ? `ייבא ${normalized.rows.length} תנועות` : 'ייבא'}
+              {normalized ? `ייבא ${countHe(normalized.rows.length, 'transaction')}` : 'ייבא'}
             </Button>
           </div>
         </>

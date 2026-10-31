@@ -10,6 +10,7 @@ import { useSession } from '@/components/Auth/SessionContext';
 import { Loader2, RefreshCw } from 'lucide-react';
 import { useProcessingTicks } from '@/components/Processing/ProcessingStatus';
 import { clientDisplayNames } from '@/shared/clientLabels';
+import { countHe } from '@/shared/hebrewCount';
 
 const STATUS_LABELS: Record<string, string> = {
   review:   'לבדיקה',
@@ -107,7 +108,7 @@ export default function ReviewPage() {
         <div>
           <h2 className="text-2xl font-bold text-slate-900">בדיקה ואישור</h2>
           <p className="text-sm text-slate-500 mt-1">
-            {invoices.length > 0 ? `${invoices.length} חשבוניות במערכת` : 'אין חשבוניות עדיין'}
+            {invoices.length > 0 ? `${countHe(invoices.length, 'invoice')} במערכת` : 'אין חשבוניות עדיין'}
           </p>
         </div>
         <button

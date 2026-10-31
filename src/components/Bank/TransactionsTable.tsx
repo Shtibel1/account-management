@@ -8,6 +8,7 @@ import type { BankMatchStatus, BankTransaction, MatchableInvoice } from '@/share
 import type { BankStatusFilter } from '@/shared/bankOverview';
 import { formatIsoDateHe } from '@/lib/exporters/missingInvoices';
 import { formatAmount } from '@/components/Bank/format';
+import { countHe } from '@/shared/hebrewCount';
 
 export type BankRowAction = 'match' | 'unmatch' | 'ignore' | 'restore';
 
@@ -192,7 +193,7 @@ export function TransactionsTable({
                         {invoice.invoice_number && <span className="text-slate-400"> · {invoice.invoice_number}</span>}
                       </Link>
                     ) : t.match_status === 'unmatched' && isDebit && candidateCount > 0 ? (
-                      <span className="text-amber-700">{candidateCount === 1 ? 'חשבונית אפשרית אחת' : `${candidateCount} חשבוניות אפשריות`}</span>
+                      <span className="text-amber-700">{countHe(candidateCount, 'invoice', { one: 'אפשרית', many: 'אפשריות' })}</span>
                     ) : (
                       <span className="text-slate-300">—</span>
                     )}
