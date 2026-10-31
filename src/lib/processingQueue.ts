@@ -4,6 +4,7 @@ import { supabase } from '@/lib/supabase';
 import { isClientStorageFileUrl } from '@/lib/ingestHelpers';
 import { isMockMode, supabaseUrl } from '@/lib/supabaseConfig';
 import type { ExtractedData, FewShotLookupState, OcrWord } from '@/shared/types';
+import { pageRotationsFromWords } from '@/shared/orientation';
 import { AUTO_SPLIT_ENABLED, AUTO_SPLIT_MIN_CONFIDENCE, shouldAutoSplit, validateSplitRanges, type PageRange, type SplitSuggestion } from '@/shared/documentSplit';
 import { sha256Hex, splitPartHash } from '@/lib/fileHash';
 import { DAMAGED_PDF_MESSAGE, checkStoredBytes, mimeFromFileName, readPdfPageCount } from '@/shared/uploadValidation';
@@ -1467,6 +1468,7 @@ async function extractStep(d: QueueDeps, job: JobRow, deadline: number): Promise
         confidence: job.ocr_confidence ?? 0.95,
       },
       ocrWords: wordsInSpan(job.ocr_words ?? [], state.range),
+      pageRotations: pageRotationsFromWords(job.ocr_words),
       splitSuggestion: job.split_suggestion,
       splitDetectionFailed: job.split_detection_failed,
       fewShotExampleIds: state.few_shot_ids,
