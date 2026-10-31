@@ -7,6 +7,7 @@ import { createClient } from '@/utils/supabase/client';
 import type { BankTransaction, Client, MatchableInvoice } from '@/shared/types';
 import { Button } from '@/components/ui/Button';
 import { useToast } from '@/components/ui/Toast';
+import { useConfirm } from '@/components/ui/ConfirmDialog';
 import { StatementImport } from '@/components/Bank/StatementImport';
 import { BankRowAction, BankTableFilters, TransactionsTable } from '@/components/Bank/TransactionsTable';
 import { MatchPicker } from '@/components/Bank/MatchPicker';
@@ -41,6 +42,7 @@ const DEFAULT_FILTERS: BankTableFilters = { status: 'all', account: null, search
 export default function BankPage() {
   const supabase = createClient();
   const { toast } = useToast();
+  const askConfirm = useConfirm();
   const [clients, setClients] = useState<Client[]>([]);
   const clientLabels = useMemo(() => clientDisplayNames(clients), [clients]);
   const [clientId, setClientId] = useState('');
@@ -130,7 +132,7 @@ export default function BankPage() {
         } catch (err) {
           // Invoice total differs from the charge: only on the reviewer's explicit confirmation.
           if (!(err instanceof BankRequestError) || err.code !== 'amount_mismatch') throw err;
-          if (!window.confirm(`${err.message}.\nלהתאים בכל זאת?`)) return;
+          if (!(await askConfirm({ title: 'הסכום אינו תואם', message: `${err.message}.\nלהתאים בכל זאת?`, confirmLabel: 'התאם בכל זאת' }))) return;
           await bankTransactionAction(txn.id, { action: 'match', invoiceId: action.invoiceId, force: true });
         }
       }

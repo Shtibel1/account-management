@@ -20,6 +20,7 @@ import { LineItemsTable } from '@/components/SplitPane/LineItemsTable';
 import clsx from 'clsx';
 import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark, Zap, Undo2, RotateCcw, Trash2 } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
+import { useConfirm } from '@/components/ui/ConfirmDialog';
 import { DuplicateAlert } from './DuplicateAlert';
 import { RejectDialog } from '@/components/SplitPane/RejectDialog';
 import { toUserErrorMessage } from '@/shared/processing';
@@ -39,6 +40,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
   const supabase = createClient();
   const router = useRouter();
   const { toast } = useToast();
+  const askConfirm = useConfirm();
   
   const initial = invoice.validated_data ?? invoice.extracted_data;
   const [data, setData] = useState<Partial<ExtractedData>>(initial ?? {});
@@ -508,10 +510,11 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
   // Explicit reopen back to review (exported: office owner only, logged on the server).
   const canReopen = REOPENABLE_STATUSES.includes(invoice.status);
   const handleReopen = async () => {
-    const question = invoice.status === 'exported'
+    const exported = invoice.status === 'exported';
+    const question = exported
       ? 'החשבונית כבר יוצאה להנהלת החשבונות. פתיחה מחדש תאפשר לייצא אותה שוב (רישום כפול). להמשיך?'
       : 'לפתוח את החשבונית מחדש לבדיקה?';
-    if (!window.confirm(question)) return;
+    if (!(await askConfirm({ title: 'פתיחה מחדש לבדיקה', message: question, confirmLabel: 'פתח מחדש', tone: exported ? 'danger' : 'default' }))) return;
     setErrorAction('reopen'); setError('');
     try {
       await reopenInvoice(invoice.id);
@@ -525,7 +528,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
   };
 
   const handleDelete = async () => {
-    if (!window.confirm(`למחוק את המסמך "${invoice.file_name}"? לא ניתן לבטל פעולה זו.`)) return;
+    if (!(await askConfirm({ title: 'מחיקת מסמך', message: `למחוק את המסמך "${invoice.file_name}"? לא ניתן לבטל פעולה זו.`, confirmLabel: 'מחק', tone: 'danger' }))) return;
     setErrorAction('delete'); setError('');
     try {
       await deleteInvoice(invoice.id);
@@ -878,8 +881,8 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToCl
                                   normalizeVatId(webSearchVat) !== normalizeVatId(data.supplier_vat_id) && (
                                   <button
                                     type="button"
-                                    onClick={() => {
-                                      if (!window.confirm(`להחליף את ח.פ. ${data.supplier_vat_id} במספר ${webSearchVat} שנמצא ברשם לפי שם הספק?`)) return;
+                                    onClick={async () => {
+                                      if (!(await askConfirm({ title: 'החלפת ח.פ.', message: `להחליף את ח.פ. ${data.supplier_vat_id} במספר ${webSearchVat} שנמצא ברשם לפי שם הספק?`, confirmLabel: 'החלף' }))) return;
                                       set('supplier_vat_id', webSearchVat);
                                     }}
                                     className="font-sans text-[10px] text-blue-700 bg-blue-50 border border-blue-200 hover:bg-blue-100 px-1.5 py-0.5 rounded"
