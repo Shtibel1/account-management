@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { requireClientAccess, requireInvoiceAccess } from '@/lib/auth';
 import { isMockMode } from '@/lib/supabaseConfig';
-import { invoiceObjectPath } from '@/lib/invoiceFiles';
+import { invoiceObjectPath, relocateInvoiceFiles, removeUnusedOldFiles, type FileMoveDb } from '@/lib/invoiceFiles';
 import { dbErrorResponse, readJsonObject, transitionInvoice } from '@/lib/invoiceTransitions';
 import { canTransition, DELETABLE_STATUSES, isInvoiceStatus, STATUS_LABELS, transitionRefusedMessage } from '@/shared/invoiceStatus';
 import type { InvoiceStatus } from '@/shared/types';
@@ -52,7 +52,10 @@ export async function PATCH(
 ) {
   const { id } = await params;
 
-  const access = await requireInvoiceAccess<{ id: string; client_id: string; status: InvoiceStatus }>(id, 'id, client_id, status');
+  const access = await requireInvoiceAccess<{ id: string; client_id: string; status: InvoiceStatus; file_url: string | null; original_file_url: string | null }>(
+    id,
+    'id, client_id, status, file_url, original_file_url'
+  );
   if (!access.ok) return access.response;
   const current = access.value.invoice.status;
 
@@ -97,10 +100,19 @@ export async function PATCH(
     if (Object.keys(body).length === 0) {
       return NextResponse.json({ error: 'לא התקבלו שדות לעדכון' }, { status: 400 });
     }
-    // Moving an invoice to another client requires access to that client too.
+    // Moving an invoice to another client requires access to that client too; its files move along
+    // to the new client's folder (readers only trust files of the invoice's own client).
+    let movedOldPaths: string[] = [];
     if ('client_id' in body && body.client_id !== access.value.invoice.client_id) {
       const target = await requireClientAccess(body.client_id, access.value.ctx);
       if (!target.ok) return target.response;
+      const move = await relocateInvoiceFiles(supabase as unknown as FileMoveDb, access.value.invoice, target.value.clientId);
+      if (!move.ok) {
+        console.error(`[invoices/${id}] Moving the files to client ${target.value.clientId} failed:`, move.error);
+        return NextResponse.json({ error: 'העברת קובץ החשבונית ללקוח האחר נכשלה. יש לנסות שוב' }, { status: 500 });
+      }
+      Object.assign(body, move.update);
+      movedOldPaths = move.oldPaths;
     }
 
     if ('status' in body) {
@@ -118,6 +130,8 @@ export async function PATCH(
         .eq('id', id);
       if (error) return dbErrorResponse(error);
     }
+
+    await removeUnusedOldFiles(supabase as unknown as FileMoveDb, movedOldPaths);
 
     const { data, error } = await supabase.from('invoices').select('*').eq('id', id).single();
     if (error || !data) return NextResponse.json({ error: 'שגיאה בטעינת החשבונית לאחר העדכון' }, { status: 500 });
