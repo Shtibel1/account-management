@@ -183,6 +183,38 @@ describe('aggregating signals into a rule', () => {
   });
 });
 
+// OCR of a table whose labels and values were read as two separate columns (QA-LRN-synth-*.png on qa)
+const COLUMNS = (order: string, ref: string, date: string, before: string, vat: string, total: string) =>
+  ['QA-LRN מעבדות בדיקה', "רחוב הבדיקה 5, באר שבע - טל' 08-6000000", 'חשבונית מס', 'מספר הזמנה:', 'אסמכתא:', 'תאריך:', 'שירותי בדיקה', 'מע"מ 18%', 'סה"כ לתשלום', order, ref, date, before, vat, total].join('\n');
+
+describe('table columns (labels and values read as separate lists)', () => {
+  const first = COLUMNS('7781', '40012', '03/02/2026', '1,000.00', '180.00', '1,180.00');
+  const next = COLUMNS('7790', '40057', '10/03/2026', '200.00', '36.00', '236.00');
+
+  test('the value is paired with its label by position, not with the line above', () => {
+    const c = classifyCorrection('invoice_number', '7781', '40012', first);
+    assert.equal(c.classification, 'in_document');
+    assert.equal(c.label, 'אסמכתא');
+    assert.equal(c.lineOffset, 2);
+    assert.equal(c.wrongLabel, 'מספר הזמנה');
+  });
+
+  test('the learned column rule picks the reference of the next invoice', () => {
+    const c = classifyCorrection('invoice_number', '7781', '40012', first);
+    const d = decideRule([{ label: c.label, wrong_label: c.wrongLabel, value_shape: c.shape, line_offset: c.lineOffset, corrected_value: '40012' }])!;
+    const r = applyLearnedRules(data({ supplier_vat_id: null, invoice_number: '7790' }), [rule({ ...d, supplier_vat_id: null })], next);
+    assert.equal(r.data.invoice_number, '40057');
+    assert.match(formatLearnedHints([rule({ ...d })]), /בעמודת הערכים מול "אסמכתא"/);
+  });
+
+  test('a layout that no longer pairs (one value missing) changes nothing', () => {
+    const broken = ['QA-LRN מעבדות בדיקה', 'מספר הזמנה:', 'אסמכתא:', 'תאריך:', '7790', '10/03/2026'].join('\n');
+    const c = classifyCorrection('invoice_number', '7781', '40012', first);
+    // Pairing from the end now puts the order number (4 digits) against 'אסמכתא': not the learned shape
+    assert.equal(valueByRule({ field: 'invoice_number', label: c.label!, line_offset: 2, value_shape: c.shape! }, broken), null);
+  });
+});
+
 describe('applying a learned rule to the next extraction', () => {
   test('the value next to the learned label replaces the model value', () => {
     const r = applyLearnedRules(data({ invoice_number: '7790', bboxes: { invoice_number: { x1: 0, y1: 0, x2: 1, y2: 1 } } }), [rule()], REF_OCR_2, 'T');
@@ -335,7 +367,7 @@ describe('recording signals and loading rules (DB, office separation)', () => {
     const rules = db.tables.extraction_learned_rules;
     assert.equal(rules.length, 1);
     assert.equal(rules[0].supplier_key, 'name:צלה דימונה');
-    assert.equal(rules[0].supplier_name, 'צלה דימונה');
+    assert.equal(rules[0].supplier_name, 'צ.ל.ה דימונה', 'shown as printed');
   });
 
   test('learning never throws (missing table)', async () => {

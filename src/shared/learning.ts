@@ -169,11 +169,12 @@ export interface ValueShape {
   positionFromEnd?: number;
 }
 
-function compatible(shape: ValueShape, token: Token): boolean {
+/** `exact`: the identifier must have the learned length (table columns, where a shifted pairing is the risk). */
+function compatible(shape: ValueShape, token: Token, exact = false): boolean {
   if (shape.kind !== 'id') return true;
   const v = String(token.value);
   if (shape.digitsOnly !== undefined && /^\d+$/.test(v) !== shape.digitsOnly) return false;
-  if (shape.length !== undefined && Math.abs(v.length - shape.length) > 1) return false;
+  if (shape.length !== undefined && Math.abs(v.length - shape.length) > (exact ? 0 : 1)) return false;
   return true;
 }
 
@@ -183,17 +184,64 @@ function sameValue(kind: ValueKind, a: string | number | null, b: string | numbe
   return a === b;
 }
 
+/**
+ * Where a value sits relative to its label: 0 = on the label's line, 1 = on the line below it,
+ * 2 = table columns (the OCR lists the labels first and then the values in the same order, e.g.
+ * "מספר הזמנה:\nאסמכתא:\n...\n7781\n40012"): the value is paired with the label by position.
+ */
+export type LineOffset = 0 | 1 | 2;
+
 export interface ValueLocation {
   lineIndex: number;
-  /** Label of the value: the text of its line, or of the line above when its own line has none. */
+  /** Label of the value (see LineOffset), null when none can be told. */
   label: string | null;
-  /** 0 = label on the value's line, 1 = label on the line above. */
-  lineOffset: 0 | 1;
+  lineOffset: LineOffset;
   shape: ValueShape;
 }
 
 function splitLines(ocrText: string): string[] {
   return ocrText.split(/\r?\n/);
+}
+
+/** A line with a number and (almost) no words: a value printed apart from its label. */
+function isValueOnly(line: string): boolean {
+  return /\d/.test(line) && letterCount(normalizeLabel(line)) < 2;
+}
+
+/** A line with words (it may also hold numbers, e.g. 'מע"מ 18%'). */
+function isLabelLine(line: string): boolean {
+  return letterCount(normalizeLabel(line)) >= 2;
+}
+
+function runAround(lines: string[], i: number, test: (line: string) => boolean): [number, number] {
+  let start = i;
+  let end = i;
+  while (start > 0 && test(lines[start - 1])) start--;
+  while (end < lines.length - 1 && test(lines[end + 1])) end++;
+  return [start, end];
+}
+
+/** Table columns: the label paired (from the end) with value line `i` of a run of 2+ value lines. */
+function columnLabel(lines: string[], i: number): string | null {
+  if (!isValueOnly(lines[i])) return null;
+  const [vs, ve] = runAround(lines, i, isValueOnly);
+  if (ve - vs < 1 || vs === 0 || !isLabelLine(lines[vs - 1])) return null;
+  const [ls, le] = runAround(lines, vs - 1, isLabelLine);
+  const li = le - (ve - i);
+  if (li < ls) return null;
+  const label = normalizeLabel(lines[li]);
+  return letterCount(label) >= MIN_LABEL_LETTERS ? label : null;
+}
+
+/** The value line a label line points to in table-column layout (inverse of columnLabel). */
+function columnValueLine(lines: string[], j: number): number | null {
+  if (!isLabelLine(lines[j])) return null;
+  const [ls, le] = runAround(lines, j, isLabelLine);
+  if (le + 1 >= lines.length || !isValueOnly(lines[le + 1])) return null;
+  const [vs, ve] = runAround(lines, le + 1, isValueOnly);
+  if (ve - vs < 1 || j < ls) return null;
+  const vi = ve - (le - j);
+  return vi >= vs ? vi : null;
 }
 
 /** Where a value is printed in the OCR text (first occurrence), with the label next to it. */
@@ -216,14 +264,20 @@ export function locateValue(kind: ValueKind, value: unknown, ocrText: string | n
     shape.positionFromEnd = peers.length - 1 - peers.indexOf(self);
 
     let label: string | null = normalizeLabel(lines[i]);
-    let lineOffset: 0 | 1 = 0;
+    let lineOffset: LineOffset = 0;
     if (letterCount(label) < MIN_LABEL_LETTERS) {
-      const above = i > 0 ? normalizeLabel(lines[i - 1]) : '';
-      if (letterCount(above) >= MIN_LABEL_LETTERS && tokensOf(kind, lines[i - 1]).filter((t) => compatible(shape, t)).length === 0) {
-        label = above;
-        lineOffset = 1;
+      label = null;
+      const [vs, ve] = isValueOnly(lines[i]) ? runAround(lines, i, isValueOnly) : [i, i];
+      if (ve > vs) {
+        // Several values in a row: a table whose labels were read as a separate column
+        label = columnLabel(lines, i);
+        lineOffset = 2;
       } else {
-        label = null;
+        const above = i > 0 ? normalizeLabel(lines[i - 1]) : '';
+        if (letterCount(above) >= MIN_LABEL_LETTERS && tokensOf(kind, lines[i - 1]).filter((t) => compatible(shape, t)).length === 0) {
+          label = above;
+          lineOffset = 1;
+        }
       }
     }
     return { lineIndex: i, label, lineOffset, shape };
@@ -256,7 +310,7 @@ export interface Classification {
   reason: string;
   label: string | null;
   wrongLabel: string | null;
-  lineOffset: 0 | 1 | null;
+  lineOffset: LineOffset | null;
   shape: ValueShape | null;
 }
 
@@ -336,7 +390,7 @@ export interface LearningSignal {
 export interface RuleDecision {
   label: string;
   wrong_label: string | null;
-  line_offset: 0 | 1;
+  line_offset: LineOffset;
   value_shape: ValueShape;
   support: number;
   conflicts: number;
@@ -371,7 +425,7 @@ export function decideRule(signals: LearningSignal[], incumbentLabel: string | n
   return {
     label,
     wrong_label: winners.find((s) => s.wrong_label)?.wrong_label ?? null,
-    line_offset: latest.line_offset === 1 ? 1 : 0,
+    line_offset: latest.line_offset === 1 || latest.line_offset === 2 ? latest.line_offset : 0,
     value_shape: latest.value_shape!,
     support,
     conflicts,
@@ -447,9 +501,10 @@ export function valueByRule(rule: Pick<LearnedRule, 'field' | 'label' | 'line_of
   const found = new Set<string | number>();
   for (let i = 0; i < lines.length; i++) {
     if (!normalizeLabel(lines[i]).includes(rule.label)) continue;
-    const valueLine = lines[i + (rule.line_offset === 1 ? 1 : 0)];
+    const at = rule.line_offset === 2 ? columnValueLine(lines, i) : i + (rule.line_offset === 1 ? 1 : 0);
+    const valueLine = at === null ? undefined : lines[at];
     if (valueLine === undefined) continue;
-    const peers = tokensOf(kind, valueLine).filter((t) => compatible(shape, t));
+    const peers = tokensOf(kind, valueLine).filter((t) => compatible(shape, t, rule.line_offset === 2));
     if (peers.length === 0) continue;
     const pos = shape.positionFromEnd ?? 0;
     const pick = peers.length === 1 ? peers[0] : pos < peers.length ? peers[peers.length - 1 - pos] : null;
@@ -530,7 +585,8 @@ export function formatLearnedHints(rules: LearnedRule[] | null | undefined): str
   const active = (rules ?? []).filter((r) => r.active && isLearnableField(r.field));
   if (active.length === 0) return '';
   const lines = active.map((r) => {
-    const where = r.line_offset === 1 ? `בשורה שמתחת ל-"${r.label}"` : `ליד "${r.label}"`;
+    const where =
+      r.line_offset === 1 ? `בשורה שמתחת ל-"${r.label}"` : r.line_offset === 2 ? `בעמודת הערכים מול "${r.label}"` : `ליד "${r.label}"`;
     const not = r.wrong_label ? ` ולא ליד "${r.wrong_label}"` : '';
     const was = r.last_wrong_value ? ` (בעבר חולץ בטעות ${r.last_wrong_value})` : '';
     return `- ${r.field} (${FIELD_NAMES_HE[r.field]}): הערך שמופיע ${where}${not}${was}.`;

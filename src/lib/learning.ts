@@ -10,7 +10,6 @@ import {
   classifyCorrection,
   decideRule,
   isLearnableField,
-  normalizeSupplierName,
   selectRulesForDocument,
   supplierKey,
   type Classification,
@@ -143,10 +142,11 @@ export async function recordLearningSignals(
     const vat = normalizeVatId(asText(input.approvedData.supplier_vat_id ?? input.before?.supplier_vat_id));
     // The supplier's own name: 'ספקים שונים' (the catch-all ledger name the form puts on unmapped
     // suppliers) would merge every unmapped supplier into one key
-    const name =
+    const ownName =
       [input.approvedData.supplier_name, input.before?.supplier_name, invoiceRow?.extracted_data?.supplier_name]
-        .map((n) => (isGenericSupplierName(n) ? null : normalizeSupplierName(n)))
-        .find((n) => n) ?? null;
+        .find((n) => typeof n === 'string' && n.trim() !== '' && !isGenericSupplierName(n)) ?? null;
+    // Shown as printed (Hebrew, quotes and dots kept); the key uses the normalized form
+    const name = ownName ? String(ownName).trim().replace(/\s+/g, ' ').slice(0, 200) : null;
     const supplier = supplierKey(vat, name);
 
     // Keys of the previous approval's signals must be recomputed too (they are replaced below)

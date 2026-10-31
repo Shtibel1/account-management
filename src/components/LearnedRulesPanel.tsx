@@ -86,7 +86,7 @@ export function LearnedRulesPanel({ clientId }: { clientId: string }) {
                     {r.supplier_vat_id && <span className="text-xs text-slate-400 font-mono mr-2" dir="ltr">{r.supplier_vat_id}</span>}
                   </div>
                   <div className="text-slate-600 break-words">
-                    {learnableFieldName(r.field)}: הערך {r.line_offset === 1 ? 'שמתחת ל' : 'שליד '}
+                    {learnableFieldName(r.field)}: הערך {r.line_offset === 1 ? 'שמתחת ל' : r.line_offset === 2 ? 'שמול ' : 'שליד '}
                     &quot;{r.label}&quot;
                     {r.wrong_label && <> ולא ליד &quot;{r.wrong_label}&quot;</>}
                   </div>
