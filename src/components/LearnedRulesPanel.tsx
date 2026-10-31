@@ -6,6 +6,7 @@ import { Brain, ChevronDown, ChevronUp, Loader2, Trash2 } from 'lucide-react';
 import { fetchLearnedRules, forgetLearnedRule, type LearnedRuleRow } from '@/lib/api';
 import { learnableFieldName } from '@/shared/learning';
 import { useToast } from '@/components/ui/Toast';
+import { useConfirm } from '@/components/ui/ConfirmDialog';
 
 /**
  * "The system learned X rules from your corrections" (mappings page): rules learned from corrected
@@ -13,6 +14,7 @@ import { useToast } from '@/components/ui/Toast';
  */
 export function LearnedRulesPanel({ clientId }: { clientId: string }) {
   const { toast } = useToast();
+  const askConfirm = useConfirm();
   const [rules, setRules] = useState<LearnedRuleRow[] | null>(null);
   const [open, setOpen] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -36,7 +38,13 @@ export function LearnedRulesPanel({ clientId }: { clientId: string }) {
 
   const forget = async (rule: LearnedRuleRow) => {
     const supplier = rule.supplier_name ?? rule.supplier_vat_id ?? 'הספק';
-    if (!window.confirm(`לשכוח את הכלל "${learnableFieldName(rule.field)}" של ${supplier}? החשבוניות הבאות של הספק יזוהו בלי הכלל.`)) return;
+    const ok = await askConfirm({
+      title: 'שכחת כלל',
+      message: `לשכוח את הכלל "${learnableFieldName(rule.field)}" של ${supplier}? החשבוניות הבאות של הספק יזוהו בלי הכלל.`,
+      confirmLabel: 'שכח כלל',
+      tone: 'danger',
+    });
+    if (!ok) return;
     setDeleting(rule.id);
     try {
       await forgetLearnedRule(rule.id);
