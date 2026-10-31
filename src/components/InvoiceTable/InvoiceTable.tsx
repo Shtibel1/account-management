@@ -17,6 +17,8 @@ import { inDateRange } from '@/shared/invoiceDateRange';
 interface Props {
   invoices: Invoice[];
   clients?: Record<string, string>;
+  /** Clients offered in the client filter even without invoices (the office's active clients). */
+  filterClientIds?: string[];
   onExported?: () => void;
   /** Accountant review loop flag: offers the "הוחזר ללקוח" status filter. */
   showReturned?: boolean;
@@ -53,7 +55,7 @@ function MiddleTruncate({ text, className }: { text: string; className?: string 
   );
 }
 
-export function InvoiceTable({ invoices, clients = {}, onExported, showReturned = false }: Props) {
+export function InvoiceTable({ invoices, clients = {}, filterClientIds = [], onExported, showReturned = false }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
   const [missingMappings, setMissingMappings] = useState<string[] | null>(null);
@@ -74,7 +76,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
 
   // Every client of the office (also those without invoices yet), then any other client an invoice has
   const uniqueClientIds = Array.from(new Set([
-    ...Object.keys(clients).sort((a, b) => (clients[a] || '').localeCompare(clients[b] || '', 'he')),
+    ...filterClientIds.filter((id) => id in clients).sort((a, b) => (clients[a] || '').localeCompare(clients[b] || '', 'he')),
     ...invoices.map((i) => i.client_id),
   ]));
 
