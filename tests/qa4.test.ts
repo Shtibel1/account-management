@@ -171,12 +171,16 @@ describe('lookupVatIdByName (QA round 4 #7)', () => {
 });
 
 describe('deleteClientWithFiles (QA round 4 #1)', () => {
-  function fakeDb(answer: unknown, files: string[], opts: { removeFails?: boolean } = {}) {
+  function fakeDb(answer: unknown, files: string[], opts: { removeFails?: boolean; ownPaths?: string[]; inUse?: string[] } = {}) {
     const removed: string[][] = [];
     const rpcCalls: { fn: string; args: Record<string, unknown> }[] = [];
     const db: ClientDeletionDb = {
       rpc: async (fn, args) => {
         rpcCalls.push({ fn, args });
+        if (fn === 'client_invoice_file_paths') return { data: opts.ownPaths ?? [], error: null };
+        if (fn === 'storage_paths_in_use') {
+          return { data: (args.p_paths as string[]).filter((p) => (opts.inUse ?? []).includes(p)), error: null };
+        }
         return { data: answer, error: null };
       },
       storage: {
@@ -213,9 +217,16 @@ describe('deleteClientWithFiles (QA round 4 #1)', () => {
     const f = fakeDb('deleted', files);
     const r = await deleteClientWithFiles(f.db, 'raw-invoices', 'c1');
     assert.deepEqual(r, { ok: true, filesRemoved: 250, filesFailed: 0 });
-    assert.deepEqual(f.rpcCalls, [{ fn: 'delete_client_guarded', args: { p_client_id: 'c1' } }]);
+    assert.deepEqual(f.rpcCalls.map((c) => c.fn), ['client_invoice_file_paths', 'delete_client_guarded', 'storage_paths_in_use']);
     assert.deepEqual(f.removed.map((c) => c.length), [100, 100, 50]);
     assert.equal(f.removed[0][0], 'c1/f0.pdf');
+  });
+
+  test('files another invoice still uses are kept; own files in other folders are removed (QA round 6)', async () => {
+    const f = fakeDb('deleted', ['a.pdf', 'moved.pdf'], { ownPaths: ['c2/in-other-folder.png'], inUse: ['c1/moved.pdf'] });
+    const r = await deleteClientWithFiles(f.db, 'raw-invoices', 'c1');
+    assert.deepEqual(r, { ok: true, filesRemoved: 2, filesFailed: 0 });
+    assert.deepEqual(f.removed, [['c1/a.pdf', 'c2/in-other-folder.png']]);
   });
 
   test('a failing file removal does not undo the deletion', async () => {
