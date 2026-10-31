@@ -191,7 +191,7 @@ export default function OrgMembersPage() {
             <button
               type="submit"
               disabled={inviting || !email.trim()}
-              className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl text-sm font-semibold transition-colors flex items-center justify-center gap-2"
+              className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-5 py-2.5 min-h-[44px] rounded-xl text-sm font-semibold transition-colors flex items-center justify-center gap-2"
             >
               {inviting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
               {inviting ? 'שולח...' : 'הזמן'}
@@ -234,7 +234,7 @@ export default function OrgMembersPage() {
                         disabled={lastOwner || busyKey === `member:${m.userId}`}
                         title={lastOwner ? 'לא ניתן להסיר את הבעלים האחרון של המשרד' : 'הסר מהמשרד'}
                         aria-label={`הסר את ${label} מהמשרד`}
-                        className="text-slate-400 hover:text-red-600 disabled:opacity-40 disabled:hover:text-slate-400 p-1.5 rounded-lg transition-colors"
+                        className="text-slate-400 hover:text-red-600 disabled:opacity-40 disabled:hover:text-slate-400 h-11 w-11 -my-1.5 inline-flex items-center justify-center rounded-lg hover:bg-red-50 disabled:hover:bg-transparent transition-colors"
                       >
                         {busyKey === `member:${m.userId}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
                       </button>
@@ -264,7 +264,7 @@ export default function OrgMembersPage() {
                         disabled={busyKey === `invite:${inv.email}`}
                         title="בטל הזמנה"
                         aria-label={`בטל את ההזמנה של ${inv.email}`}
-                        className="text-slate-400 hover:text-red-600 disabled:opacity-40 p-1.5 rounded-lg transition-colors"
+                        className="text-slate-400 hover:text-red-600 disabled:opacity-40 h-11 w-11 -my-1.5 inline-flex items-center justify-center rounded-lg hover:bg-red-50 transition-colors"
                       >
                         {busyKey === `invite:${inv.email}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
                       </button>
