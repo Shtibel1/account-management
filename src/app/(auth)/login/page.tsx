@@ -73,8 +73,8 @@ function LoginForm() {
 
   return (
     <AuthShell
-      title="התחברות למערכת"
-      subtitle="ניהול חשבוניות ללקוחות המשרד"
+      title="כניסה לחשבוניות Pro"
+      subtitle="ניהול חשבוניות הספקים של לקוחות המשרד"
       footer={
         <>
           עדיין אין לכם חשבון?{' '}

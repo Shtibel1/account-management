@@ -4,9 +4,12 @@
  *   - every response: nosniff, HSTS, frame / referrer policy;
  *   - every /api/* response: `Cache-Control: private, no-store` - API answers carry per-office data
  *     and must never be stored by CloudFront / shared caches / the browser cache;
- *   - /auth/* (callback, complete): no-store too (they set the session cookies).
+ *   - /auth/* (callback, complete): no-store too (they set the session cookies);
+ *   - the signed-in app and the API (APP_ROUTE_PREFIXES in src/lib/seo.ts): `X-Robots-Tag: noindex`.
  * Pages keep Next's own caching (static marketing pages stay cacheable).
  */
+import { APP_ROUTE_PREFIXES } from './seo';
+
 export interface HeaderRule {
   source: string;
   headers: { key: string; value: string }[];
@@ -24,8 +27,13 @@ export const NO_STORE_HEADERS: { key: string; value: string }[] = [
   { key: 'Pragma', value: 'no-cache' },
 ];
 
+export const NOINDEX_HEADERS: { key: string; value: string }[] = [
+  { key: 'X-Robots-Tag', value: 'noindex, nofollow' },
+];
+
 export const SECURITY_HEADER_RULES: HeaderRule[] = [
   { source: '/:path*', headers: BASE_SECURITY_HEADERS },
   { source: '/api/:path*', headers: NO_STORE_HEADERS },
   { source: '/auth/:path*', headers: NO_STORE_HEADERS },
+  ...APP_ROUTE_PREFIXES.map((prefix) => ({ source: `${prefix}/:path*`, headers: NOINDEX_HEADERS })),
 ];

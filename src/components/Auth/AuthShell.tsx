@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { Logo } from '@/components/ui/Logo';
+import { ACCOUNTANTS_PATH, PRODUCT } from '@/lib/seo';
 
 interface Props {
   title: string;
@@ -8,13 +9,17 @@ interface Props {
   footer?: React.ReactNode;
 }
 
-/** Centered card layout shared by /login, /signup and /auth/complete. */
+/**
+ * Centered card layout shared by /login, /signup and /auth/complete, branded "חשבוניות Pro". The
+ * logo and the link under the card lead to the product page /accountants (not to the scanning
+ * service at "/").
+ */
 export function AuthShell({ title, subtitle, children, footer }: Props) {
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-100 px-4 py-12">
       <div className="w-full max-w-md space-y-6">
         <div className="flex justify-center">
-          <Link href="/" aria-label="לדף הבית">
+          <Link href={ACCOUNTANTS_PATH} aria-label={`${PRODUCT} - לעמוד המוצר`} className="inline-flex min-h-[44px] items-center">
             <Logo size="lg" />
           </Link>
         </div>
@@ -26,6 +31,11 @@ export function AuthShell({ title, subtitle, children, footer }: Props) {
           {children}
         </div>
         {footer && <div className="text-center text-sm text-slate-600">{footer}</div>}
+        <p className="text-center text-sm">
+          <Link href={ACCOUNTANTS_PATH} className="inline-block py-3 text-slate-500 hover:text-blue-700 underline-offset-4 hover:underline">
+            מה זה {PRODUCT}? לעמוד המוצר למשרדי רואי חשבון
+          </Link>
+        </p>
       </div>
     </div>
   );

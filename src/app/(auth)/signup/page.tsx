@@ -67,7 +67,7 @@ function SignupForm() {
 
   return (
     <AuthShell
-      title="פתיחת משרד חדש"
+      title="פתיחת משרד בחשבוניות Pro"
       subtitle="חשבון חדש יוצר משרד חדש שבו אתם הבעלים"
       footer={
         <>

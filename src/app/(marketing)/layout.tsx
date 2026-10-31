@@ -3,18 +3,22 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { Menu, X, Camera, FileText, Home, Shield } from 'lucide-react';
+import { Menu, X, Camera, FileText, Home, Shield, Briefcase, LogIn } from 'lucide-react';
 import clsx from 'clsx';
 
 const navItems = [
   { href: '/', label: 'בית', icon: Home },
   { href: '/order', label: 'הזמנה', icon: FileText },
   { href: '/privacy', label: 'פרטיות', icon: Shield },
+  // The accounting-office product (חשבוניות Pro) has its own landing page and login.
+  { href: '/accountants', label: 'לרואי חשבון', icon: Briefcase },
 ];
+
+const LOGIN_LABEL = 'כניסה';
 
 function MarketingLogo() {
   return (
-    <Link href="/" className="flex items-center gap-2.5 select-none group">
+    <Link href="/" className="flex items-center gap-2.5 min-h-[44px] select-none group">
       <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-600 to-blue-700 flex items-center justify-center shadow-md group-hover:shadow-lg transition-shadow">
         <Camera className="w-5 h-5 text-white" />
       </div>
@@ -44,7 +48,7 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
           <MarketingLogo />
 
           {/* Desktop nav */}
-          <nav className="hidden sm:flex items-center gap-1">
+          <nav aria-label="ניווט ראשי" className="hidden md:flex items-center gap-1">
             {navItems.map(({ href, label }) => {
               const active = pathname === href;
               return (
@@ -52,7 +56,7 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
                   key={href}
                   href={href}
                   className={clsx(
-                    'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+                    'px-4 inline-flex items-center min-h-[44px] rounded-lg text-sm font-medium transition-colors',
                     active
                       ? 'bg-blue-50 text-blue-700'
                       : 'text-stone-600 hover:text-stone-900 hover:bg-stone-100'
@@ -62,24 +66,40 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
                 </Link>
               );
             })}
+            <Link
+              href="/login"
+              className="ms-2 inline-flex items-center gap-1.5 px-4 min-h-[44px] rounded-lg text-sm font-semibold text-blue-700 border border-blue-200 hover:bg-blue-50 transition-colors"
+            >
+              <LogIn className="w-4 h-4" />
+              {LOGIN_LABEL}
+            </Link>
           </nav>
 
-          {/* Mobile hamburger */}
-          <button
-            type="button"
-            onClick={() => setMenuOpen(!menuOpen)}
-            className="sm:hidden -ml-2 h-11 w-11 inline-flex items-center justify-center rounded-lg text-stone-600 hover:bg-stone-100 transition-colors"
-            aria-label={menuOpen ? 'סגור תפריט' : 'פתח תפריט'}
-            aria-expanded={menuOpen}
-            aria-controls="marketing-mobile-nav"
-          >
-            {menuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-          </button>
+          {/* Mobile: login stays visible next to the menu button */}
+          <div className="md:hidden flex items-center gap-1">
+            <Link
+              href="/login"
+              className="inline-flex items-center gap-1.5 px-3 min-h-[44px] rounded-lg text-sm font-semibold text-blue-700 hover:bg-blue-50 transition-colors"
+            >
+              <LogIn className="w-4 h-4" />
+              {LOGIN_LABEL}
+            </Link>
+            <button
+              type="button"
+              onClick={() => setMenuOpen(!menuOpen)}
+              className="-ml-2 h-11 w-11 inline-flex items-center justify-center rounded-lg text-stone-600 hover:bg-stone-100 transition-colors"
+              aria-label={menuOpen ? 'סגור תפריט' : 'פתח תפריט'}
+              aria-expanded={menuOpen}
+              aria-controls="marketing-mobile-nav"
+            >
+              {menuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+            </button>
+          </div>
         </div>
 
         {/* Mobile menu */}
         {menuOpen && (
-          <nav id="marketing-mobile-nav" aria-label="ניווט ראשי" className="sm:hidden border-t border-stone-100 bg-white px-4 py-3 space-y-1">
+          <nav id="marketing-mobile-nav" aria-label="ניווט ראשי" className="md:hidden border-t border-stone-100 bg-white px-4 py-3 space-y-1">
             {navItems.map(({ href, label, icon: Icon }) => {
               const active = pathname === href;
               return (
@@ -117,10 +137,12 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
             </div>
             <span className="font-semibold text-white">סריקה בעברית</span>
           </div>
-          <nav aria-label="קישורים בתחתית העמוד" className="flex justify-center gap-2 text-sm">
+          <nav aria-label="קישורים בתחתית העמוד" className="flex flex-wrap justify-center gap-x-2 text-sm">
             <Link href="/" className="px-3 py-3 hover:text-white transition-colors">בית</Link>
             <Link href="/order" className="px-3 py-3 hover:text-white transition-colors">הזמנה</Link>
             <Link href="/privacy" className="px-3 py-3 hover:text-white transition-colors">פרטיות</Link>
+            <Link href="/accountants" className="px-3 py-3 hover:text-white transition-colors">חשבוניות Pro לרואי חשבון</Link>
+            <Link href="/login" className="px-3 py-3 hover:text-white transition-colors">כניסה למערכת</Link>
           </nav>
           <p className="text-xs text-stone-400">
             © {new Date().getFullYear()} סריקה בעברית · <bdi dir="ltr">contact@nadav-shtibel.com</bdi>

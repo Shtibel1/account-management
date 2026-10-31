@@ -1,13 +1,14 @@
 import { Camera, FileText, Search, Upload, Scan, Download, Check, Mail, Phone } from 'lucide-react';
 import Link from 'next/link';
 import type { Metadata } from 'next';
+import { pageMetadata, SCAN_SITE } from '@/lib/seo';
 
-export const metadata: Metadata = {
-  title: { absolute: 'סריקה בעברית | סריקת תמונות ומסמכים בעברית' },
-  description: 'סריקת תמונות ואלבומים, מסמכים וחשבוניות בעברית. זיהוי טקסט עברי (OCR) — קבצים דיגיטליים שאפשר לחפש.',
-  keywords: ['סריקה', 'עברית', 'OCR', 'תמונות', 'מסמכים', 'חשבוניות', 'אלבומים', 'דיגיטציה'],
-  openGraph: { title: 'סריקה בעברית', description: 'סריקת תמונות ומסמכים בעברית עם זיהוי טקסט', locale: 'he_IL', type: 'website' },
-};
+export const metadata: Metadata = pageMetadata({
+  title: 'סריקה בעברית | סריקת תמונות ומסמכים בעברית',
+  description: 'שירות סריקת תמונות ואלבומים, מסמכים וחשבוניות בעברית. זיהוי טקסט עברי (OCR) — קבצים דיגיטליים שאפשר לחפש. בקשו הצעת מחיר.',
+  path: '/',
+  siteName: SCAN_SITE,
+});
 
 function HeroSection() {
   return (
