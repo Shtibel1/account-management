@@ -1,7 +1,7 @@
 // DB side of learning from corrections (logic in src/shared/learning.ts).
 // Tables: extraction_learning_signals (one row per corrected field of an approved invoice) and
 // extraction_learned_rules (one row per office + client + supplier + field), migration
-// 20261031130000_learning_from_corrections.sql. Everything here is best-effort: learning must never
+// 20261031131000_learning_from_corrections.sql. Everything here is best-effort: learning must never
 // block an approval or an extraction.
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { ExtractedData } from '@/shared/types';
