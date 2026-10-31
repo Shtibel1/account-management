@@ -219,7 +219,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
             id="invoice-filter-client"
             value={clientFilter}
             onChange={(e) => setClientFilter(e.target.value)}
-            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-w-[140px] text-right font-medium"
+            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-w-[140px] max-w-[220px] text-right font-medium"
           >
             <option value="all">כל הלקוחות ({invoices.length})</option>
             {uniqueClientIds.map((cid) => (
@@ -237,7 +237,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported, showReturned 
             id="invoice-filter-status"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-w-[140px] text-right font-medium"
+            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-w-[140px] max-w-[220px] text-right font-medium"
           >
             <option value="all">כל הסטטוסים</option>
             <option value="processing">מעבד...</option>
