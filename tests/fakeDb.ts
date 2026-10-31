@@ -14,7 +14,7 @@ export interface FakeDb {
 class Query implements PromiseLike<{ data: unknown; error: { message: string; code?: string } | null }> {
   private filters: Filter[] = [];
   private op: 'select' | 'insert' | 'update' | 'delete' = 'select';
-  private payload: Row | null = null;
+  private payload: Row | Row[] | null = null;
   private returning = false;
   private selectCols = '*';
   private isSingle = false;
@@ -28,7 +28,7 @@ class Query implements PromiseLike<{ data: unknown; error: { message: string; co
     else this.returning = true;
     return this;
   }
-  insert(row: Row) {
+  insert(row: Row | Row[]) {
     this.op = 'insert';
     this.payload = row;
     return this;
@@ -97,14 +97,17 @@ class Query implements PromiseLike<{ data: unknown; error: { message: string; co
     const rows = (this.db.tables[this.table] ??= []);
     const matches = rows.filter((r) => this.filters.every((f) => f(r)));
     if (this.op === 'insert' || this.op === 'update') {
-      const bad = this.missingIn(Object.keys(this.payload ?? {}));
+      const first = (Array.isArray(this.payload) ? this.payload[0] : this.payload) ?? {};
+      const bad = this.missingIn(Object.keys(first));
       if (bad) {
         return { data: null, error: { code: 'PGRST204', message: `Could not find the '${bad}' column of '${this.table}' in the schema cache` } };
       }
     }
     if (this.op === 'insert') {
-      rows.push(structuredClone(this.payload!));
-      return { data: this.returning ? [structuredClone(this.payload!)] : null, error: null };
+      // insert() takes one row or an array of rows, like supabase-js
+      const inserted = (Array.isArray(this.payload) ? this.payload : [this.payload!]) as Row[];
+      for (const r of inserted) rows.push(structuredClone(r));
+      return { data: this.returning ? inserted.map((r) => structuredClone(r)) : null, error: null };
     }
     if (this.op === 'update') {
       for (const r of matches) Object.assign(r, structuredClone(this.payload!));

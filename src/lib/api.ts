@@ -533,3 +533,33 @@ export function saveClientContactEmail(clientId: string, email: string | null) {
     { method: 'PUT', body: JSON.stringify({ email }) }
   );
 }
+
+/** A rule learned from reviewer corrections (src/shared/learning.ts) as listed for a client. */
+export interface LearnedRuleRow {
+  id: string;
+  client_id: string;
+  supplier_key: string;
+  supplier_vat_id: string | null;
+  supplier_name: string | null;
+  field: string;
+  label: string;
+  wrong_label: string | null;
+  line_offset: number;
+  support: number;
+  conflicts: number;
+  active: boolean;
+  last_value: string | null;
+  last_wrong_value: string | null;
+  updated_at: string;
+}
+
+export async function fetchLearnedRules(clientId: string): Promise<{ rules: LearnedRuleRow[]; active: number }> {
+  const res = await fetch(`${API_URL}/api/learned-rules?clientId=${encodeURIComponent(clientId)}`);
+  if (!res.ok) throw new Error(await errorText(res, 'שגיאה בטעינת הכללים שנלמדו'));
+  return res.json();
+}
+
+export async function forgetLearnedRule(ruleId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/api/learned-rules/${encodeURIComponent(ruleId)}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(await errorText(res, 'מחיקת הכלל נכשלה'));
+}

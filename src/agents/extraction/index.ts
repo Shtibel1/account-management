@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ExtractedData } from '@/shared/types';
 import { formatFewShotPrompt, type FewShotExample } from '@/shared/fewshot';
+import { formatLearnedHints, type LearnedRule } from '@/shared/learning';
 import { MAX_LINE_ITEMS, normalizeLineItems } from '@/shared/lineItems';
 import { normalizeFieldConfidence } from '@/shared/confidence';
 import { estimateOutputTokens, trimPartialToolInput } from '@/shared/partialToolInput';
@@ -161,7 +162,7 @@ export async function extractInvoiceData(
   mimeType: string,
   useVisionFallback = false,
   withRetryHint = false,
-  fewShot: { examples: FewShotExample[]; supplierVatId: string | null } = { examples: [], supplierVatId: null },
+  fewShot: { examples: FewShotExample[]; supplierVatId: string | null; learnedRules?: LearnedRule[] } = { examples: [], supplierVatId: null },
   options: {
     /** Extra instruction, e.g. which part of a long document this call sees (src/shared/extractionChunks.ts). */
     hint?: string | null;
@@ -223,6 +224,11 @@ export async function extractInvoiceData(
     : `נתח את החשבונית וחלץ את הנתונים.`;
   if (rawOcrText) {
     promptText += `\n\nטקסט ה-OCR של החשבונית:\n\"\"\"\n${rawOcrText}\n\"\"\"`;
+  }
+  // Where this supplier prints the fields the model got wrong before (learned from corrections)
+  const learnedHints = formatLearnedHints(fewShot.learnedRules);
+  if (learnedHints) {
+    promptText += `\n\n${learnedHints}`;
   }
   if (options.hint) {
     promptText += `\n\n${options.hint}`;

@@ -19,6 +19,7 @@ import {
 import { Plus, Trash2, Info, Upload, Loader2, X, ChevronLeft, ChevronRight, Users, Tag, Pencil, Zap } from 'lucide-react';
 import clsx from 'clsx';
 import { clientDisplayNames } from '@/shared/clientLabels';
+import { LearnedRulesPanel } from '@/components/LearnedRulesPanel';
 
 function getPageNumbers(currentPage: number, totalPages: number) {
   const pages: (number | string)[] = [];
@@ -488,6 +489,9 @@ export default function MappingsPage() {
           {clients.map((c) => <option key={c.id} value={c.id}>{clientLabels.get(c.id) ?? c.name}</option>)}
         </select>
       </div>
+
+      {/* Rules learned from the reviewer's corrections */}
+      {selectedClient && <LearnedRulesPanel clientId={selectedClient} />}
 
       {/* Add form */}
       {showForm && (

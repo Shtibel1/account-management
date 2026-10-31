@@ -3,6 +3,7 @@ import { compiledGraph } from '@/agents/supervisor';
 import { finalizeApproval, resumeApproval } from '@/agents/approval';
 import { supabase } from '@/lib/supabase';
 import { recordCorrections } from '@/lib/corrections';
+import { recordLearningSignals } from '@/lib/learning';
 import { disableAutoApproveAfterCorrections } from '@/lib/supplierAutomation';
 import type { ExtractedData, InvoiceStatus } from '@/shared/types';
 import { requireInvoiceAccess } from '@/lib/auth';
@@ -76,6 +77,13 @@ export async function POST(
       before: { client_id: invoice.client_id, extracted_data: invoice.extracted_data, validated_data: invoice.validated_data },
       markReviewed: false, // set by finalizeApproval in the same update as the status
     });
+    // Corrected values printed in the document teach where this supplier prints the field
+    const learning = await recordLearningSignals(supabase, id, {
+      clientId: invoice.client_id,
+      approvedData: finalData,
+      before: invoice.validated_data ?? invoice.extracted_data,
+      corrections,
+    });
     // A supplier that needed corrections is no longer trusted for auto-approve
     const autoApproveDisabled = await disableAutoApproveAfterCorrections(supabase, id, finalData, corrections);
 
@@ -92,6 +100,7 @@ export async function POST(
       message: 'החשבונית אושרה',
       corrections: corrections.length,
       autoApproveDisabled,
+      learning,
       // Valid for the books, but a specific export format will refuse it (e.g. an invoice number
       // longer than Move-in's 9-character reference): told now, not only at export time (QA N13).
       warnings: exportCompatibilityWarnings(finalData),

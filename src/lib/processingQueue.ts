@@ -1202,6 +1202,7 @@ async function extractStep(d: QueueDeps, job: JobRow, deadline: number): Promise
       splitSuggestion: job.split_suggestion,
       splitDetectionFailed: job.split_detection_failed,
       fewShotExampleIds: state.few_shot_ids,
+      learnedRules: state.few_shot?.learnedRules ?? [],
       tokens: { input: tokens.input + job.split_input_tokens, output: tokens.output + job.split_output_tokens },
       ocrOpCount: job.ocr_op_count,
     });
