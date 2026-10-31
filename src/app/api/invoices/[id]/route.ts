@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { requireClientAccess, requireInvoiceAccess } from '@/lib/auth';
 import { isMockMode } from '@/lib/supabaseConfig';
-import { invoiceObjectPath, relocateInvoiceFiles, removeUnusedOldFiles, type FileMoveDb } from '@/lib/invoiceFiles';
+import { discardCopies, invoiceObjectPath, relocateInvoiceFiles, removeUnusedOldFiles, type FileMoveDb } from '@/lib/invoiceFiles';
 import { dbErrorResponse, readJsonObject, transitionInvoice } from '@/lib/invoiceTransitions';
 import { canTransition, DELETABLE_STATUSES, isInvoiceStatus, STATUS_LABELS, transitionRefusedMessage } from '@/shared/invoiceStatus';
 import type { InvoiceStatus } from '@/shared/types';
@@ -103,6 +103,7 @@ export async function PATCH(
     // Moving an invoice to another client requires access to that client too; its files move along
     // to the new client's folder (readers only trust files of the invoice's own client).
     let movedOldPaths: string[] = [];
+    let movedCopies: string[] = [];
     if ('client_id' in body && body.client_id !== access.value.invoice.client_id) {
       const target = await requireClientAccess(body.client_id, access.value.ctx);
       if (!target.ok) return target.response;
@@ -113,12 +114,14 @@ export async function PATCH(
       }
       Object.assign(body, move.update);
       movedOldPaths = move.oldPaths;
+      movedCopies = move.created;
     }
 
     if ('status' in body) {
       // A status change only applies if nobody changed the status meanwhile (conditional update).
       const outcome = await transitionInvoice(supabase, id, [current], { ...body, status: body.status as InvoiceStatus });
       if (!outcome.ok) {
+        await discardCopies(supabase as unknown as FileMoveDb, movedCopies);
         return outcome.reason === 'conflict'
           ? NextResponse.json({ error: 'החשבונית שונתה בינתיים - יש לרענן את הדף' }, { status: 409 })
           : dbErrorResponse(outcome.error);
@@ -128,7 +131,10 @@ export async function PATCH(
         .from('invoices')
         .update({ ...body, updated_at: new Date().toISOString() })
         .eq('id', id);
-      if (error) return dbErrorResponse(error);
+      if (error) {
+        await discardCopies(supabase as unknown as FileMoveDb, movedCopies);
+        return dbErrorResponse(error);
+      }
     }
 
     await removeUnusedOldFiles(supabase as unknown as FileMoveDb, movedOldPaths);
