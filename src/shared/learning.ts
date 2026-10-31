@@ -477,12 +477,14 @@ export interface LearnedRulesTrace {
 export function selectRulesForDocument(rules: LearnedRule[], clientId: string, ocrText: string | null | undefined): LearnedRule[] {
   if (!ocrText) return [];
   const candidates = new Set(findVatIdCandidates(ocrText, 100));
-  const text = normalizeSupplierName(ocrText) ?? '';
+  const textWords = new Set((normalizeSupplierName(ocrText) ?? '').toLowerCase().split(/\s+/));
   const matches = rules.filter((r) => {
     if (!r.active || !isLearnableField(r.field)) return false;
     if (r.supplier_key.startsWith('vat:')) return candidates.has(r.supplier_key.slice(4));
-    const name = r.supplier_key.slice(5);
-    return name.length >= 3 && text.includes(name);
+    // The model may give the name's words in another order ('מעבדות בדיקה QA-LRN' for a header
+    // 'QA-LRN מעבדות בדיקה'): every word of the name must be printed
+    const words = r.supplier_key.slice(5).toLowerCase().split(' ').filter((w) => w.length >= 2);
+    return words.length > 0 && words.join('').length >= 3 && words.every((w) => textWords.has(w));
   });
   const byField = new Map<string, LearnedRule>();
   const sorted = [...matches].sort(

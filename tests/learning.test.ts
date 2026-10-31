@@ -268,6 +268,11 @@ describe('applying a learned rule to the next extraction', () => {
     assert.deepEqual(selectRulesForDocument([office, other], 'c1', REF_OCR_2).map((r) => r.id), ['office']);
     const byName = rule({ id: 'name', supplier_key: 'name:אבגד שירותים בעמ', supplier_vat_id: null });
     assert.deepEqual(selectRulesForDocument([byName], 'c1', REF_OCR_2).map((r) => r.id), ['name']);
+    // Words in another order still match; a name with a word that isn't printed doesn't
+    const reordered = rule({ id: 'reordered', supplier_key: 'name:שירותים אבגד', supplier_vat_id: null });
+    assert.deepEqual(selectRulesForDocument([reordered], 'c1', REF_OCR_2).map((r) => r.id), ['reordered']);
+    const otherName = rule({ id: 'x', supplier_key: 'name:אבגד הובלות', supplier_vat_id: null });
+    assert.deepEqual(selectRulesForDocument([otherName], 'c1', REF_OCR_2), []);
   });
 
   test('prompt hints describe where the field is, not its value', () => {
