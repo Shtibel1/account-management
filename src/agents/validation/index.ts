@@ -17,6 +17,7 @@ import { isValidVatIdChecksum } from '@/shared/vatId';
 import { checkLineItemsSum, hasMixedVat, lineItemWarnings, normalizeLineItems } from '@/shared/lineItems';
 import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
 import { vatRateWarning } from '@/shared/vatRate';
+import { checkAmountSanity } from '@/shared/amountSanity';
 import {
   BUYER_VAT_UNRESOLVED_VIOLATION,
   checkSupplierVatId,
@@ -110,11 +111,21 @@ export async function validateInvoice(
   rules: TenantRules,
   context: ValidationContext = {}
 ): Promise<{ data: ExtractedData; validationResult: ValidationResult; supplierRule: SupplierRuleTrace | null }> {
+  // 0. Amount sanity: implausible amounts (round placeholders, large amounts the document doesn't
+  // show, VAT mismatch on amounts not in the document) are removed or marked unconfirmed before
+  // anything else uses them (auto-corrections, allocation-number rule, duplicates).
+  const sanity = checkAmountSanity(data, context.ocrText);
+  if (sanity.result) {
+    console.log(
+      `[Validation] Amount sanity (${sanity.result.action}: ${sanity.result.reasons.join(', ')}) on invoice ${invoiceId}; extracted ${JSON.stringify(sanity.result.original)}`
+    );
+  }
+
   // 1. Run edge cases & auto-corrections
-  const { data: corrected, warnings: edgeWarnings } = runEdgeCaseHandlers(data);
-  // Amounts the edge-case handlers rewrote (math fix or exempt-supplier guess) block auto-approve
+  const { data: corrected, warnings: edgeWarnings } = runEdgeCaseHandlers(sanity.data);
+  // Amounts the edge-case handlers rewrote (math fix or exempt-supplier guess) or the sanity layer removed block auto-approve
   const amountsAutoCorrected = amountsChanged(data, corrected);
-  const warnings = [...edgeWarnings];
+  const warnings = [...(sanity.warning ? [sanity.warning] : []), ...edgeWarnings];
 
   // Apply leading-zero padding to any extracted VAT ID if it has 8 digits
   if (corrected.supplier_vat_id) {
@@ -326,6 +337,14 @@ export async function validateInvoice(
 
   // Model confidences no longer apply to fields auto-corrected above (amounts, VAT ID from the supplier table)
   corrected.field_confidence = pruneFieldConfidence(data.field_confidence, data, corrected);
+  if (sanity.result?.action === 'unconfirmed' && sanity.data.field_confidence) {
+    // Kept as a suggestion: the lowered scores from the sanity layer, not the model's
+    corrected.field_confidence = { ...(corrected.field_confidence ?? {}) };
+    for (const f of ['amount_before_vat', 'vat_amount', 'total_amount'] as const) {
+      const v = sanity.data.field_confidence[f];
+      if (v != null && corrected[f] === sanity.data[f]) corrected.field_confidence[f] = v;
+    }
+  }
   if (!corrected.field_confidence) delete corrected.field_confidence;
   if ((registrarVatConflict || (buyerVatIdSuspected && vatReplacementSource === 'reference')) && corrected.supplier_vat_id) {
     // The model's (often 0.95) score is not evidence against the registrar: highlight the field
@@ -359,7 +378,10 @@ export async function validateInvoice(
     !withRule.supplier_name &&
     !corrected.invoice_number &&
     !corrected.total_amount &&
-    !corrected.amount_before_vat;
+    !corrected.amount_before_vat &&
+    // Amounts the sanity layer removed still show the document was read as an invoice: review, not error
+    !sanity.result?.original.total_amount &&
+    !sanity.result?.original.amount_before_vat;
 
   // 6. Manual review is required unless the client opted this supplier into auto-approve AND every
   // check passed (math, VAT ID, required fields, rules, duplicates, document type).
@@ -426,6 +448,7 @@ export async function validateInvoice(
     not_an_invoice: notAnInvoice,
     allocation_required: allocationRequired,
     auto_approved: autoApproved,
+    ...(sanity.result ? { amount_sanity: sanity.result } : {}),
     ...(optedIn && !autoApproved ? { auto_approve_blockers: blockers } : {}),
     line_items_sum_ok: lineItemsSumOk,
     mixed_vat: mixedVat,

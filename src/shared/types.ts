@@ -1,3 +1,4 @@
+import type { AmountSanityResult } from '@/shared/amountSanity';
 import type { SplitSuggestion } from '@/shared/documentSplit';
 import type { FewShotExample } from '@/shared/fewshot';
 import type { LearnedRule, LearnedRulesTrace } from '@/shared/learning';
@@ -127,6 +128,8 @@ export interface ValidationResult {
   vat_id_sources?: VatIdSources;
   auto_approved?: boolean;            // skipped manual review via the supplier auto-approve opt-in
   auto_approve_blockers?: string[];   // supplier is opted in, but these checks sent it to review
+  /** Extracted amounts the sanity layer rejected / left unconfirmed, with the model's values (src/shared/amountSanity.ts). */
+  amount_sanity?: AmountSanityResult;
 }
 
 export interface Client {
@@ -139,6 +142,8 @@ export interface Client {
   org_id?: string;
   /** Where "returned to client" notifications are emailed (accountant_review_loop). */
   contact_email?: string | null;
+  /** Set when an owner archived the client (hidden from lists and pickers, restorable). */
+  archived_at?: string | null;
   created_at: string;
 }
 

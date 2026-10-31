@@ -4,18 +4,21 @@ import { useEffect, useState } from 'react';
 import { createClient } from '@/utils/supabase/client';
 import { Client } from '@/shared/types';
 import Link from 'next/link';
-import { Plus, Building2, ChevronLeft, Users, Loader2, Plug } from 'lucide-react';
+import { Plus, Building2, ChevronLeft, Users, Loader2, Plug, Archive, RotateCcw } from 'lucide-react';
 import { useSession } from '@/components/Auth/SessionContext';
 import { useToast } from '@/components/ui/Toast';
 import { ClientChannelsDialog, ClientChannelsSummary, useClientChannels } from '@/components/ClientChannels/ClientChannels';
 import { vatAccountError } from '@/shared/mappingValidation';
-import { ClientCardMenu, createClientRequest, DeleteClientDialog, EditClientDialog } from '@/components/Clients/ClientDialogs';
+import { ClientCardMenu, createClientRequest, deleteClientRequest, EditClientDialog, setClientArchivedRequest } from '@/components/Clients/ClientDialogs';
+import { useConfirm } from '@/components/ui/ConfirmDialog';
 
 export default function ClientsPage() {
   const supabase = createClient();
   const { me, currentOrgId } = useSession();
   const { toast } = useToast();
-  const [clients, setClients] = useState<Client[]>([]);
+  const askConfirm = useConfirm();
+  // All clients of the user's offices, archived ones included (shown in their own section).
+  const [allClients, setAllClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState('');
@@ -26,8 +29,11 @@ export default function ClientsPage() {
   const [nameServerError, setNameServerError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [editClient, setEditClient] = useState<Client | null>(null);
-  const [deleteClient, setDeleteClient] = useState<Client | null>(null);
-  // Deleting is for office owners (DELETE /api/clients/[id] checks it too); not in the local mock.
+  const [showArchived, setShowArchived] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const clients = allClients.filter((c) => !c.archived_at);
+  const archivedClients = allClients.filter((c) => !!c.archived_at);
+  // Deleting / archiving is for office owners (the API checks it too); not in the local mock.
   const canDelete = (c: Client) =>
     !!me && !me.mock && me.organizations.some((o) => o.id === c.org_id && o.role === 'owner');
   // Reload channels whenever the client list changes (new clients get an inbound alias).
@@ -35,8 +41,72 @@ export default function ClientsPage() {
 
   const load = async () => {
     const { data } = await supabase.from('clients').select('*').order('created_at', { ascending: false });
-    setClients(data ?? []);
+    setAllClients(data ?? []);
     setLoading(false);
+  };
+
+  const replaceClient = (saved: Client) =>
+    setAllClients((list) => list.map((c) => (c.id === saved.id ? { ...c, ...saved } : c)));
+
+  const archiveClient = async (c: Client) => {
+    setBusyId(c.id);
+    const result = await setClientArchivedRequest(c.id, true);
+    setBusyId(null);
+    if ('error' in result) return toast(result.error, 'error');
+    replaceClient(result.client);
+    toast(`הלקוח "${c.name}" הועבר לארכיון`, 'success');
+  };
+
+  const restoreClient = async (c: Client) => {
+    setBusyId(c.id);
+    const result = await setClientArchivedRequest(c.id, false);
+    setBusyId(null);
+    // e.g. 409: another active client took the name meanwhile (rename it first).
+    if ('error' in result) return toast(result.field === 'name' ? `${result.error} - שנו את שם אחד הלקוחות ונסו שוב` : result.error, 'error');
+    replaceClient(result.client);
+    toast(`הלקוח "${c.name}" שוחזר`, 'success');
+  };
+
+  // Delete (owners): in-app confirm with the client's name. When the server refuses (exported books,
+  // audit history, bank lines, invoices in progress) its Hebrew reason is shown with archiving offered
+  // as the fallback.
+  const handleDelete = async (c: Client) => {
+    const ok = await askConfirm({
+      title: 'מחיקת לקוח',
+      message: (
+        <>
+          למחוק את הלקוח <strong className="font-semibold text-slate-900">{c.name}</strong>?{'\n'}
+          הלקוח, המיפויים והקבצים שלו יימחקו לצמיתות.
+        </>
+      ),
+      confirmLabel: 'מחק לקוח',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    setBusyId(c.id);
+    const result = await deleteClientRequest(c.id);
+    setBusyId(null);
+    if (result.ok) {
+      setAllClients((list) => list.filter((x) => x.id !== c.id));
+      toast(`הלקוח "${c.name}" נמחק`, 'success');
+      return;
+    }
+    if (result.status !== 409) {
+      toast(result.error, 'error');
+      return;
+    }
+    const archive = await askConfirm({
+      title: 'לא ניתן למחוק את הלקוח',
+      message: (
+        <>
+          <span role="alert" className="block text-rose-700">{result.error}</span>{'\n'}
+          אפשר במקום זאת להעביר את <strong className="font-semibold text-slate-900">{c.name}</strong> לארכיון: הוא יוסתר מרשימת הלקוחות ומהבחירה בדפים האחרים, כל הנתונים שלו יישמרו וניתן לשחזר אותו בכל עת.
+        </>
+      ),
+      confirmLabel: 'העבר לארכיון',
+      cancelLabel: 'סגור',
+    });
+    if (archive) await archiveClient(c);
   };
 
   useEffect(() => { load(); }, []);
@@ -186,12 +256,16 @@ export default function ClientsPage() {
                 </div>
               </Link>
               <div className="pt-4 pl-3">
-                <ClientCardMenu
-                  clientName={c.name}
-                  canDelete={canDelete(c)}
-                  onEdit={() => setEditClient(c)}
-                  onDelete={() => setDeleteClient(c)}
-                />
+                {busyId === c.id ? (
+                  <Loader2 className="h-4 w-4 m-1.5 animate-spin text-slate-400" aria-label="מעדכן" />
+                ) : (
+                  <ClientCardMenu
+                    clientName={c.name}
+                    canDelete={canDelete(c)}
+                    onEdit={() => setEditClient(c)}
+                    onDelete={() => handleDelete(c)}
+                  />
+                )}
               </div>
               </div>
               <ClientChannelsSummary
@@ -215,23 +289,49 @@ export default function ClientsPage() {
           client={editClient}
           onClose={() => setEditClient(null)}
           onSaved={(saved) => {
-            setClients((list) => list.map((c) => (c.id === saved.id ? { ...c, ...saved } : c)));
+            replaceClient(saved);
             setEditClient(null);
             toast('פרטי הלקוח עודכנו', 'success');
           }}
         />
       )}
 
-      {deleteClient && (
-        <DeleteClientDialog
-          client={deleteClient}
-          onClose={() => setDeleteClient(null)}
-          onDeleted={(id) => {
-            setClients((list) => list.filter((c) => c.id !== id));
-            setDeleteClient(null);
-            toast('הלקוח נמחק', 'success');
-          }}
-        />
+      {/* Archived clients (QA round 8): hidden from the list and pickers, restorable by owners */}
+      {!loading && archivedClients.length > 0 && (
+        <section className="space-y-3">
+          <button
+            type="button"
+            onClick={() => setShowArchived((v) => !v)}
+            aria-expanded={showArchived}
+            className="flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-900"
+          >
+            <Archive className="h-4 w-4" />
+            {showArchived ? 'הסתר לקוחות בארכיון' : `לקוחות בארכיון (${archivedClients.length})`}
+          </button>
+          {showArchived && (
+            <ul className="card divide-y divide-slate-100">
+              {archivedClients.map((c) => (
+                <li key={c.id} className="flex items-center justify-between gap-3 px-5 py-3">
+                  <div className="min-w-0">
+                    <p className="font-medium text-slate-700 break-words">{c.name}</p>
+                    <p className="text-xs text-slate-500 mt-0.5">{c.vat_account ? `מע"מ: ${c.vat_account}` : 'קוד מע"מ לא הוגדר'}</p>
+                  </div>
+                  {canDelete(c) && (
+                    <button
+                      type="button"
+                      onClick={() => restoreClient(c)}
+                      disabled={busyId === c.id}
+                      aria-label={`שחזור הלקוח ${c.name}`}
+                      className="flex items-center gap-1.5 shrink-0 text-xs font-medium text-blue-600 hover:text-blue-700 disabled:opacity-50"
+                    >
+                      {busyId === c.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />} שחזור
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
       )}
 
       {channelsClient && (

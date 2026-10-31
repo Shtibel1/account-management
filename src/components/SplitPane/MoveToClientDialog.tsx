@@ -49,17 +49,17 @@ export function MoveToClientDialog({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { data, error: loadErr } = await supabase.from('clients').select('id, name, vat_account, created_at, org_id');
+      const { data, error: loadErr } = await supabase.from('clients').select('id, name, vat_account, created_at, org_id, archived_at');
       if (cancelled) return;
       if (loadErr || !data) {
         setError('טעינת רשימת הלקוחות נכשלה');
         setClients([]);
         return;
       }
-      const rows = data as { id: string; name: string; vat_account?: string | null; created_at?: string | null; org_id?: string | null }[];
+      const rows = data as { id: string; name: string; vat_account?: string | null; created_at?: string | null; org_id?: string | null; archived_at?: string | null }[];
       // Only clients of the same office as the invoice
       const orgId = rows.find((c) => c.id === currentClientId)?.org_id ?? null;
-      const sameOffice = rows.filter((c) => c.id !== currentClientId && (!orgId || c.org_id === orgId));
+      const sameOffice = rows.filter((c) => c.id !== currentClientId && !c.archived_at && (!orgId || c.org_id === orgId));
       const names = clientDisplayNames(sameOffice);
       setClients(
         sameOffice

@@ -13,19 +13,26 @@ export const dynamic = 'force-dynamic';
  * account (any member of the client's office). A new name already used by another client of the
  * office answers 409 { error: 'לקוח בשם זה כבר קיים במשרד', field: 'name' } (QA round 8, same check as
  * POST /api/clients). Answers { client }.
+ *   { archived: true | false }  archives / restores the client (office owners only): an archived
+ *   client is hidden from the clients page and the pickers, all its data is kept. The fallback when
+ *   DELETE is refused (exported books, audit history, bank lines). Migration 20261031133000.
  */
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const access = await requireClientAccess(id);
   if (!access.ok) return access.response;
 
-  let body: { name?: unknown; vatAccount?: unknown };
+  let body: { name?: unknown; vatAccount?: unknown; archived?: unknown };
   try {
     body = (await request.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: 'גוף הבקשה אינו JSON תקין' }, { status: 400 });
   }
   if (!body || typeof body !== 'object') return NextResponse.json({ error: 'גוף הבקשה אינו תקין' }, { status: 400 });
+  if (body.archived !== undefined && !access.value.ctx.mock) {
+    const owner = await requireOrgOwner(access.value.orgId, access.value.ctx);
+    if (!owner.ok) return owner.response;
+  }
 
   try {
     const result = await updateClientRecord(serviceClientRecordsDb(), {
@@ -33,6 +40,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       orgId: access.value.orgId,
       name: body.name,
       vatAccount: body.vatAccount,
+      archived: body.archived,
     });
     if (!result.ok) return NextResponse.json({ error: result.error, field: result.field }, { status: result.status });
     return NextResponse.json({ client: result.client });
