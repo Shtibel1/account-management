@@ -50,11 +50,14 @@ export function ClientSelect({
   // Same-named clients get their VAT account / creation date so the options differ
   const labels = clientDisplayNames(clients);
   return (
-    <select className="input-base w-56 max-w-full" value={value} onChange={(e) => onChange(e.target.value)} aria-label="לקוח">
-      {clients.length === 0 && <option value="">אין לקוחות</option>}
-      {clients.map((c) => (
-        <option key={c.id} value={c.id}>{labels.get(c.id) ?? c.name}</option>
-      ))}
-    </select>
+    <label className="flex items-center gap-2 w-full sm:w-auto">
+      <span className="text-sm font-medium text-slate-700 shrink-0">לקוח:</span>
+      <select className="input-base flex-1 min-w-0 sm:flex-none sm:w-72" value={value} onChange={(e) => onChange(e.target.value)}>
+        {clients.length === 0 && <option value="">אין לקוחות</option>}
+        {clients.map((c) => (
+          <option key={c.id} value={c.id}>{labels.get(c.id) ?? c.name}</option>
+        ))}
+      </select>
+    </label>
   );
 }

@@ -27,7 +27,7 @@ function SignupForm() {
     return (
       <AuthShell title="פתיחת משרד חדש" subtitle="מצב סימולציה מקומי">
         <FormMessage kind="info">Supabase אינו מוגדר, ולכן אין הרשמה במצב זה (פיתוח מקומי בלבד).</FormMessage>
-        <Link href="/clients" className="block text-center bg-blue-600 hover:bg-blue-700 text-white rounded-xl py-2.5 text-sm font-semibold">
+        <Link href="/clients" className="block text-center bg-blue-600 hover:bg-blue-700 text-white rounded-xl py-2.5 min-h-[44px] text-sm font-semibold">
           כניסה למערכת
         </Link>
       </AuthShell>
@@ -72,7 +72,7 @@ function SignupForm() {
       footer={
         <>
           כבר יש לכם חשבון?{' '}
-          <Link href="/login" className="font-semibold text-blue-600 hover:text-blue-700">
+          <Link href="/login" className="inline-block py-3 font-semibold text-blue-600 hover:text-blue-700 underline-offset-4 hover:underline">
             התחברות
           </Link>
         </>
@@ -144,7 +144,7 @@ function SignupForm() {
           <button
             type="submit"
             disabled={busy}
-            className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors shadow-sm"
+            className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-xl py-2.5 min-h-[44px] text-sm font-semibold transition-colors shadow-sm"
           >
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
             יצירת חשבון

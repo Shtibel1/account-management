@@ -32,7 +32,7 @@ export default function PrivacyPage() {
             <h2 className="text-xl font-semibold text-stone-900 mb-3">מי אנחנו</h2>
             <p className="text-stone-600 leading-relaxed">
               סריקה בעברית הוא שירות סריקת תמונות ומסמכים בעברית. 
-              האתר מופעל על ידי נדב שטיבל. ליצירת קשר: <a href="mailto:contact@nadav-shtibel.com" className="text-blue-600 hover:underline">contact@nadav-shtibel.com</a>
+              האתר מופעל על ידי נדב שטיבל. ליצירת קשר: <a href="mailto:contact@nadav-shtibel.com" dir="ltr" className="text-blue-600 hover:underline">contact@nadav-shtibel.com</a>
             </p>
           </section>
 
@@ -78,7 +78,7 @@ export default function PrivacyPage() {
             <h2 className="text-xl font-semibold text-stone-900 mb-3">זכויותיכם</h2>
             <p className="text-stone-600 leading-relaxed">
               אתם יכולים לבקש לראות, לתקן, או למחוק את המידע האישי שלכם בכל עת. 
-              פנו אלינו בכתובת <a href="mailto:contact@nadav-shtibel.com" className="text-blue-600 hover:underline">contact@nadav-shtibel.com</a> ונטפל בבקשתכם.
+              פנו אלינו בכתובת <a href="mailto:contact@nadav-shtibel.com" dir="ltr" className="text-blue-600 hover:underline">contact@nadav-shtibel.com</a> ונטפל בבקשתכם.
             </p>
           </section>
 

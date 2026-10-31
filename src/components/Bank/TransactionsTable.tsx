@@ -112,13 +112,15 @@ export function TransactionsTable({
           <Search className="h-4 w-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
           <input
             className="input-base pr-9 py-2"
+            type="search"
+            aria-label="חיפוש תנועות"
             placeholder="חיפוש בתיאור, אסמכתא, ספק או סכום"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
         {mode === 'all' && (
-          <select className="input-base py-2 w-auto" value={filters.status} onChange={(e) => onFiltersChange({ status: e.target.value as BankStatusFilter })}>
+          <select className="input-base py-2 w-auto" aria-label="סינון לפי סטטוס" value={filters.status} onChange={(e) => onFiltersChange({ status: e.target.value as BankStatusFilter })}>
             <option value="all">כל הסטטוסים</option>
             <option value="debits">חיובים בלבד</option>
             <option value="unmatched">ללא חשבונית</option>
@@ -130,6 +132,7 @@ export function TransactionsTable({
         {accounts.length > 1 && (
           <select
             className="input-base py-2 w-auto"
+            aria-label="סינון לפי חשבון"
             value={filters.account ?? '__all__'}
             onChange={(e) => onFiltersChange({ account: e.target.value === '__all__' ? null : e.target.value })}
           >
@@ -141,7 +144,17 @@ export function TransactionsTable({
         )}
       </div>
 
-      <div className="overflow-x-auto">
+      {/* Empty state outside the wide table so it is centred and fully visible on phones */}
+      {pageRows.length === 0 && (
+        <div className="text-center text-slate-500 text-sm py-12 px-4" role="status">
+          {filters.search || (mode === 'all' && filters.status !== 'all') || filters.account !== null
+            ? 'אין תנועות התואמות את החיפוש או הסינון'
+            : mode === 'missing'
+              ? 'אין חיובים ללא חשבונית'
+              : 'עדיין לא יובאו תנועות ללקוח זה. לחצו על "ייבוא דף חשבון" כדי להתחיל.'}
+        </div>
+      )}
+      <div className={clsx('overflow-x-auto', pageRows.length === 0 && 'hidden')}>
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-500 text-xs">
             <tr>
@@ -155,13 +168,6 @@ export function TransactionsTable({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {pageRows.length === 0 && (
-              <tr>
-                <td colSpan={7} className="text-center text-slate-400 py-12">
-                  {mode === 'missing' ? 'אין חיובים ללא חשבונית' : 'אין תנועות להצגה'}
-                </td>
-              </tr>
-            )}
             {pageRows.map((t) => {
               const invoice = t.matched_invoice_id ? invoicesById.get(t.matched_invoice_id) : undefined;
               const candidateCount = candidates[t.id]?.length ?? 0;

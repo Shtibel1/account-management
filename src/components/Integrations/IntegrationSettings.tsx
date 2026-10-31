@@ -207,8 +207,8 @@ function PluginForm({
               ))}
           </div>
         </div>
-        <label className="flex items-center gap-2 text-sm text-slate-700 shrink-0 cursor-pointer">
-          <input type="checkbox" className="accent-blue-600" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+        <label className="flex items-center gap-2 text-sm text-slate-700 shrink-0 cursor-pointer min-h-[44px] px-2 -mx-2 rounded-lg hover:bg-slate-50">
+          <input type="checkbox" className="accent-blue-600 h-5 w-5" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
           פעיל
         </label>
       </div>

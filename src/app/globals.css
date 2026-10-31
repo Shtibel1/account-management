@@ -15,6 +15,12 @@
   }
 
   * { box-sizing: border-box; }
+
+  /* Keyboard focus is always visible (mouse clicks don't show it). Elements that draw their own ring keep it. */
+  :focus-visible {
+    outline: 2px solid theme('colors.blue.600');
+    outline-offset: 2px;
+  }
 }
 
 @layer components {
@@ -27,6 +33,8 @@
            bg-white placeholder:text-slate-400
            focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500
            transition-colors;
+    /* 44px touch targets on phones */
+    @apply max-md:min-h-[44px];
   }
 
   .input-error {
@@ -39,7 +47,7 @@
   .sidebar-item {
     @apply flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium
            text-slate-400 hover:text-white hover:bg-white/10
-           transition-all duration-150 cursor-pointer;
+           transition-all duration-150 cursor-pointer max-md:min-h-[44px];
   }
   .sidebar-item-active {
     @apply bg-white/15 text-white;

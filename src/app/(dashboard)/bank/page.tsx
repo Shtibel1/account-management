@@ -194,17 +194,22 @@ export default function BankPage() {
             ייבוא דפי בנק ואשראי, התאמה לחשבוניות מאושרות ורשימת חשבוניות חסרות ללקוח
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <select className="input-base w-56 max-w-full" value={clientId} onChange={(e) => setClientId(e.target.value)} aria-label="לקוח">
-            {clients.length === 0 && <option value="">אין לקוחות</option>}
-            {clients.map((c) => (
-              <option key={c.id} value={c.id}>{clientLabels.get(c.id) ?? c.name}</option>
-            ))}
-          </select>
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          {/* Wide enough for disambiguated labels like "name (חשבון מע"מ 12345)"; full width on phones */}
+          <label className="flex items-center gap-2 flex-1 min-w-0 sm:flex-none">
+            <span className="text-sm font-medium text-slate-700 shrink-0">לקוח:</span>
+            <select className="input-base flex-1 min-w-0 sm:flex-none sm:w-80" value={clientId} onChange={(e) => setClientId(e.target.value)}>
+              {clients.length === 0 && <option value="">אין לקוחות</option>}
+              {clients.map((c) => (
+                <option key={c.id} value={c.id}>{clientLabels.get(c.id) ?? c.name}</option>
+              ))}
+            </select>
+          </label>
           <button
+            type="button"
             onClick={() => load()}
             disabled={loading || !clientId}
-            className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700 transition-colors px-3 py-2 rounded-lg hover:bg-slate-100"
+            className="shrink-0 flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700 transition-colors px-3 min-h-[44px] rounded-lg hover:bg-slate-100"
           >
             <RefreshCw className={clsx('h-4 w-4', loading && 'animate-spin')} />
             רענן

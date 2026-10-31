@@ -91,6 +91,26 @@ export function summarizeBankTransactions(transactions: readonly BankTransaction
   };
 }
 
+/**
+ * A search query as an amount, the way the table shows it ("-1,234.56", "₪500.00", "123.40"):
+ * without ₪, spaces, thousands commas and a leading minus. Null when the query isn't a number.
+ * Mirrors v_amount_search in bank_overview() (migration 20261031140000_ux_bank_amount_search.sql).
+ */
+export function normalizeAmountSearch(query: string): string | null {
+  const compact = query.trim().toLowerCase().replace(/[\s₪,]/g, '');
+  return /^[-−]?[0-9]+(\.[0-9]*)?$/.test(compact) ? compact.replace(/^[-−]/, '') : null;
+}
+
+/** True when the amount (sign ignored) contains the query as shown or as a plain number. */
+export function amountMatchesSearch(amount: number, query: string): boolean {
+  const abs = Math.abs(amount);
+  const plain = String(abs);
+  const q = query.trim().toLowerCase();
+  if (q && plain.includes(q)) return true;
+  const n = normalizeAmountSearch(query);
+  return n !== null && (plain.includes(n) || abs.toFixed(2).includes(n));
+}
+
 /** Same filters the table used to apply in the browser. */
 export function filterBankTransactions(
   transactions: readonly BankTransaction[],
@@ -109,8 +129,8 @@ export function filterBankTransactions(
     if (query.account !== null && t.account_label !== query.account) return false;
     if (q) {
       const inv = t.matched_invoice_id ? invoicesById.get(t.matched_invoice_id) : undefined;
-      const haystack = [t.description, t.reference, t.account_label, inv?.supplier_name, inv?.invoice_number, String(Math.abs(t.amount))];
-      if (!haystack.some((v) => v?.toLowerCase().includes(q))) return false;
+      const haystack = [t.description, t.reference, t.account_label, inv?.supplier_name, inv?.invoice_number];
+      if (!haystack.some((v) => v?.toLowerCase().includes(q)) && !amountMatchesSearch(t.amount, q)) return false;
     }
     return true;
   });
