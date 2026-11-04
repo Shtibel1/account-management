@@ -18,7 +18,11 @@ const nextConfig: NextConfig = {
   },
   // There is no /dashboard page: the office's home is the client list (QA: /dashboard was a 404)
   async redirects() {
-    return [{ source: '/dashboard', destination: '/clients', permanent: false }];
+    return [
+      { source: '/dashboard', destination: '/clients', permanent: false },
+      // The quote form was replaced by self-service signup; old links and search results keep working.
+      { source: '/order', destination: '/signup', permanent: true },
+    ];
   },
 };
 

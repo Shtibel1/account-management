@@ -2,7 +2,7 @@
  * Which paths need a session. Pure (no Next/Supabase imports) so it can be unit-checked and used by
  * src/proxy.ts.
  *
- *   public  - marketing pages, the accountants landing page, auth pages, the lead form API and the ingestion webhooks (which keep
+ *   public  - marketing pages, the accountants landing page, auth pages and the ingestion webhooks (which keep
  *             their own secret / Twilio-signature auth).
  *   api     - every other /api/* route: 401 JSON without a session.
  *   page    - every other page (the dashboard): redirect to /login?next=...
@@ -11,13 +11,13 @@
 export type RouteKind = 'public' | 'api' | 'page';
 
 /** Exact public pages (the (marketing) route group + auth pages). */
-const PUBLIC_PAGES = new Set(['/', '/order', '/privacy', '/accountants', '/login', '/signup']);
+const PUBLIC_PAGES = new Set(['/', '/privacy', '/accountants', '/login', '/signup']);
 
 /** Public path prefixes (matched as `prefix` or `prefix/...`). */
 const PUBLIC_PREFIXES = ['/auth'];
 
 /** API routes that authenticate on their own (or are intentionally public). */
-const PUBLIC_API = new Set(['/api/lead', '/api/ingest/email', '/api/ingest/whatsapp', '/api/invoices/worker']);
+const PUBLIC_API = new Set(['/api/ingest/email', '/api/ingest/whatsapp', '/api/invoices/worker']);
 
 /** Pages a signed-in user doesn't need (they're sent on to the dashboard). */
 export const AUTH_PAGES = new Set(['/login', '/signup']);

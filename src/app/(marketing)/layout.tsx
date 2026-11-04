@@ -3,12 +3,11 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { Menu, X, Camera, FileText, Home, Shield, Briefcase, LogIn } from 'lucide-react';
+import { Menu, X, Camera, Home, Shield, Briefcase, LogIn } from 'lucide-react';
 import clsx from 'clsx';
 
 const navItems = [
   { href: '/', label: 'בית', icon: Home },
-  { href: '/order', label: 'הזמנה', icon: FileText },
   { href: '/privacy', label: 'פרטיות', icon: Shield },
   // The accounting-office product (חשבוניות Pro) has its own landing page and login.
   { href: '/accountants', label: 'לרואי חשבון', icon: Briefcase },
@@ -139,7 +138,6 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
           </div>
           <nav aria-label="קישורים בתחתית העמוד" className="flex flex-wrap justify-center gap-x-2 text-sm">
             <Link href="/" className="px-3 py-3 hover:text-white transition-colors">בית</Link>
-            <Link href="/order" className="px-3 py-3 hover:text-white transition-colors">הזמנה</Link>
             <Link href="/privacy" className="px-3 py-3 hover:text-white transition-colors">פרטיות</Link>
             <Link href="/accountants" className="px-3 py-3 hover:text-white transition-colors">חשבוניות Pro לרואי חשבון</Link>
             <Link href="/login" className="px-3 py-3 hover:text-white transition-colors">כניסה למערכת</Link>

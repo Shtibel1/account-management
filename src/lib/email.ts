@@ -1,7 +1,7 @@
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 
 /**
- * SERVER-ONLY outgoing email via AWS SES (used by /api/lead and the client notifications of the
+ * SERVER-ONLY outgoing email via AWS SES (used by the client notifications of the
  * accountant review loop). Credentials come from the standard AWS environment / Amplify role.
  */
 

@@ -5,7 +5,7 @@ import type { Metadata } from 'next';
  * header rules. Pure (no Next runtime imports) so it can be unit-checked.
  *
  * The app serves two audiences on one domain, kept apart on purpose:
- *   - SCAN_SITE: the public scanning service "סריקה בעברית" ("/", "/order", "/privacy");
+ *   - SCAN_SITE: the public scanning service "סריקה בעברית" ("/", "/privacy");
  *   - PRODUCT:   the accounting-office SaaS "חשבוניות Pro" (landing page /accountants, /login,
  *                /signup and the signed-in app).
  * Every public page builds its metadata with pageMetadata() and names its own site, so titles,
@@ -22,7 +22,6 @@ export const ACCOUNTANTS_PATH = '/accountants';
 export const PUBLIC_INDEXABLE_PAGES: { path: string; changeFrequency: 'weekly' | 'monthly' | 'yearly'; priority: number }[] = [
   { path: '/', changeFrequency: 'monthly', priority: 1 },
   { path: ACCOUNTANTS_PATH, changeFrequency: 'monthly', priority: 0.9 },
-  { path: '/order', changeFrequency: 'monthly', priority: 0.7 },
   { path: '/privacy', changeFrequency: 'yearly', priority: 0.3 },
 ];
 

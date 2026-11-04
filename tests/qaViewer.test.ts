@@ -130,11 +130,4 @@ describe('routes and marketing layout', () => {
     assert.match(src, /signedIn \?/);
     assert.match(src, /href=\{DEFAULT_AFTER_LOGIN\}/);
   });
-
-  test('no off-screen (negative offset) hiding that widens RTL pages', () => {
-    const src = readFileSync(new URL('../src/app/(marketing)/order/page.tsx', import.meta.url), 'utf8');
-    assert.doesNotMatch(src, /-10000px/);
-    assert.match(src, /clipPath: 'inset\(50%\)'/);
-    assert.match(src, /name="website" tabIndex=\{-1\}/);
-  });
 });

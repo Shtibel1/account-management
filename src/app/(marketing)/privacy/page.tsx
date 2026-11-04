@@ -4,7 +4,7 @@ import { pageMetadata, SCAN_SITE } from '@/lib/seo';
 
 export const metadata: Metadata = pageMetadata({
   title: 'מדיניות פרטיות | סריקה בעברית',
-  description: 'מדיניות הפרטיות של שירות סריקה בעברית: איזה מידע נאסף בטופס ההזמנה, איך משתמשים בו, ומה קורה לתמונות ולמסמכים שנמסרו לסריקה.',
+  description: 'מדיניות הפרטיות של שירות סריקה בעברית: איזה מידע נאסף, איך משתמשים בו, ומה קורה לתמונות ולמסמכים שנמסרו לסריקה.',
   path: '/privacy',
   siteName: SCAN_SITE,
 });
@@ -40,7 +40,7 @@ export default function PrivacyPage() {
           <section>
             <h2 className="text-xl font-semibold text-stone-900 mb-3">מידע שאנו אוספים</h2>
             <p className="text-stone-600 leading-relaxed mb-3">
-              כאשר אתם פונים אלינו דרך טופס ההזמנה, אנו אוספים:
+              כאשר אתם פונים אלינו, אנו אוספים:
             </p>
             <ul className="list-disc list-inside text-stone-600 space-y-1">
               <li>שם מלא</li>
@@ -53,7 +53,7 @@ export default function PrivacyPage() {
           <section>
             <h2 className="text-xl font-semibold text-stone-900 mb-3">איך אנו משתמשים במידע</h2>
             <p className="text-stone-600 leading-relaxed">
-              המידע משמש אותנו אך ורק לצורך מתן הצעת מחיר ותיאום השירות. 
+              המידע משמש אותנו אך ורק לצורך מתן השירות ותיאומו.
               אנו לא מוכרים, משכירים, או משתפים את המידע שלכם עם צדדים שלישיים לצורכי שיווק.
             </p>
           </section>

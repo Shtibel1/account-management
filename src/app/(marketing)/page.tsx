@@ -1,11 +1,11 @@
-import { ArrowLeft, Camera, FileText, Search, Upload, Scan, Download, Check } from 'lucide-react';
+import { ArrowLeft, Camera, FileText, Search, Upload, Scan, Download } from 'lucide-react';
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import { pageMetadata, SCAN_SITE } from '@/lib/seo';
 
 export const metadata: Metadata = pageMetadata({
   title: 'סריקה בעברית | סריקת תמונות ומסמכים בעברית',
-  description: 'שירות סריקת תמונות ואלבומים, מסמכים וחשבוניות בעברית. זיהוי טקסט עברי (OCR) — קבצים דיגיטליים שאפשר לחפש. בקשו הצעת מחיר.',
+  description: 'שירות סריקת תמונות ואלבומים, מסמכים וחשבוניות בעברית. זיהוי טקסט עברי (OCR) — קבצים דיגיטליים שאפשר לחפש.',
   path: '/',
   siteName: SCAN_SITE,
 });
@@ -166,52 +166,6 @@ function HowItWorksSection() {
   );
 }
 
-function TrustSection() {
-  const points = [
-    {
-      icon: Check,
-      title: 'עברית אמיתית',
-      description: 'לא תרגום אוטומטי — הכל בעברית מקור, מותאם לשוק הישראלי.',
-    },
-    {
-      icon: Search,
-      title: 'OCR לעברית',
-      description: 'זיהוי תווים אופטי מותאם לעברית — גם כתב יד וגם טקסט מודפס.',
-    },
-    {
-      icon: FileText,
-      title: 'לא מעבדים בלי בקשה',
-      description: 'החומרים שלכם נשארים שלכם. לא משתמשים בהם לשום דבר אחר.',
-    },
-  ];
-
-  return (
-    <section className="py-16 sm:py-20 bg-white border-t border-stone-100">
-      <div className="max-w-5xl mx-auto px-4 sm:px-6">
-        <div className="text-center mb-12">
-          <h2 className="text-3xl sm:text-4xl font-bold text-stone-900 mb-4">
-            למה אנחנו?
-          </h2>
-        </div>
-
-        <div className="grid sm:grid-cols-3 gap-8">
-          {points.map(({ icon: Icon, title, description }) => (
-            <div key={title} className="flex gap-4">
-              <div className="shrink-0 w-10 h-10 rounded-lg bg-emerald-100 text-emerald-600 flex items-center justify-center">
-                <Icon className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-stone-900 mb-1">{title}</h3>
-                <p className="text-stone-600 text-sm leading-relaxed">{description}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
 function CTASection() {
   return (
     <section className="py-16 sm:py-20 bg-gradient-to-br from-blue-600 to-blue-700">
@@ -242,7 +196,6 @@ export default function HomePage() {
       <HeroSection />
       <WhatWeScanSection />
       <HowItWorksSection />
-      <TrustSection />
       <CTASection />
     </>
   );
