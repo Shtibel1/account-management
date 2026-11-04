@@ -1,4 +1,4 @@
-import { Camera, FileText, Search, Upload, Scan, Download, Check, Mail, Phone } from 'lucide-react';
+import { ArrowLeft, Camera, FileText, Search, Upload, Scan, Download, Check } from 'lucide-react';
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import { pageMetadata, SCAN_SITE } from '@/lib/seo';
@@ -42,20 +42,14 @@ function HeroSection() {
           </p>
 
           {/* CTA */}
-          <div className="flex flex-col sm:flex-row gap-4 justify-center">
+          <div className="flex justify-center">
             <Link
-              href="/order"
+              href="/signup"
               className="inline-flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-8 py-4 rounded-xl text-lg font-semibold shadow-lg shadow-blue-600/25 hover:shadow-xl hover:shadow-blue-600/30 transition-all"
             >
-              <Mail className="w-5 h-5" />
-              בקשו הצעת מחיר
+              התחילו עכשיו
+              <ArrowLeft className="w-5 h-5" />
             </Link>
-            <a
-              href="#what-we-scan"
-              className="inline-flex items-center justify-center gap-2 bg-white hover:bg-stone-50 text-stone-700 px-8 py-4 rounded-xl text-lg font-medium border border-stone-200 shadow-sm hover:shadow transition-all"
-            >
-              מה אפשר לסרוק?
-            </a>
           </div>
         </div>
       </div>
@@ -226,23 +220,16 @@ function CTASection() {
           מוכנים להתחיל?
         </h2>
         <p className="text-blue-100 text-lg mb-8 max-w-xl mx-auto">
-          שלחו לנו פרטים ונחזור אליכם עם הצעת מחיר מותאמת
+          פותחים חשבון ומתחילים תוך דקות
         </p>
-        <div className="flex flex-col sm:flex-row gap-4 justify-center">
+        <div className="flex justify-center">
           <Link
-            href="/order"
+            href="/signup"
             className="inline-flex items-center justify-center gap-2 bg-white hover:bg-stone-50 text-blue-700 px-8 py-4 rounded-xl text-lg font-semibold shadow-lg hover:shadow-xl transition-all"
           >
-            <Mail className="w-5 h-5" />
-            בקשו הצעת מחיר
+            התחילו עכשיו
+            <ArrowLeft className="w-5 h-5" />
           </Link>
-          <a
-            href="mailto:contact@nadav-shtibel.com"
-            className="inline-flex items-center justify-center gap-2 bg-blue-500/20 hover:bg-blue-500/30 text-white px-8 py-4 rounded-xl text-lg font-medium border border-white/20 transition-all"
-          >
-            <Phone className="w-5 h-5" />
-            contact@nadav-shtibel.com
-          </a>
         </div>
       </div>
     </section>

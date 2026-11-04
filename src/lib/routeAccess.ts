@@ -24,6 +24,19 @@ export const AUTH_PAGES = new Set(['/login', '/signup']);
 
 export const DEFAULT_AFTER_LOGIN = '/clients';
 
+/**
+ * Non-sensitive marker: this browser has been signed in. Lets "/" tell a returning user whose session
+ * expired (-> /login) from a new visitor (-> marketing page). Set by src/proxy.ts, removed on sign-out.
+ */
+export const RETURNING_USER_COOKIE = 'returning_user';
+export const RETURNING_USER_MAX_AGE = 60 * 60 * 24 * 365;
+
+/** Where "/" sends this visitor: signed in -> the app, expired session -> login, otherwise stay (null). */
+export function homeRedirectPath(signedIn: boolean, returningUser: boolean): string | null {
+  if (signedIn) return DEFAULT_AFTER_LOGIN;
+  return returningUser ? '/login' : null;
+}
+
 function normalize(pathname: string): string {
   if (pathname.length > 1 && pathname.endsWith('/')) return pathname.replace(/\/+$/, '') || '/';
   return pathname;

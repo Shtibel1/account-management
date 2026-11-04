@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useState } from 'rea
 import type { MeResponse } from '@/shared/authModel';
 import { createClient } from '@/utils/supabase/client';
 import { isSupabaseConfigured } from '@/lib/supabaseConfig';
+import { RETURNING_USER_COOKIE } from '@/lib/routeAccess';
 
 interface SessionState {
   me: MeResponse | null;
@@ -49,6 +50,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       const { error } = await createClient().auth.signOut();
       if (error) console.error('[session] Sign-out failed:', error.message);
     }
+    // A deliberate sign-out may visit the marketing page again; only an expired session skips it.
+    document.cookie = `${RETURNING_USER_COOKIE}=; Max-Age=0; Path=/`;
     window.location.assign('/login');
   }, []);
 

@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
-import { AUTH_PAGES, classifyPath, isPublicApi, loginRedirectPath, safeNextPath } from '@/lib/routeAccess';
+import { AUTH_PAGES, classifyPath, homeRedirectPath, isPublicApi, loginRedirectPath, RETURNING_USER_COOKIE, RETURNING_USER_MAX_AGE, safeNextPath } from '@/lib/routeAccess';
 import { redirectLocation, siteOriginFor } from '@/lib/siteUrl';
 import { isMisconfiguredProduction, isSupabaseConfigured, MISCONFIGURED_MESSAGE, supabaseAnonKey, supabaseUrl } from '@/lib/supabaseConfig';
 
@@ -59,6 +59,21 @@ export async function proxy(request: NextRequest) {
     response.cookies.getAll().forEach((cookie) => res.cookies.set(cookie));
     return res;
   };
+
+  const returningUser = request.cookies.has(RETURNING_USER_COOKIE);
+  if (userId && !returningUser) {
+    response.cookies.set(RETURNING_USER_COOKIE, '1', {
+      path: '/',
+      maxAge: RETURNING_USER_MAX_AGE,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+    });
+  }
+
+  if (pathname === '/') {
+    const target = homeRedirectPath(Boolean(userId), returningUser);
+    if (target) return withSessionCookies(redirectTo(target));
+  }
 
   if (kind === 'public') {
     if (userId && AUTH_PAGES.has(pathname)) {
