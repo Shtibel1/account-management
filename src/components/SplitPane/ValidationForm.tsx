@@ -1,30 +1,55 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { ExtractedData, Invoice, AccountMapping } from '@/shared/types';
-import { approveInvoice } from '@/lib/api';
+import { Children, cloneElement, isValidElement, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { ExtractedData, Invoice, AccountMapping, ConfidenceField, LineItem } from '@/shared/types';
+import { MOVEIN_INVOICE_NUMBER_WIDTH } from '@/shared/exportData';
+import { approveInvoice, deleteInvoice, reapplySupplierRules, rejectInvoice, reopenInvoice, retryInvoice } from '@/lib/api';
+import { allocationThreshold, isAllocationRequired } from '@/shared/allocation';
+import { isAllocationNumberAcceptable } from '@/shared/approvalValidation';
+import { APPROVABLE_STATUSES, REJECTABLE_STATUSES, REOPENABLE_STATUSES } from '@/shared/invoiceStatus';
+import { findSupplierRule, normalizeVatId, VARIOUS_SUPPLIERS_ACCOUNT } from '@/shared/supplierRules';
+import { countHe, ruleReappliedMessage } from '@/shared/hebrewCount';
+import { accountCodeError, mappingDbErrorMessage } from '@/shared/mappingValidation';
+import { dismissDuplicateInFlags } from '@/shared/duplicates';
+import { CONFIDENCE_FIELDS, fieldConfidence, isLowConfidence, pruneFieldConfidence } from '@/shared/confidence';
+import { checkLineItemsSum, hasMixedVat, isLineItemWarning, normalizeLineItems } from '@/shared/lineItems';
+import { lineItemsSumMismatch, liveReviewWarnings } from '@/shared/reviewWarnings';
 import { createClient } from '@/utils/supabase/client';
+import { isSpecificSupplierName } from '@/shared/supplierNameMatch';
+import { LineItemsTable } from '@/components/SplitPane/LineItemsTable';
 import clsx from 'clsx';
-import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark } from 'lucide-react';
+import { AlertCircle, CheckCircle, CheckCircle2, AlertTriangle, XCircle, FileText, Calculator, Landmark, Zap, Undo2, RotateCcw, Trash2 } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
+import { useConfirm } from '@/components/ui/ConfirmDialog';
+import { DuplicateAlert } from './DuplicateAlert';
+import { RejectDialog } from '@/components/SplitPane/RejectDialog';
+import { toUserErrorMessage } from '@/shared/processing';
+import { BUYER_VAT_UNRESOLVED_VIOLATION } from '@/shared/buyerVatId';
 
 interface Props {
   invoice: Invoice;
   onApproved: () => void;
   onFieldFocus?: (field: string | null) => void;
+  /** Accountant review loop: shows "החזר ללקוח" (only passed while the feature flag is on). */
+  onReturnToClient?: () => void;
 }
 
 type SupplierStatus = 'known' | 'unknown' | 'loading';
 
-export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
+export function ValidationForm({ invoice, onApproved, onFieldFocus, onReturnToClient }: Props) {
   const supabase = createClient();
+  const router = useRouter();
   const { toast } = useToast();
+  const askConfirm = useConfirm();
   
   const initial = invoice.validated_data ?? invoice.extracted_data;
   const [data, setData] = useState<Partial<ExtractedData>>(initial ?? {});
   const [saving, setSaving] = useState(false);
   const [activeFormTab, setActiveFormTab] = useState<'invoice' | 'bank'>('invoice');
   const [rejecting, setRejecting] = useState(false);
+  const [showRejectDialog, setShowRejectDialog] = useState(false);
+  const [errorAction, setErrorAction] = useState<'retry' | 'delete' | 'reopen' | null>(null);
   const [error, setError] = useState('');
   const [categories, setCategories] = useState<string[]>([]);
   const [dbMappings, setDbMappings] = useState<AccountMapping[]>([]);
@@ -32,6 +57,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const [categoryMappingKeys, setCategoryMappingKeys] = useState<string[] | null>(null);
   const [supplierCode, setSupplierCode] = useState('');
   const [categoryCode, setCategoryCode] = useState('');
+  const [saveCategoryAsDefault, setSaveCategoryAsDefault] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
 
   const [webSearchVat, setWebSearchVat] = useState<string | null>(
@@ -69,13 +95,14 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   useEffect(() => {
     if (supplierMappingKeys === null || isInitialized) return;
 
-    const originalName = invoice.extracted_data?.supplier_name;
-    const mapping = dbMappings.find(
-      (m) => m.mapping_type === 'supplier' && m.key === originalName
-    );
+    // Supplier rule: matched by VAT ID first, then by the name the AI read
+    const mapping = findSupplierRule(dbMappings, {
+      supplier_name: invoice.extracted_data?.supplier_name,
+      supplier_vat_id: initial?.supplier_vat_id,
+    });
 
     if (mapping) {
-      if (mapping.account_code === '3499') {
+      if (mapping.account_code === VARIOUS_SUPPLIERS_ACCOUNT) {
         setData((prev) => ({
           ...prev,
           supplier_name: 'ספקים שונים',
@@ -96,7 +123,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
       setSupplierCode('3499');
     }
     setIsInitialized(true);
-  }, [dbMappings, supplierMappingKeys, invoice.extracted_data?.supplier_name, isInitialized]);
+  }, [dbMappings, supplierMappingKeys, invoice.extracted_data?.supplier_name, initial?.supplier_vat_id, isInitialized]);
 
   useEffect(() => {
     if (!data.supplier_name) return;
@@ -122,7 +149,9 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
 
   // Dynamic Gov.il API search on supplier name change (with debounce)
   useEffect(() => {
-    if (!data.supplier_name || data.supplier_name.trim().length < 2) {
+    // The catch-all placeholder (ספקים שונים) and generic one-word names ("חברה", "דלק") are not one
+    // business: a registrar hit would be an unrelated company
+    if (!isSpecificSupplierName(data.supplier_name)) {
       setWebSearchVat(null);
       return;
     }
@@ -154,7 +183,8 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
     return () => clearTimeout(delayDebounce);
   }, [data.supplier_name, initial?.supplier_name, initial?.validation_flags?.vat_id_sources?.web_search]);
 
-  // Autofill VAT ID if web search finds a result and the field is currently blank
+  // Autofill VAT ID if web search finds a result and the field is currently blank. An existing VAT ID
+  // is never replaced automatically: the sources panel offers the registrar's number with a confirm.
   useEffect(() => {
     if (!webSearchVat) {
       setLastAutofilledVat(null);
@@ -168,16 +198,17 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
 
   const originalSupplierName = invoice.extracted_data?.supplier_name || '';
 
-  const originalSupplierMapping = dbMappings.find(
-    (m) => m.mapping_type === 'supplier' && m.key === originalSupplierName
-  );
+  const originalSupplierMapping = findSupplierRule(dbMappings, {
+    supplier_name: originalSupplierName,
+    supplier_vat_id: initial?.supplier_vat_id,
+  }) ?? undefined;
 
   const isVariousSuppliers = supplierMappingKeys !== null && (
-    !originalSupplierMapping || originalSupplierMapping.account_code === '3499'
+    !originalSupplierMapping || originalSupplierMapping.account_code === VARIOUS_SUPPLIERS_ACCOUNT
   );
 
   const isKnownSupplier = supplierMappingKeys !== null &&
-    !!originalSupplierMapping && originalSupplierMapping.account_code !== '3499';
+    !!originalSupplierMapping && originalSupplierMapping.account_code !== VARIOUS_SUPPLIERS_ACCOUNT;
 
   const supplierStatus: SupplierStatus = supplierMappingKeys === null
     ? 'loading'
@@ -189,12 +220,30 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
 
   const flags = initial?.validation_flags;
   const mathOk = flags?.math_ok ?? true;
-  const warnings = flags?.warnings ?? [];
+  // Follows the current data while editing (a date entered, line items changed), not the stored run
+  const uploadedAt = flags?.date_sanity?.reference_date ?? invoice.created_at ?? null;
+  const warnings = liveReviewWarnings(flags?.warnings, { ...data, uploaded_at: uploadedAt });
+
+  // Supplier rule (account_mappings) defaults: show which value came from the rule, and offer to
+  // make the reviewer's category the supplier's default.
+  const ruleCategory = initial?.supplier_rule?.applied?.expense_category ?? null;
+  const isCategoryFromRule = !!ruleCategory && data.expense_category === ruleCategory;
+  const canSaveCategoryAsDefault =
+    isKnownSupplier && !!data.expense_category &&
+    data.expense_category !== (originalSupplierMapping?.expense_category ?? null);
 
   const set = (key: keyof ExtractedData, value: any) =>
     setData((prev) => ({ ...prev, [key]: value }));
 
   const fieldError = (key: string) => flags?.fields_missing?.includes(key) ?? false;
+
+  // Model confidence per field; hidden once the value no longer matches what the AI extracted
+  const aiData = invoice.extracted_data;
+  const liveConfidence = { field_confidence: pruneFieldConfidence(aiData?.field_confidence, aiData, data) };
+  const confidenceFor = (field: ConfidenceField): number | null => fieldConfidence(liveConfidence, field);
+  const lowConfidenceCount = CONFIDENCE_FIELDS.filter((f) => isLowConfidence(confidenceFor(f))).length;
+
+  const initialLineItems = initial?.line_items ?? [];
 
   const mathError =
     data.amount_before_vat != null && data.vat_amount != null && data.total_amount != null &&
@@ -233,6 +282,10 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const vatIdErrorText = getVatIdError(data.supplier_vat_id ?? null);
   const isVatIdOk = !vatIdErrorText;
 
+  const allocationRequired = isAllocationRequired(data);
+  const isAllocationMissing = allocationRequired && !data.allocation_number?.trim();
+  const isAllocationMalformed = !!data.allocation_number?.trim() && !isAllocationNumberAcceptable(data.allocation_number);
+
   const isDateEmpty = !data.invoice_date;
   const isAmountBeforeVatEmpty = data.amount_before_vat == null || isNaN(data.amount_before_vat);
   const isVatAmountEmpty = data.vat_amount == null || isNaN(data.vat_amount);
@@ -256,6 +309,11 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
     isVatAmountEmpty ||
     isTotalAmountEmpty;
 
+  // Account codes go into the export: digits only
+  const supplierCodeError = supplierStatus === 'unknown' && supplierCode.trim() ? accountCodeError(supplierCode) : null;
+  const categoryCodeError =
+    categoryStatus === 'unknown' && data.expense_category && categoryCode.trim() ? accountCodeError(categoryCode) : null;
+
   const hasBankData = !!(data.bank_name || data.bank_branch_name || data.bank_branch_code || data.bank_account);
 
   const handleApprove = async () => {
@@ -263,18 +321,74 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
       setError('יש למלא את כל שדות החובה: תאריך חשבונית, לפני מע״מ, מע"מ, וסה״כ לתשלום.');
       return;
     }
+    // Same blocking rules as the server (src/shared/approvalValidation.ts)
+    if (!isVatIdOk) {
+      setError(`מספר עוסק / ח.פ. אינו תקין: ${vatIdErrorText}`);
+      return;
+    }
+    if (isAllocationMissing) {
+      setError('חסר מספר הקצאה - חובה בחשבונית זו (מעל סכום הסף לפני מע"מ)');
+      return;
+    }
+    if (isAllocationMalformed) {
+      setError('מספר ההקצאה אינו תקין - נדרשות 9 ספרות');
+      return;
+    }
+    if (supplierCodeError || categoryCodeError) {
+      setError(supplierCodeError ?? categoryCodeError ?? '');
+      return;
+    }
+    // Line items that don't add up don't block approval, but the reviewer confirms it first
+    if (lineItemsSumMismatch(data)) {
+      setError('');
+      const ok = await askConfirm({
+        title: 'שורות הפריטים אינן תואמות לסכומים',
+        message: (
+          <span className="block space-y-1">
+            {warnings.filter(isLineItemWarning).map((w, i) => <span key={i} className="block text-amber-800">{w}</span>)}
+            <span className="block">לאשר את החשבונית בכל זאת?</span>
+          </span>
+        ),
+        confirmLabel: 'אשר בכל זאת',
+        cancelLabel: 'חזרה לעריכה',
+      });
+      if (!ok) return;
+    }
     setSaving(true); setError('');
     try {
       const originalName = invoice.extracted_data?.supplier_name;
-      const mappingExists = dbMappings.some(
-        (m) => m.mapping_type === 'supplier' && m.key === originalName
-      );
-      if (supplierStatus === 'unknown' && supplierCode.trim() && originalName && !mappingExists) {
-        await supabase.from('account_mappings').insert({
+      const supplierVatId = normalizeVatId(data.supplier_vat_id);
+      // Supplier rules created / changed here are re-applied to the client's other invoices in review
+      const changedRules: { name: string | null; vatId: string | null }[] = [];
+      if (supplierStatus === 'unknown' && supplierCode.trim() && originalName && !originalSupplierMapping) {
+        const accountCode = supplierCode.trim();
+        const { error: insertErr } = await supabase.from('account_mappings').insert({
           client_id: invoice.client_id,
           mapping_type: 'supplier',
           key: originalName,
-          account_code: supplierCode.trim(),
+          account_code: accountCode,
+          vat_id: supplierVatId,
+          // A catch-all supplier gets no default category from a single invoice
+          expense_category: accountCode !== VARIOUS_SUPPLIERS_ACCOUNT ? data.expense_category || null : null,
+        });
+        if (insertErr) {
+          console.error('[ValidationForm] Failed to save supplier mapping:', insertErr);
+          throw new Error(mappingDbErrorMessage(insertErr) ?? 'שמירת קוד הספק נכשלה');
+        }
+        changedRules.push({ name: originalName, vatId: supplierVatId });
+      }
+      if (saveCategoryAsDefault && canSaveCategoryAsDefault && originalSupplierMapping) {
+        const { error: updateErr } = await supabase
+          .from('account_mappings')
+          .update({ expense_category: data.expense_category })
+          .eq('id', originalSupplierMapping.id);
+        if (updateErr) {
+          console.error('[ValidationForm] Failed to update supplier default category:', updateErr);
+          throw new Error(mappingDbErrorMessage(updateErr) ?? 'עדכון קטגוריית ברירת המחדל של הספק נכשל');
+        }
+        changedRules.push({
+          name: originalSupplierMapping.key,
+          vatId: normalizeVatId(originalSupplierMapping.vat_id) ?? supplierVatId,
         });
       }
       if (categoryStatus === 'unknown' && categoryCode.trim() && data.expense_category) {
@@ -288,6 +402,9 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
 
       // Ensure the validated data has the correct, dynamic validation_flags before saving
       const updatedData = { ...data };
+      // Keep model confidences only for fields the reviewer left as the AI extracted them
+      updatedData.field_confidence = pruneFieldConfidence(data.field_confidence, invoice.extracted_data, updatedData);
+      if (!updatedData.field_confidence) delete updatedData.field_confidence;
       if (updatedData.validation_flags) {
         const vatIdOk = checkVatId(updatedData.supplier_vat_id ?? null);
         const mathOk = !mathError;
@@ -297,22 +414,66 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
           ruleViolations = ruleViolations.filter(
             (v) => !v.includes('checksum') && !v.includes('תקין')
           );
+          if (updatedData.supplier_vat_id) ruleViolations = ruleViolations.filter((v) => v !== BUYER_VAT_UNRESOLVED_VIOLATION);
         } else {
           if (!ruleViolations.some(v => v.includes('checksum'))) {
             ruleViolations.push('ח.פ. / עוסק מורשה אינו תקין לפי בדיקת checksum');
           }
         }
 
+        ruleViolations = ruleViolations.filter((v) => !v.includes('מספר הקצאה'));
+        if (isAllocationMissing) {
+          ruleViolations.push(
+            `חסר מספר הקצאה: חשבונית מעל ₪${allocationThreshold(updatedData.invoice_date)} לפני מע"מ — בלי מספר הקצאה לא ניתן לקזז את המע"מ`
+          );
+        }
+
+        // Re-evaluate line items after reviewer edits (blank rows are dropped)
+        const lineItems = normalizeLineItems(updatedData.line_items);
+        updatedData.line_items = lineItems.length > 0 ? lineItems : null;
+        const amounts = {
+          line_items: lineItems,
+          amount_before_vat: updatedData.amount_before_vat ?? null,
+          vat_amount: updatedData.vat_amount ?? null,
+          total_amount: updatedData.total_amount ?? null,
+        };
+
         updatedData.validation_flags = {
           ...updatedData.validation_flags,
           vat_id_ok: vatIdOk,
           math_ok: mathOk,
           rule_violations: ruleViolations,
+          allocation_required: allocationRequired,
+          warnings: liveReviewWarnings(updatedData.validation_flags.warnings, { ...amounts, invoice_date: updatedData.invoice_date ?? null, uploaded_at: uploadedAt }),
+          line_items_sum_ok: checkLineItemsSum(amounts).ok,
+          mixed_vat: hasMixedVat(lineItems),
         };
       }
 
-      await approveInvoice(invoice.id, updatedData);
+      const approval = await approveInvoice(invoice.id, updatedData);
       toast('החשבונית אושרה בהצלחה', 'success');
+      if (approval?.autoApproveDisabled) {
+        toast('האישור האוטומטי לספק זה כובה בעקבות התיקונים', 'info');
+      }
+      // Corrected values printed in the document: where this supplier prints them was learned
+      const learnedRules = Array.isArray(approval?.learning?.rules) && approval.learning.in_document?.length > 0
+        ? (approval.learning.rules as { active?: boolean; removed?: boolean }[]).filter((r) => r.active && !r.removed).length
+        : 0;
+      if (learnedRules > 0) {
+        toast(learnedRules === 1 ? 'המערכת למדה מהתיקון ותשתמש בו בחשבוניות הבאות של הספק' : `המערכת למדה ${learnedRules} כללים מהתיקונים ותשתמש בהם בחשבוניות הבאות של הספק`, 'info');
+      }
+      if (Array.isArray(approval?.warnings)) {
+        for (const w of approval.warnings as unknown[]) if (typeof w === 'string') toast(w, 'info');
+      }
+
+      if (changedRules.length > 0) {
+        try {
+          const { updated } = await reapplySupplierRules(invoice.client_id, changedRules);
+          if (updated > 0) toast(ruleReappliedMessage(updated, { others: true }), 'info');
+        } catch (reapplyErr) {
+          console.error('[ValidationForm] Failed to re-apply supplier rule to invoices in review:', reapplyErr);
+        }
+      }
       onApproved();
     } catch (e: any) {
       setError(e.message);
@@ -321,23 +482,18 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
     }
   };
 
-  const handleReject = async () => {
+  // "לא מאושר" opens a confirmation (with an optional reason); the dialog calls confirmReject
+  const handleReject = () => { setError(''); setShowRejectDialog(true); };
+  const confirmReject = async (reason: string) => {
     setRejecting(true); setError('');
     try {
-      const { error: dbErr } = await supabase
-        .from('invoices')
-        .update({
-          status: 'rejected',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', invoice.id);
-
-      if (dbErr) throw dbErr;
-
+      await rejectInvoice(invoice.id, reason);
+      setShowRejectDialog(false);
       toast('החשבונית סומנה כלא מאושרת', 'info');
       onApproved();
-    } catch (e: any) {
-      setError(e.message);
+    } catch (e) {
+      setShowRejectDialog(false);
+      setError(e instanceof Error ? e.message : 'שגיאה בסימון החשבונית כלא מאושרת');
     } finally {
       setRejecting(false);
     }
@@ -346,24 +502,97 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
   const isApproved = invoice.status === 'approved';
   const isRejected = invoice.status === 'rejected';
   const isError = invoice.status === 'error';
-  const isReadOnly = isApproved || isRejected || isError || invoice.status === 'exported';
+  const isReturned = invoice.status === 'returned';
+  // While the pipeline runs it overwrites the fields, and the server refuses reject / split (409):
+  // the form is read-only and offers no actions until the run ends (QA round 2, N23).
+  const isProcessing = invoice.status === 'processing';
+  const isReadOnly = isApproved || isRejected || isError || isReturned || isProcessing || invoice.status === 'exported';
+  const canApprove = APPROVABLE_STATUSES.includes(invoice.status);
+  const canReject = REJECTABLE_STATUSES.includes(invoice.status);
+
+  // Failed document ('error'): process again, mark as not approved, or delete.
+  const handleRetry = async () => {
+    setErrorAction('retry'); setError('');
+    try {
+      await retryInvoice(invoice.id);
+      toast('החשבונית נשלחה לעיבוד מחדש', 'info');
+      onApproved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'שגיאה בהפעלת העיבוד מחדש');
+    } finally {
+      setErrorAction(null);
+    }
+  };
+
+  // Explicit reopen back to review (exported: office owner only, logged on the server).
+  const canReopen = REOPENABLE_STATUSES.includes(invoice.status);
+  const handleReopen = async () => {
+    const exported = invoice.status === 'exported';
+    const question = exported
+      ? 'החשבונית כבר יוצאה להנהלת החשבונות. פתיחה מחדש תאפשר לייצא אותה שוב (רישום כפול). להמשיך?'
+      : 'לפתוח את החשבונית מחדש לבדיקה?';
+    if (!(await askConfirm({ title: 'פתיחה מחדש לבדיקה', message: question, confirmLabel: 'פתח מחדש', tone: exported ? 'danger' : 'default' }))) return;
+    setErrorAction('reopen'); setError('');
+    try {
+      await reopenInvoice(invoice.id);
+      toast('החשבונית נפתחה מחדש לבדיקה', 'info');
+      onApproved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'שגיאה בפתיחת החשבונית מחדש');
+    } finally {
+      setErrorAction(null);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!(await askConfirm({ title: 'מחיקת מסמך', message: `למחוק את המסמך "${invoice.file_name}"? לא ניתן לבטל פעולה זו.`, confirmLabel: 'מחק', tone: 'danger' }))) return;
+    setErrorAction('delete'); setError('');
+    try {
+      await deleteInvoice(invoice.id);
+      toast('המסמך נמחק', 'info');
+      router.push('/review');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'שגיאה במחיקת החשבונית');
+      setErrorAction(null);
+    }
+  };
+
+  // The server already cleared the flag in validated_data; mirror it locally so approving
+  // right after a dismissal doesn't write the stale duplicate flag back.
+  const handleDuplicateDismissed = (otherInvoiceId: string) => {
+    setData((prev) =>
+      prev.validation_flags
+        ? { ...prev, validation_flags: dismissDuplicateInFlags(prev.validation_flags, otherInvoiceId, prev.invoice_number) }
+        : prev
+    );
+    onApproved();
+  };
 
   const isApproveDisabled =
     saving ||
     rejecting ||
+    !canApprove ||
     mathError ||
+    !isVatIdOk ||
+    isAllocationMissing ||
+    isAllocationMalformed ||
     supplierStatus === 'loading' ||
     (supplierStatus === 'unknown' && !supplierCode.trim()) ||
+    !!supplierCodeError ||
+    !!categoryCodeError ||
     isDateEmpty ||
     isAmountBeforeVatEmpty ||
     isVatAmountEmpty ||
     isTotalAmountEmpty;
 
   return (
-    <div className="h-full flex flex-col" style={{ direction: 'rtl' }}>
+    // Mobile: the form flows with the page (no fixed-height box) and the action bar sticks to the
+    // bottom of the screen. From lg it fills its pane: header and action bar stay put, and the
+    // alerts scroll together with the fields, so banners never squeeze the fields into a sliver.
+    <div className="lg:h-full flex flex-col" style={{ direction: 'rtl' }}>
       {/* Header */}
       <div className="px-5 py-4 border-b border-slate-100 bg-white">
-        <h2 className="font-semibold text-slate-900 truncate">{invoice.file_name}</h2>
+        <h2 className="font-semibold text-slate-900 truncate"><bdi>{invoice.file_name}</bdi></h2>
         {invoice.ai_confidence != null && (
           <div className="flex items-center gap-2 mt-1.5">
             <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
@@ -375,15 +604,51 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             <span className="text-xs text-slate-500">ביטחון AI: {Math.round(invoice.ai_confidence * 100)}%</span>
           </div>
         )}
+        {lowConfidenceCount > 0 && (
+          <p className="text-[11px] text-amber-700 mt-1">
+            {countHe(lowConfidenceCount, 'field')} בביטחון נמוך — מסומנים בפס כתום
+          </p>
+        )}
       </div>
 
+      <div className="lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
       {/* Alerts */}
+      {flags?.auto_approved && (
+        <div className="mx-4 mt-3 flex items-center gap-2.5 p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-sm text-emerald-800">
+          <Zap className="h-4 w-4 shrink-0" />
+          אושרה אוטומטית — הספק מוגדר לאישור אוטומטי וכל הבדיקות עברו
+        </div>
+      )}
+      {!flags?.auto_approved && (flags?.auto_approve_blockers?.length ?? 0) > 0 && (
+        <div className="mx-4 mt-3 flex items-start gap-2.5 p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700">
+          <Zap className="h-4 w-4 shrink-0 mt-0.5 text-slate-400" />
+          <div>
+            <p className="font-medium">הספק מוגדר לאישור אוטומטי, אך החשבונית הועברה לבדיקה:</p>
+            <ul className="list-disc pr-4 mt-1 text-xs text-slate-600 space-y-0.5">
+              {flags?.auto_approve_blockers?.map((b, i) => <li key={i}>{b}</li>)}
+            </ul>
+          </div>
+        </div>
+      )}
+      {/* The extracted VAT ID was the buyer's and no reliable issuer ID was found: until one is entered */}
+      {!data.supplier_vat_id && flags?.rule_violations?.includes(BUYER_VAT_UNRESOLVED_VIOLATION) && (
+        <div className="mx-4 mt-3 flex items-center gap-2.5 p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          {BUYER_VAT_UNRESOLVED_VIOLATION}
+        </div>
+      )}
       {!mathOk && (
         <div className="mx-4 mt-3 flex items-center gap-2.5 p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
           <AlertCircle className="h-4 w-4 shrink-0" />
           סכומים לא מסתדרים — בדוק את הנתונים מול המסמך
         </div>
       )}
+      <DuplicateAlert
+        invoiceId={invoice.id}
+        flags={data.validation_flags}
+        readOnly={isReadOnly}
+        onDismissed={handleDuplicateDismissed}
+      />
       {warnings.map((w, i) => (
         <div key={i} className="mx-4 mt-2 flex items-start gap-2.5 p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">
           <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
@@ -392,7 +657,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
       ))}
 
       {/* Tab Switcher Buttons */}
-      <div className="px-4 py-2 bg-slate-50/50 border-b border-slate-100 flex gap-2 shrink-0">
+      <div className="px-4 py-2 bg-slate-50 border-b border-slate-100 flex gap-2 shrink-0 lg:sticky lg:top-0 lg:z-10">
         <button
           type="button"
           onClick={() => setActiveFormTab('invoice')}
@@ -429,10 +694,10 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
       </div>
 
       {/* Fields */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div className="p-4 space-y-4">
         {activeFormTab === 'invoice' && (
           <div className="space-y-4 animate-in fade-in duration-200">
-            <Field label="שם ספק" error={fieldError('supplier_name')} fieldKey="supplier_name" onFieldFocus={onFieldFocus}
+            <Field label="שם ספק" error={fieldError('supplier_name')} fieldKey="supplier_name" onFieldFocus={onFieldFocus} confidence={confidenceFor('supplier_name')}
               badge={
                 supplierStatus === 'known'
                   ? <span className="flex items-center gap-1 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full font-medium animate-in fade-in duration-200">
@@ -498,13 +763,16 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                 ) : (
                   <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />
                 )}
-                <label className={clsx(
+                <label htmlFor="vf-supplier-code" className={clsx(
                   "text-xs shrink-0 font-semibold",
                   supplierCode.trim() ? "text-emerald-800" : "text-amber-800"
                 )}>
                   קוד חשבון ספק:
                 </label>
                 <input
+                  id="vf-supplier-code"
+                  inputMode="numeric"
+                  aria-invalid={!!supplierCodeError || undefined}
                   className={clsx(
                     "input-base py-1 text-sm font-mono flex-1 disabled:opacity-75 disabled:bg-slate-50/80",
                     supplierCode.trim()
@@ -518,8 +786,11 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                 />
               </div>
             )}
+            {supplierCodeError && !isReadOnly && (
+              <p className="text-xs text-red-600 -mt-2">{supplierCodeError}</p>
+            )}
 
-            <Field label="ח.פ. / עוסק מורשה" error={fieldError('supplier_vat_id') || !isVatIdOk} fieldKey="supplier_vat_id" onFieldFocus={onFieldFocus}>
+            <Field label="ח.פ. / עוסק מורשה" error={fieldError('supplier_vat_id') || !isVatIdOk} fieldKey="supplier_vat_id" onFieldFocus={onFieldFocus} confidence={confidenceFor('supplier_vat_id')}>
               <input
                 className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', (fieldError('supplier_vat_id') || !isVatIdOk) && 'input-error')}
                 value={data.supplier_vat_id ?? ''}
@@ -621,7 +892,22 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                             {isSearchingWeb ? (
                               <span className="text-slate-400 animate-pulse">מחפש...</span>
                             ) : hasWebSearchVat ? (
-                              webSearchVat
+                              <span className="flex items-center gap-1.5">
+                                {webSearchVat}
+                                {!isReadOnly && !!data.supplier_vat_id &&
+                                  normalizeVatId(webSearchVat) !== normalizeVatId(data.supplier_vat_id) && (
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      if (!(await askConfirm({ title: 'החלפת ח.פ.', message: `להחליף את ח.פ. ${data.supplier_vat_id} במספר ${webSearchVat} שנמצא ברשם לפי שם הספק?`, confirmLabel: 'החלף' }))) return;
+                                      set('supplier_vat_id', webSearchVat);
+                                    }}
+                                    className="font-sans text-[10px] text-blue-700 bg-blue-50 border border-blue-200 hover:bg-blue-100 px-1.5 py-0.5 rounded"
+                                  >
+                                    השתמש
+                                  </button>
+                                )}
+                              </span>
                             ) : (
                               "לא נמצא בחיפוש"
                             )}
@@ -635,7 +921,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             </Field>
 
             <div className="grid grid-cols-2 gap-3">
-              <Field label="מספר חשבונית" error={fieldError('invoice_number')} fieldKey="invoice_number" onFieldFocus={onFieldFocus}>
+              <Field label="מספר חשבונית" error={fieldError('invoice_number')} fieldKey="invoice_number" onFieldFocus={onFieldFocus} confidence={confidenceFor('invoice_number')}>
                 <input
                   className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', fieldError('invoice_number') && 'input-error')}
                   value={data.invoice_number ?? ''}
@@ -644,9 +930,14 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                   onBlur={() => onFieldFocus?.(null)}
                   disabled={isReadOnly}
                 />
+                {(data.invoice_number ?? '').trim().length > MOVEIN_INVOICE_NUMBER_WIDTH && (
+                  <p className="text-xs text-amber-700 mt-1">
+                    ארוך מ-{MOVEIN_INVOICE_NUMBER_WIDTH} תווים: ייצוא ל-Move-in ידלג על החשבונית (מערכות אחרות אינן מושפעות)
+                  </p>
+                )}
               </Field>
 
-              <Field label="תאריך חשבונית" error={fieldError('invoice_date') || isDateEmpty} fieldKey="invoice_date" onFieldFocus={onFieldFocus}>
+              <Field label="תאריך חשבונית" error={fieldError('invoice_date') || isDateEmpty} fieldKey="invoice_date" onFieldFocus={onFieldFocus} confidence={confidenceFor('invoice_date')}>
                 <input
                   type="date"
                   className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', (fieldError('invoice_date') || isDateEmpty) && 'input-error')}
@@ -659,8 +950,8 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
               </Field>
             </div>
 
-            <div className="grid grid-cols-3 gap-3">
-              <Field label="לפני מע״מ" error={mathError || isAmountBeforeVatEmpty} fieldKey="amount_before_vat" onFieldFocus={onFieldFocus}>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <Field label="לפני מע״מ" error={mathError || isAmountBeforeVatEmpty} fieldKey="amount_before_vat" onFieldFocus={onFieldFocus} confidence={confidenceFor('amount_before_vat')}>
                 <input
                   type="number"
                   step="0.01"
@@ -672,7 +963,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                   disabled={isReadOnly}
                 />
               </Field>
-              <Field label='מע"מ' error={mathError || isVatAmountEmpty} fieldKey="vat_amount" onFieldFocus={onFieldFocus}>
+              <Field label='מע"מ' error={mathError || isVatAmountEmpty} fieldKey="vat_amount" onFieldFocus={onFieldFocus} confidence={confidenceFor('vat_amount')}>
                 <input
                   type="number"
                   step="0.01"
@@ -684,7 +975,7 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                   disabled={isReadOnly}
                 />
               </Field>
-              <Field label="סה״כ לתשלום" error={mathError || isTotalAmountEmpty} fieldKey="total_amount" onFieldFocus={onFieldFocus}>
+              <Field label="סה״כ לתשלום" error={mathError || isTotalAmountEmpty} fieldKey="total_amount" onFieldFocus={onFieldFocus} confidence={confidenceFor('total_amount')}>
                 <input
                   type="number"
                   step="0.01"
@@ -699,7 +990,32 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
             </div>
             {mathError && <p className="text-xs text-red-600">שגיאה: לפני מע"מ + מע"מ ≠ סה"כ</p>}
 
-            <Field label="קטגוריית הוצאה" error={fieldError('expense_category')} fieldKey="expense_category" onFieldFocus={onFieldFocus}>
+            <Field label="מספר הקצאה" error={isAllocationMissing} fieldKey="allocation_number" onFieldFocus={onFieldFocus} confidence={confidenceFor('allocation_number')}>
+              <input
+                className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', isAllocationMissing && 'input-error')}
+                value={data.allocation_number ?? ''}
+                onChange={(e) => set('allocation_number', e.target.value || null)}
+                onFocus={() => onFieldFocus?.('allocation_number')}
+                onBlur={() => onFieldFocus?.(null)}
+                inputMode="numeric"
+                placeholder={allocationRequired ? 'חובה בחשבונית זו' : 'לא חובה'}
+                disabled={isReadOnly}
+              />
+            </Field>
+            {isAllocationMissing && (
+              <p className="text-xs text-amber-700">
+                חשבונית מעל ₪{allocationThreshold(data.invoice_date)?.toLocaleString()} לפני מע"מ — בלי מספר הקצאה לא ניתן לקזז את המע"מ
+              </p>
+            )}
+            {isAllocationMalformed && <p className="text-xs text-red-600">מספר הקצאה חייב להיות 9 ספרות</p>}
+
+            <Field label="קטגוריית הוצאה" error={fieldError('expense_category')} fieldKey="expense_category" onFieldFocus={onFieldFocus} confidence={confidenceFor('expense_category')}
+              badge={isCategoryFromRule
+                ? <span className="flex items-center gap-1 text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full font-medium" title="ברירת המחדל שהוגדרה לספק במיפוי החשבונות">
+                    <CheckCircle2 className="h-3 w-3" /> לפי כלל ספק
+                  </span>
+                : null}
+            >
               <select
                 className={clsx('input-base disabled:opacity-75 disabled:bg-slate-50/80 disabled:cursor-not-allowed', fieldError('expense_category') && 'input-error')}
                 value={data.expense_category ?? ''}
@@ -712,11 +1028,25 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                 {categories.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
             </Field>
+            {canSaveCategoryAsDefault && !isReadOnly && (
+              <label className="flex items-center gap-2 -mt-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700 cursor-pointer animate-in fade-in duration-200">
+                <input
+                  type="checkbox"
+                  className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                  checked={saveCategoryAsDefault}
+                  onChange={(e) => setSaveCategoryAsDefault(e.target.checked)}
+                />
+                שמור כקטגוריית ברירת המחדל של הספק (יוחל גם על חשבוניות הספק הממתינות לבדיקה)
+              </label>
+            )}
             {categoryStatus === 'unknown' && data.expense_category && !isReadOnly && (
               <div className="flex items-center gap-2 -mt-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg animate-in fade-in duration-200">
                 <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />
-                <label className="text-xs text-amber-800 shrink-0">קוד חשבון קטגוריה:</label>
+                <label htmlFor="vf-category-code" className="text-xs text-amber-800 shrink-0">קוד חשבון קטגוריה:</label>
                 <input
+                  id="vf-category-code"
+                  inputMode="numeric"
+                  aria-invalid={!!categoryCodeError || undefined}
                   className="input-base py-1 text-sm font-mono flex-1 disabled:opacity-75 disabled:bg-slate-50/80"
                   placeholder="לדוג׳ 4001 — ריק = ייצוא ייחסם"
                   value={categoryCode}
@@ -724,6 +1054,18 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                   disabled={isReadOnly}
                 />
               </div>
+            )}
+            {categoryCodeError && !isReadOnly && (
+              <p className="text-xs text-red-600 -mt-2">{categoryCodeError}</p>
+            )}
+
+            {initialLineItems.length > 0 && (
+              <LineItemsTable
+                items={data.line_items ?? []}
+                amountBeforeVat={data.amount_before_vat}
+                totalAmount={data.total_amount}
+                onChange={isReadOnly ? undefined : (items: LineItem[]) => set('line_items', items)}
+              />
             )}
           </div>
         )}
@@ -784,27 +1126,72 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
           </div>
         )}
       </div>
-
+      </div>
 
       {/* Footer */}
-      <div className="px-4 py-4 border-t border-slate-100 bg-white">
+      <div className="px-4 py-4 border-t border-slate-100 bg-white sticky bottom-0 z-10 lg:static shadow-[0_-4px_12px_-8px_rgba(15,23,42,0.25)] lg:shadow-none">
         {error && <p className="text-sm text-red-600 mb-3">{error}</p>}
         
         {isReadOnly ? (
           <div className="w-full flex items-center justify-center p-3.5 rounded-xl border text-sm font-semibold">
+            {isProcessing && (
+              <span className="text-blue-700 bg-blue-50 border-blue-200 flex items-center gap-2 px-3 py-1 rounded-full border">
+                <RotateCcw className="h-4 w-4 shrink-0" /> החשבונית בעיבוד - אפשר לערוך, לאשר או לפצל אותה כשהעיבוד יסתיים
+              </span>
+            )}
             {isApproved && (
               <span className="text-emerald-700 bg-emerald-50 border-emerald-200 flex items-center gap-2 px-3 py-1 rounded-full border">
                 <CheckCircle className="h-4 w-4" /> חשבונית זו אושרה
               </span>
             )}
             {isRejected && (
-              <span className="text-rose-700 bg-rose-50 border-rose-200 flex items-center gap-2 px-3 py-1 rounded-full border">
-                <XCircle className="h-4 w-4" /> חשבונית זו לא אושרה
-              </span>
+              <div className="flex flex-col items-center gap-2">
+                <span className="text-rose-700 bg-rose-50 border-rose-200 flex items-center gap-2 px-3 py-1 rounded-full border">
+                  <XCircle className="h-4 w-4" /> חשבונית זו לא אושרה
+                </span>
+                {invoice.reject_reason && (
+                  <p className="text-xs font-normal text-slate-600 text-center break-words max-w-full" dir="auto">
+                    סיבה: {invoice.reject_reason}
+                  </p>
+                )}
+              </div>
             )}
             {isError && (
-              <span className="text-red-700 bg-red-50 border-red-200 flex items-center gap-2 px-3 py-1 rounded-full border">
-                <XCircle className="h-4 w-4 shrink-0" /> {invoice.error_message || 'המסמך לא זוהה כחשבונית'}
+              <div className="w-full flex flex-col items-center gap-3">
+                <span className="text-red-700 bg-red-50 border-red-200 flex items-center gap-2 px-3 py-1 rounded-full border">
+                  <XCircle className="h-4 w-4 shrink-0" /> {invoice.error_message ? toUserErrorMessage(invoice.error_message) : 'המסמך לא זוהה כחשבונית'}
+                </span>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleRetry}
+                    disabled={errorAction !== null || rejecting}
+                    className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border border-blue-200 text-blue-700 bg-white hover:bg-blue-50 transition-colors disabled:opacity-60"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" /> {errorAction === 'retry' ? 'שולח לעיבוד...' : 'עבד מחדש'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleReject}
+                    disabled={errorAction !== null || rejecting}
+                    className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border border-rose-200 text-rose-700 bg-white hover:bg-rose-50 transition-colors disabled:opacity-60"
+                  >
+                    <XCircle className="h-3.5 w-3.5" /> {rejecting ? 'פוסל...' : 'לא מאושר'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDelete}
+                    disabled={errorAction !== null || rejecting}
+                    className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border border-slate-200 text-slate-600 bg-white hover:bg-slate-50 transition-colors disabled:opacity-60"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" /> {errorAction === 'delete' ? 'מוחק...' : 'מחק מסמך'}
+                  </button>
+                </div>
+              </div>
+            )}
+            {isReturned && (
+              <span className="text-orange-700 bg-orange-50 border-orange-200 flex items-center gap-2 px-3 py-1 rounded-full border">
+                <Undo2 className="h-4 w-4" /> חשבונית זו הוחזרה ללקוח
               </span>
             )}
             {invoice.status === 'exported' && (
@@ -812,18 +1199,47 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
                 <CheckCircle className="h-4 w-4" /> חשבונית זו כבר יוצאה
               </span>
             )}
+            {onReturnToClient && (
+              <button
+                type="button"
+                onClick={onReturnToClient}
+                className="mr-3 flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border border-orange-200 text-orange-700 bg-white hover:bg-orange-50 transition-colors"
+              >
+                <Undo2 className="h-3.5 w-3.5" /> החזר ללקוח
+              </button>
+            )}
+            {canReopen && (
+              <button
+                type="button"
+                onClick={handleReopen}
+                disabled={errorAction !== null}
+                className="mr-3 flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border border-slate-200 text-slate-700 bg-white hover:bg-slate-50 transition-colors disabled:opacity-60"
+              >
+                <RotateCcw className="h-3.5 w-3.5" /> {errorAction === 'reopen' ? 'פותח...' : 'פתח מחדש לבדיקה'}
+              </button>
+            )}
           </div>
         ) : (
           <div className="flex items-center gap-3">
+            {onReturnToClient && (
+              <button
+                type="button"
+                onClick={onReturnToClient}
+                disabled={saving || rejecting}
+                className="flex-1 py-3 bg-white border border-orange-200 hover:bg-orange-50 text-orange-700 font-semibold text-sm rounded-xl transition-colors disabled:opacity-60 flex items-center justify-center gap-2 shadow-sm"
+              >
+                <Undo2 className="h-4 w-4" /> החזר ללקוח
+              </button>
+            )}
             <button
               onClick={handleReject}
-              disabled={saving || rejecting}
+              disabled={saving || rejecting || !canReject}
               className="flex-1 py-3 bg-white border border-rose-200 hover:bg-rose-50 text-rose-700 font-semibold text-sm rounded-xl transition-colors disabled:opacity-60 flex items-center justify-center gap-2 shadow-sm"
             >
               {rejecting ? 'פוסל...' : 'לא מאושר'}
             </button>
             <button
-              onClick={handleApprove}
+              onClick={() => handleApprove()}
               disabled={isApproveDisabled}
               className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm rounded-xl shadow-sm transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
             >
@@ -832,30 +1248,71 @@ export function ValidationForm({ invoice, onApproved, onFieldFocus }: Props) {
           </div>
         )}
       </div>
+
+      {showRejectDialog && (
+        <RejectDialog
+          fileName={invoice.file_name}
+          busy={rejecting}
+          onConfirm={confirmReject}
+          onClose={() => setShowRejectDialog(false)}
+        />
+      )}
     </div>
   );
 }
 
-function Field({ label, error, fieldKey, onFieldFocus, badge, children }: {
+function Field({ label, error, fieldKey, onFieldFocus, badge, confidence, children }: {
   label: string;
   error: boolean;
   fieldKey?: string;
   onFieldFocus?: (field: string | null) => void;
   badge?: React.ReactNode;
+  /** Model confidence 0-1; null/undefined = not reported (old records) or value edited. */
+  confidence?: number | null;
   children: React.ReactNode;
 }) {
+  const lowConfidence = isLowConfidence(confidence);
+  const pct = confidence != null ? Math.round(confidence * 100) : null;
+  // Tie the label to the field's input (first input / select / textarea child) for screen readers
+  const inputId = fieldKey ? `vf-${fieldKey}` : undefined;
+  let labelled = false;
+  const content = Children.map(children, (child) => {
+    if (
+      !labelled && inputId && isValidElement<{ id?: string }>(child) &&
+      typeof child.type === 'string' && ['input', 'select', 'textarea'].includes(child.type) && !child.props.id
+    ) {
+      labelled = true;
+      return cloneElement(child, { id: inputId });
+    }
+    return child;
+  });
   return (
     <div
       onMouseEnter={() => fieldKey && onFieldFocus?.(fieldKey)}
       onMouseLeave={() => onFieldFocus?.(null)}
+      className={clsx(lowConfidence && !error && 'border-r-2 border-amber-400 pr-2 -mr-2.5')}
     >
-      <div className="flex items-center justify-between mb-1.5">
-        <label className={clsx('text-sm font-semibold', error ? 'text-red-600' : 'text-slate-700')}>
-          {label}{error && <span className="text-red-500 mr-0.5">*</span>}
+      <div className="flex items-center justify-between gap-1.5 mb-1.5">
+        <label htmlFor={labelled ? inputId : undefined} className={clsx('text-sm font-semibold flex items-center gap-1.5 min-w-0', error ? 'text-red-600' : 'text-slate-700')}>
+          <span className="truncate">{label}{error && <span className="text-red-500 mr-0.5">*</span>}</span>
+          {pct != null && (
+            lowConfidence ? (
+              <span
+                className="shrink-0 text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 rounded-full"
+                title="ה-AI לא בטוח בשדה זה — בדוק מול המסמך"
+              >
+                {pct}%
+              </span>
+            ) : (
+              <span className="shrink-0 text-[10px] font-normal text-slate-400" title="רמת ביטחון ה-AI בשדה">
+                {pct}%
+              </span>
+            )
+          )}
         </label>
         {badge}
       </div>
-      {children}
+      {content}
     </div>
   );
 }

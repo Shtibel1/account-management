@@ -1,18 +1,28 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useListFilters } from './listFilters';
 import Link from 'next/link';
 import { Invoice } from '@/shared/types';
 import { StatusBadge } from '@/components/ui/Badge';
 import { exportInvoices, MissingMappingsError } from '@/lib/api';
 import { useToast } from '@/components/ui/Toast';
 import { format } from 'date-fns';
-import { AlertTriangle, ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Loader2, X } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Loader2, Plug, X } from 'lucide-react';
+import { IntegrationExportDialog } from '@/components/Integrations/IntegrationExportDialog';
+import { processingLabel } from '@/components/Processing/ProcessingStatus';
+import { toUserErrorMessage } from '@/shared/processing';
+import { inDateRange } from '@/shared/invoiceDateRange';
+import { byCountHe, countHe } from '@/shared/hebrewCount';
 
 interface Props {
   invoices: Invoice[];
   clients?: Record<string, string>;
+  /** Clients offered in the client filter even without invoices (the office's active clients). */
+  filterClientIds?: string[];
   onExported?: () => void;
+  /** Accountant review loop flag: offers the "הוחזר ללקוח" status filter. */
+  showReturned?: boolean;
 }
 
 function getPageNumbers(currentPage: number, totalPages: number) {
@@ -33,12 +43,29 @@ function getPageNumbers(currentPage: number, totalPages: number) {
   return pages;
 }
 
-export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
+/** Ellipsis in the middle, so both the start and the extension of a long file name stay visible. */
+function MiddleTruncate({ text, className }: { text: string; className?: string }) {
+  const TAIL = 12;
+  const head = text.length > TAIL + 4 ? text.slice(0, -TAIL) : text;
+  const tail = head === text ? '' : text.slice(-TAIL);
+  return (
+    <span dir="auto" title={text} className={`flex min-w-0 ${className ?? ''}`}>
+      <span className="truncate">{head}</span>
+      {tail && <span className="shrink-0 whitespace-pre">{tail}</span>}
+    </span>
+  );
+}
+
+export function InvoiceTable({ invoices, clients = {}, filterClientIds = [], onExported, showReturned = false }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
   const [missingMappings, setMissingMappings] = useState<string[] | null>(null);
-  const [clientFilter, setClientFilter] = useState<string>('all');
-  const [statusFilter, setStatusFilter] = useState<string>('all');
+  // Remembered across leaving the list (open / split / approve an invoice) and in the URL
+  const { clientFilter, setClientFilter, statusFilter, setStatusFilter } = useListFilters();
+  // Invoice-date range (YYYY-MM-DD, inclusive), e.g. to export one month to Move-in (QA-MV B4)
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [integrationExport, setIntegrationExport] = useState<{ clientId: string; invoices: Invoice[] } | null>(null);
   const { toast } = useToast();
 
   const [currentPage, setCurrentPage] = useState(1);
@@ -46,15 +73,30 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [clientFilter, statusFilter]);
+  }, [clientFilter, statusFilter, dateFrom, dateTo]);
 
-  const uniqueClientIds = Array.from(new Set(invoices.map((i) => i.client_id)));
+  // Every client of the office (also those without invoices yet), then any other client an invoice has
+  const uniqueClientIds = Array.from(new Set([
+    ...filterClientIds.filter((id) => id in clients).sort((a, b) => (clients[a] || '').localeCompare(clients[b] || '', 'he')),
+    ...invoices.map((i) => i.client_id),
+  ]));
 
   const filteredInvoices = invoices.filter((inv) => {
     const matchClient = clientFilter === 'all' || inv.client_id === clientFilter;
     const matchStatus = statusFilter === 'all' || inv.status === statusFilter;
-    return matchClient && matchStatus;
+    return matchClient && matchStatus && inDateRange(inv, dateFrom, dateTo);
   });
+  const filterKey = filteredInvoices.map((i) => i.id).join(',');
+
+  // A selection never includes invoices the filters hide: narrowing the date range after "select
+  // all" must not export the hidden invoices (QA-MV B4).
+  useEffect(() => {
+    const visible = new Set(filterKey.split(','));
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [filterKey]);
 
   const totalItems = filteredInvoices.length;
   const totalPages = Math.ceil(totalItems / ITEMS_PER_PAGE);
@@ -64,9 +106,10 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
   const paginatedInvoices = filteredInvoices.slice(startIndex, endIndex);
 
   const approved = filteredInvoices.filter((i) => i.status === 'approved');
+  const selectedApproved = approved.filter((i) => selected.has(i.id)).length;
 
   const toggleAll = () =>
-    selected.size === approved.length
+    selectedApproved === approved.length && approved.length > 0
       ? setSelected(new Set())
       : setSelected(new Set(approved.map((i) => i.id)));
 
@@ -80,15 +123,20 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
     if (!selected.size) return;
     setExporting(true);
     try {
-      const blob = await exportInvoices([...selected]);
+      const { blob, skipped, skippedCount, exportedCount } = await exportInvoices([...selected]);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = 'movein.dat';
       a.click();
-      URL.revokeObjectURL(url);
+      // Revoking in the same tick can cancel the download in some browsers
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
       setSelected(new Set());
       setMissingMappings(null);
+      if (exportedCount > 0) toast(`הקובץ movein.dat ירד: ${countHe(exportedCount, 'invoice')} ${byCountHe(exportedCount, 'יוצאה', 'יוצאו')} ל-Move-in`, 'success');
+      if (skippedCount > 0) {
+        toast(`${countHe(skippedCount, 'invoice')} ${byCountHe(skippedCount, 'לא נכללה', 'לא נכללו')} בקובץ: ${skipped.join(' · ')}`, 'error');
+      }
       onExported?.();
     } catch (err) {
       if (err instanceof MissingMappingsError) {
@@ -99,6 +147,16 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
     } finally {
       setExporting(false);
     }
+  };
+
+  const handleIntegrationExport = () => {
+    const chosen = invoices.filter((i) => selected.has(i.id));
+    const clientIds = [...new Set(chosen.map((i) => i.client_id))];
+    if (clientIds.length !== 1) {
+      toast('יש לבחור חשבוניות של לקוח אחד בכל פעם', 'error');
+      return;
+    }
+    setIntegrationExport({ clientId: clientIds[0], invoices: chosen });
   };
 
   if (invoices.length === 0) {
@@ -120,7 +178,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
       {/* Bulk action bar */}
       {selected.size > 0 && (
         <div className="flex items-center gap-3 px-4 py-3 bg-blue-600 rounded-xl text-white shadow-sm">
-          <span className="text-sm font-medium">{selected.size} חשבוניות נבחרו</span>
+          <span className="text-sm font-medium">{countHe(selected.size, 'invoice')} {byCountHe(selected.size, 'נבחרה', 'נבחרו')}</span>
           <div className="flex-1" />
           <button
             onClick={handleExport} disabled={exporting}
@@ -129,10 +187,27 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
             {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
             {exporting ? 'מייצא...' : 'ייצא ל-Move-in'}
           </button>
+          <button
+            onClick={handleIntegrationExport}
+            className="flex items-center gap-2 bg-blue-500 hover:bg-blue-400 text-white px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors"
+          >
+            <Plug className="h-4 w-4" />
+            ייצוא להנהלת חשבונות
+          </button>
           <button onClick={() => setSelected(new Set())} className="text-white/70 hover:text-white text-sm">
             בטל בחירה
           </button>
         </div>
+      )}
+
+      {integrationExport && (
+        <IntegrationExportDialog
+          clientId={integrationExport.clientId}
+          clientName={clients[integrationExport.clientId]}
+          invoices={integrationExport.invoices}
+          onClose={() => setIntegrationExport(null)}
+          onExported={() => { setSelected(new Set()); onExported?.(); }}
+        />
       )}
 
       {/* Missing mappings banner */}
@@ -160,11 +235,12 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
         
         {/* Client filter */}
         <div className="flex items-center gap-2">
-          <label className="text-xs font-semibold text-slate-600">לקוח:</label>
+          <label htmlFor="invoice-filter-client" className="text-xs font-semibold text-slate-600">לקוח:</label>
           <select
+            id="invoice-filter-client"
             value={clientFilter}
             onChange={(e) => setClientFilter(e.target.value)}
-            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-w-[140px] text-right font-medium"
+            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-w-[140px] max-w-[220px] text-right font-medium"
           >
             <option value="all">כל הלקוחות ({invoices.length})</option>
             {uniqueClientIds.map((cid) => (
@@ -177,11 +253,12 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
 
         {/* Status filter */}
         <div className="flex items-center gap-2">
-          <label className="text-xs font-semibold text-slate-600">סטטוס:</label>
+          <label htmlFor="invoice-filter-status" className="text-xs font-semibold text-slate-600">סטטוס:</label>
           <select
+            id="invoice-filter-status"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-w-[140px] text-right font-medium"
+            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-w-[140px] max-w-[220px] text-right font-medium"
           >
             <option value="all">כל הסטטוסים</option>
             <option value="processing">מעבד...</option>
@@ -189,14 +266,41 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
             <option value="approved">אושר</option>
             <option value="rejected">לא אושר</option>
             <option value="exported">יוצא</option>
+            {showReturned && (
+              <option value="returned">
+                הוחזר ללקוח ({invoices.filter((i) => i.status === 'returned').length})
+              </option>
+            )}
             <option value="error">חריג</option>
           </select>
         </div>
 
+        {/* Invoice-date range */}
+        <div className="flex items-center gap-2">
+          <label htmlFor="invoice-filter-date-from" className="text-xs font-semibold text-slate-600">מתאריך:</label>
+          <input
+            id="invoice-filter-date-from"
+            type="date"
+            value={dateFrom}
+            max={dateTo || undefined}
+            onChange={(e) => setDateFrom(e.target.value)}
+            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
+          />
+          <label htmlFor="invoice-filter-date-to" className="text-xs font-semibold text-slate-600">עד:</label>
+          <input
+            id="invoice-filter-date-to"
+            type="date"
+            value={dateTo}
+            min={dateFrom || undefined}
+            onChange={(e) => setDateTo(e.target.value)}
+            className="text-xs border border-slate-200 rounded-lg bg-white px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
+          />
+        </div>
+
         {/* Clear filters button */}
-        {(clientFilter !== 'all' || statusFilter !== 'all') && (
+        {(clientFilter !== 'all' || statusFilter !== 'all' || dateFrom || dateTo) && (
           <button
-            onClick={() => { setClientFilter('all'); setStatusFilter('all'); }}
+            onClick={() => { setClientFilter('all'); setStatusFilter('all'); setDateFrom(''); setDateTo(''); }}
             className="text-xs text-blue-600 hover:text-blue-700 underline font-semibold mr-auto"
           >
             נקה מסננים
@@ -204,16 +308,96 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
         )}
       </div>
 
-      {/* Table */}
       <div className="card overflow-hidden">
-        <table className="w-full text-sm">
+        {/* Phones (<640px): one stacked card per invoice instead of the wide table */}
+        <div className="sm:hidden" style={{ direction: 'rtl' }}>
+          {approved.length > 0 && (
+            <label className="flex items-center gap-2 px-4 py-3 bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-600">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-blue-600"
+                checked={selectedApproved === approved.length}
+                onChange={toggleAll}
+              />
+              בחירת כל החשבוניות המאושרות ({approved.length})
+            </label>
+          )}
+          {filteredInvoices.length === 0 ? (
+            <p className="p-8 text-center text-slate-400 font-medium">לא נמצאו חשבוניות התואמות את הסינון המבוקש.</p>
+          ) : (
+            <ul className="divide-y divide-slate-100">
+              {paginatedInvoices.map((inv) => {
+                const data = inv.validated_data ?? inv.extracted_data;
+                const isSelectable = inv.status === 'approved' || inv.status === 'exported';
+                const date = data?.invoice_date
+                  ? data.invoice_date.split('-').reverse().join('/')
+                  : inv.created_at ? format(new Date(inv.created_at), 'dd/MM/yyyy') : null;
+                return (
+                  <li key={inv.id} data-testid="invoice-card" className="relative px-4 py-3 hover:bg-slate-50 active:bg-slate-100 transition-colors">
+                    {/* The whole card opens the invoice; the checkbox sits above this link */}
+                    <Link
+                      href={`/review/${inv.id}`}
+                      aria-label={`פתח את ${inv.file_name}`}
+                      className="absolute inset-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-600"
+                    />
+                    <div className="pointer-events-none space-y-1.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        {isSelectable && (
+                          <input
+                            type="checkbox"
+                            aria-label={`בחירת ${inv.file_name}`}
+                            className="pointer-events-auto relative z-10 h-5 w-5 shrink-0 rounded border-slate-300 accent-blue-600"
+                            checked={selected.has(inv.id)}
+                            onChange={() => toggle(inv.id)}
+                          />
+                        )}
+                        <MiddleTruncate text={inv.file_name} className="flex-1 text-sm font-semibold text-slate-800" />
+                        <span className="shrink-0"><StatusBadge status={inv.status} /></span>
+                      </div>
+                      <div className="flex items-center gap-2 min-w-0 text-xs text-slate-500">
+                        <span className="truncate min-w-0 text-slate-700 font-medium">{data?.supplier_name ?? 'ספק לא ידוע'}</span>
+                        {clients[inv.client_id] && (
+                          <>
+                            <span className="text-slate-300 shrink-0">·</span>
+                            <span className="truncate min-w-0 shrink-[3]">{clients[inv.client_id]}</span>
+                          </>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="text-sm font-semibold text-slate-800 tabular-nums">
+                          {data?.total_amount != null
+                            ? `₪${data.total_amount.toLocaleString('he-IL', { minimumFractionDigits: 2 })}`
+                            : <span className="text-slate-400 font-normal">—</span>}
+                        </span>
+                        <span className="text-slate-500 tabular-nums">{date ?? '—'}</span>
+                      </div>
+                      {showReturned && inv.status === 'returned' && inv.return_reason && (
+                        <p className="text-xs text-orange-600 truncate">{inv.return_reason}</p>
+                      )}
+                      {inv.status === 'processing' && <p className="text-xs text-blue-600 truncate">{processingLabel(inv)}</p>}
+                      {inv.status === 'error' && inv.error_message && (
+                        <p className="text-xs text-red-500 truncate">{toUserErrorMessage(inv.error_message)}</p>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        {/* Table (from 640px) */}
+        <div className="hidden sm:block overflow-x-auto">
+        <table className="w-full min-w-[760px] text-sm">
           <thead>
             <tr className="bg-slate-50 border-b border-slate-200">
               <th className="p-4 w-10">
                 <input
                   type="checkbox"
                   className="rounded border-slate-300 text-blue-600 accent-blue-600"
-                  checked={selected.size === approved.length && approved.length > 0}
+                  checked={selectedApproved === approved.length && approved.length > 0}
+                  disabled={approved.length === 0}
+                  title={approved.length === 0 ? 'אין חשבוניות מאושרות לייצוא בתצוגה' : 'בחירת כל החשבוניות המאושרות'}
                   onChange={toggleAll}
                 />
               </th>
@@ -238,7 +422,9 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
             ) : (
               paginatedInvoices.map((inv) => {
               const data = inv.validated_data ?? inv.extracted_data;
-              const isSelectable = inv.status === 'approved';
+              // Exported invoices can be selected too: "ייצוא להנהלת חשבונות" > Move-in with "ייצוא
+              // חוזר" downloads their file again (QA-MV B3). "ייצא ל-Move-in" never re-exports them.
+              const isSelectable = inv.status === 'approved' || inv.status === 'exported';
               return (
                 <tr key={inv.id} className="hover:bg-slate-50/60 transition-colors group">
                   <td className="p-4">
@@ -258,10 +444,21 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
                     <div className="flex items-center gap-2">
                       <FileText className="h-4 w-4 text-slate-400 shrink-0 self-start mt-0.5" />
                       <div className="flex flex-col min-w-0">
-                        <span className="text-slate-700 font-medium max-w-[160px] truncate" title={inv.file_name}>{inv.file_name}</span>
+                        <span className="text-slate-700 font-medium max-w-[160px] truncate" title={inv.file_name}><bdi>{inv.file_name}</bdi></span>
+                        {showReturned && inv.status === 'returned' && inv.return_reason && (
+                          <span className="text-xs text-orange-600 font-normal max-w-[200px] truncate mt-0.5" title={inv.return_reason}>
+                            {inv.return_reason}
+                          </span>
+                        )}
+                        {inv.status === 'processing' && (
+                          <span className="text-xs text-blue-600 font-normal max-w-[200px] truncate mt-0.5">
+                            {processingLabel(inv)}
+                          </span>
+                        )}
                         {inv.status === 'error' && inv.error_message && (
-                          <span className="text-xs text-red-500 font-normal max-w-[200px] truncate mt-0.5" title={inv.error_message}>
-                            {inv.error_message}
+                          <span className="text-xs text-red-500 font-normal max-w-[200px] truncate mt-0.5" title={toUserErrorMessage(inv.error_message)}>
+                            {/* older rows may still hold raw vendor errors: always show the Hebrew form */}
+                            {toUserErrorMessage(inv.error_message)}
                           </span>
                         )}
                       </div>
@@ -288,7 +485,8 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
                   </td>
                   <td className="p-4"><StatusBadge status={inv.status} /></td>
                   <td className="p-4">
-                    {(inv.status !== 'processing') && (
+                    {/* Also while processing: the review screen shows progress and lets the user wait or act */}
+                    {(
                       <Link
                         href={`/review/${inv.id}`}
                         className="flex items-center gap-1 text-blue-600 hover:text-blue-700 opacity-0 group-hover:opacity-100 transition-opacity text-xs font-medium"
@@ -302,6 +500,7 @@ export function InvoiceTable({ invoices, clients = {}, onExported }: Props) {
             }))}
           </tbody>
         </table>
+        </div>
         {/* Pagination controls */}
         {totalPages > 1 && (
           <div className="flex items-center justify-between border-t border-slate-200 bg-white px-4 py-3 sm:px-6" style={{ direction: 'rtl' }}>

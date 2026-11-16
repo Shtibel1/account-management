@@ -1,5 +1,14 @@
-import { Camera, FileText, Search, Upload, Scan, Download, Check, Mail, Phone } from 'lucide-react';
+import { ArrowLeft, Camera, FileText, Search, Upload, Scan, Download } from 'lucide-react';
 import Link from 'next/link';
+import type { Metadata } from 'next';
+import { pageMetadata, SCAN_SITE } from '@/lib/seo';
+
+export const metadata: Metadata = pageMetadata({
+  title: 'סריקה בעברית | סריקת תמונות ומסמכים בעברית',
+  description: 'שירות סריקת תמונות ואלבומים, מסמכים וחשבוניות בעברית. זיהוי טקסט עברי (OCR) — קבצים דיגיטליים שאפשר לחפש.',
+  path: '/',
+  siteName: SCAN_SITE,
+});
 
 function HeroSection() {
   return (
@@ -33,20 +42,14 @@ function HeroSection() {
           </p>
 
           {/* CTA */}
-          <div className="flex flex-col sm:flex-row gap-4 justify-center">
+          <div className="flex justify-center">
             <Link
-              href="/order"
+              href="/signup"
               className="inline-flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-8 py-4 rounded-xl text-lg font-semibold shadow-lg shadow-blue-600/25 hover:shadow-xl hover:shadow-blue-600/30 transition-all"
             >
-              <Mail className="w-5 h-5" />
-              בקשו הצעת מחיר
+              התחילו עכשיו
+              <ArrowLeft className="w-5 h-5" />
             </Link>
-            <a
-              href="#what-we-scan"
-              className="inline-flex items-center justify-center gap-2 bg-white hover:bg-stone-50 text-stone-700 px-8 py-4 rounded-xl text-lg font-medium border border-stone-200 shadow-sm hover:shadow transition-all"
-            >
-              מה אפשר לסרוק?
-            </a>
           </div>
         </div>
       </div>
@@ -163,52 +166,6 @@ function HowItWorksSection() {
   );
 }
 
-function TrustSection() {
-  const points = [
-    {
-      icon: Check,
-      title: 'עברית אמיתית',
-      description: 'לא תרגום אוטומטי — הכל בעברית מקור, מותאם לשוק הישראלי.',
-    },
-    {
-      icon: Search,
-      title: 'OCR לעברית',
-      description: 'זיהוי תווים אופטי מותאם לעברית — גם כתב יד וגם טקסט מודפס.',
-    },
-    {
-      icon: FileText,
-      title: 'לא מעבדים בלי בקשה',
-      description: 'החומרים שלכם נשארים שלכם. לא משתמשים בהם לשום דבר אחר.',
-    },
-  ];
-
-  return (
-    <section className="py-16 sm:py-20 bg-white border-t border-stone-100">
-      <div className="max-w-5xl mx-auto px-4 sm:px-6">
-        <div className="text-center mb-12">
-          <h2 className="text-3xl sm:text-4xl font-bold text-stone-900 mb-4">
-            למה אנחנו?
-          </h2>
-        </div>
-
-        <div className="grid sm:grid-cols-3 gap-8">
-          {points.map(({ icon: Icon, title, description }) => (
-            <div key={title} className="flex gap-4">
-              <div className="shrink-0 w-10 h-10 rounded-lg bg-emerald-100 text-emerald-600 flex items-center justify-center">
-                <Icon className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-stone-900 mb-1">{title}</h3>
-                <p className="text-stone-600 text-sm leading-relaxed">{description}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
 function CTASection() {
   return (
     <section className="py-16 sm:py-20 bg-gradient-to-br from-blue-600 to-blue-700">
@@ -217,23 +174,16 @@ function CTASection() {
           מוכנים להתחיל?
         </h2>
         <p className="text-blue-100 text-lg mb-8 max-w-xl mx-auto">
-          שלחו לנו פרטים ונחזור אליכם עם הצעת מחיר מותאמת
+          פותחים חשבון ומתחילים תוך דקות
         </p>
-        <div className="flex flex-col sm:flex-row gap-4 justify-center">
+        <div className="flex justify-center">
           <Link
-            href="/order"
+            href="/signup"
             className="inline-flex items-center justify-center gap-2 bg-white hover:bg-stone-50 text-blue-700 px-8 py-4 rounded-xl text-lg font-semibold shadow-lg hover:shadow-xl transition-all"
           >
-            <Mail className="w-5 h-5" />
-            בקשו הצעת מחיר
+            התחילו עכשיו
+            <ArrowLeft className="w-5 h-5" />
           </Link>
-          <a
-            href="mailto:contact@nadav-shtibel.com"
-            className="inline-flex items-center justify-center gap-2 bg-blue-500/20 hover:bg-blue-500/30 text-white px-8 py-4 rounded-xl text-lg font-medium border border-white/20 transition-all"
-          >
-            <Phone className="w-5 h-5" />
-            contact@nadav-shtibel.com
-          </a>
         </div>
       </div>
     </section>
@@ -246,7 +196,6 @@ export default function HomePage() {
       <HeroSection />
       <WhatWeScanSection />
       <HowItWorksSection />
-      <TrustSection />
       <CTASection />
     </>
   );

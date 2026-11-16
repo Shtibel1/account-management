@@ -5,13 +5,19 @@ import { createClient } from '@/utils/supabase/client';
 import { Invoice } from '@/shared/types';
 import { InvoiceTable } from '@/components/InvoiceTable/InvoiceTable';
 import { useToast } from '@/components/ui/Toast';
+import { useFeatureFlag } from '@/components/FeatureFlags/useFeatureFlags';
+import { useSession } from '@/components/Auth/SessionContext';
 import { Loader2, RefreshCw } from 'lucide-react';
+import { useProcessingTicks } from '@/components/Processing/ProcessingStatus';
+import { clientDisplayNames } from '@/shared/clientLabels';
+import { countHe } from '@/shared/hebrewCount';
 
 const STATUS_LABELS: Record<string, string> = {
   review:   'לבדיקה',
   approved: 'אושר',
   rejected: 'לא אושר',
   error:    'חריג',
+  returned: 'הוחזר ללקוח',
 };
 
 export default function ReviewPage() {
@@ -21,20 +27,24 @@ export default function ReviewPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [clients, setClients] = useState<Record<string, string>>({});
+  // Active (not archived) clients: all of them are offered in the client filter, also without invoices
+  const [activeClientIds, setActiveClientIds] = useState<string[]>([]);
   const prevStatuses = useRef<Record<string, string>>({});
+  // The office the user is working in (sidebar), not just the oldest membership.
+  const { currentOrgId } = useSession();
+  const reviewLoop = useFeatureFlag('accountant_review_loop', { orgId: currentOrgId });
 
   const load = async (silent = false) => {
     if (!silent) setRefreshing(true);
     
     // Fetch client list to map client_id to client names
+    // (same-named clients get their VAT account / creation date so the filter options differ)
     const { data: clientsData } = await supabase
       .from('clients')
-      .select('id, name');
-    const clientMap: Record<string, string> = {};
-    (clientsData || []).forEach((c) => {
-      clientMap[c.id] = c.name;
-    });
+      .select('id, name, vat_account, created_at, archived_at');
+    const clientMap: Record<string, string> = Object.fromEntries(clientDisplayNames(clientsData ?? []));
     setClients(clientMap);
+    setActiveClientIds((clientsData ?? []).filter((c: { archived_at?: string | null }) => !c.archived_at).map((c: { id: string }) => c.id));
 
     const { data } = await supabase
       .from('invoices')
@@ -81,6 +91,9 @@ export default function ReviewPage() {
     return () => { supabase.removeChannel(channel); };
   }, []);
 
+  // Keeps queued processing moving while invoices show as processing; reload when one finishes
+  useProcessingTicks(invoices, () => { void load(true); });
+
   useEffect(() => {
     invoices.forEach((inv) => {
       if (!prevStatuses.current[inv.id]) {
@@ -91,11 +104,11 @@ export default function ReviewPage() {
 
   return (
     <div className="space-y-6 max-w-6xl">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">בדיקה ואישור</h2>
           <p className="text-sm text-slate-500 mt-1">
-            {invoices.length > 0 ? `${invoices.length} חשבוניות במערכת` : 'אין חשבוניות עדיין'}
+            {invoices.length > 0 ? `${countHe(invoices.length, 'invoice')} במערכת` : 'אין חשבוניות עדיין'}
           </p>
         </div>
         <button
@@ -113,7 +126,7 @@ export default function ReviewPage() {
           <Loader2 className="h-7 w-7 animate-spin" />
         </div>
       ) : (
-        <InvoiceTable invoices={invoices} clients={clients} onExported={() => load()} />
+        <InvoiceTable invoices={invoices} clients={clients} filterClientIds={activeClientIds} onExported={() => load()} showReturned={reviewLoop} />
       )}
     </div>
   );

@@ -1,4 +1,5 @@
 import type { NextConfig } from 'next';
+import { SECURITY_HEADER_RULES } from './src/lib/securityHeaders';
 
 console.log('--------------------------------------------------');
 console.log('Build Environment Diagnostic:');
@@ -11,6 +12,18 @@ console.log('--------------------------------------------------');
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ['sharp'],
+  // Security headers + no-store on every API response (src/lib/securityHeaders.ts, QA #33)
+  async headers() {
+    return SECURITY_HEADER_RULES;
+  },
+  // There is no /dashboard page: the office's home is the client list (QA: /dashboard was a 404)
+  async redirects() {
+    return [
+      { source: '/dashboard', destination: '/clients', permanent: false },
+      // The quote form was replaced by self-service signup; old links and search results keep working.
+      { source: '/order', destination: '/signup', permanent: true },
+    ];
+  },
 };
 
 export default nextConfig;

@@ -1,67 +1,8 @@
 import type { OcrMetadata, OcrWord } from '@/shared/types';
 import { PDFDocument } from 'pdf-lib';
-import Anthropic from '@anthropic-ai/sdk';
-
-const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
-
-async function detectInvoiceSplits(
-  pageTexts: string[]
-): Promise<{ start_page: number; end_page: number }[]> {
-  if (!anthropicApiKey) {
-    console.warn('[Preprocessor] Missing ANTHROPIC_API_KEY, skipping smart split.');
-    return [{ start_page: 1, end_page: pageTexts.length }];
-  }
-
-  const anthropic = new Anthropic({ apiKey: anthropicApiKey });
-  const formattedPages = pageTexts
-    .map((text, idx) => `[עמוד ${idx + 1}]:\n\"\"\"\n${text || 'עמוד ריק או ללא טקסט קריא'}\n\"\"\"`)
-    .join('\n\n');
-
-  const systemPrompt = `אתה עוזר פיננסי חכם שקובע כיצד לפצל קובץ PDF יחיד המכיל מספר חשבוניות מס ישראליות שונות.
-מצורף טקסט ה-OCR של כל עמוד במסמך.
-עליך לנתח את העמודים ולקבוע אילו עמודים שייכים לאותה חשבונית (רב-עמודית) ואילו עמודים מתחילים חשבונית חדשה.
-
-כללים לזיהוי חשבונית חדשה:
-1. שינוי שם הספק או מספר עוסק מורשה (ח.פ.).
-2. שינוי תאריך החשבונית או מספר החשבונית.
-3. עמוד שנראה בבירור כדף ראשון של מסמך (כותרת גדולה, לוגו, פרטי ספק).
-
-החזר את התשובה בפורמט JSON בלבד, במבנה הבא:
-{
-  "splits": [
-    { "start_page": 1, "end_page": 2 },
-    { "start_page": 3, "end_page": 3 }
-  ]
-}
-אל תוסיף שום הסבר או טקסט נוסף לפני או אחרי ה-JSON.`;
-
-  try {
-    const response = await anthropic.messages.create({
-      model: 'claude-3-haiku-20240307',
-      max_tokens: 1024,
-      system: systemPrompt,
-      messages: [
-        {
-          role: 'user',
-          content: `אנא קבע את גבולות החשבוניות עבור עמודי המסמך הבאים:\n\n${formattedPages}`,
-        },
-      ],
-    });
-
-    const text = response.content.find((b) => b.type === 'text')?.text || '';
-    const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    const result = JSON.parse(cleanText);
-    if (result && Array.isArray(result.splits)) {
-      console.log(`[Preprocessor] 🤖 AI split detection succeeded. Identified ${result.splits.length} parts:`, JSON.stringify(result.splits));
-      return result.splits;
-    }
-  } catch (err) {
-    console.error('[Preprocessor] Failed to parse splits JSON from AI response:', err);
-  }
-
-  // Fallback
-  return [{ start_page: 1, end_page: pageTexts.length }];
-}
+import { UserFacingError, isUnreadableFileError } from '@/shared/processing';
+import { uprightRotationOfBox } from '@/shared/orientation';
+import { DAMAGED_PDF_MESSAGE, hasPdfStructure, readPdfPageCount, sniffUploadMime } from '@/shared/uploadValidation';
 
 function extractWordsFromPage(pageRes: any, pageIndex: number): OcrWord[] {
   const words: OcrWord[] = [];
@@ -92,10 +33,13 @@ function extractWordsFromPage(pageRes: any, pageIndex: number): OcrWord[] {
             const x2 = Math.max(...xs) / (isNormalized ? 1 : pageWidth);
             const y2 = Math.max(...ys) / (isNormalized ? 1 : pageHeight);
 
+            // Vertex order follows the text's reading direction: an upside-down scan shows here
+            const rot = uprightRotationOfBox(vertices, isNormalized ? pageWidth : 1, isNormalized ? pageHeight : 1);
             words.push({
               text,
               bbox: { x1, y1, x2, y2 },
               page: pageIndex,
+              ...(rot ? { rot } : {}),
             });
           }
         }
@@ -105,10 +49,37 @@ function extractWordsFromPage(pageRes: any, pageIndex: number): OcrWord[] {
   return words;
 }
 
+/** Options of one Vision call made by the processing queue. */
+export interface OcrCallOptions {
+  /** Time limit of the call (ms): it must end before its request's deadline (nothing runs after a response on Amplify). */
+  timeoutMs?: number;
+}
+
+/** POST to Vision; a failed status throws with `status` set (429 / 5xx are retried by the queue). */
+async function postVision(apiUrl: string, payload: unknown, label: string, options: OcrCallOptions): Promise<Response> {
+  const apiResponse = await fetch(apiUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    ...(options.timeoutMs ? { signal: AbortSignal.timeout(Math.max(1_000, Math.floor(options.timeoutMs))) } : {}),
+  });
+  if (!apiResponse.ok) {
+    // Raw vendor detail goes to the server log; callers map the error to Hebrew (toUserErrorMessage)
+    const errText = await apiResponse.text();
+    throw Object.assign(new Error(`Google Cloud Vision ${label} request failed: ${apiResponse.statusText}. Details: ${errText}`), {
+      status: apiResponse.status,
+    });
+  }
+  return apiResponse;
+}
+
 async function runOcrForPageRange(
   base64Data: string,
   apiKey: string,
-  pages: number[]
+  pages: number[],
+  /** Page numbers to report for each requested page (defaults to `pages`). */
+  reportAs: number[] = pages,
+  options: OcrCallOptions = {}
 ): Promise<{ pageTexts: string[]; ocrWords: OcrWord[] }> {
   const apiUrl = `https://vision.googleapis.com/v1/files:annotate?key=${apiKey}`;
   const payload = {
@@ -128,19 +99,7 @@ async function runOcrForPageRange(
     ],
   };
 
-  const apiResponse = await fetch(apiUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!apiResponse.ok) {
-    const errText = await apiResponse.text();
-    throw new Error(`Google Cloud Vision page range OCR request failed: ${apiResponse.statusText}. Details: ${errText}`);
-  }
-
+  const apiResponse = await postVision(apiUrl, payload, 'page range OCR', options);
   const data = await apiResponse.json();
   const fileResponses = data.responses?.[0]?.responses;
   if (!fileResponses || !Array.isArray(fileResponses)) {
@@ -155,13 +114,142 @@ async function runOcrForPageRange(
       throw new Error(`Google Cloud Vision page OCR error: ${pageRes.error.message}`);
     }
     pageTexts.push(pageRes.fullTextAnnotation?.text || '');
-    const pageWords = extractWordsFromPage(pageRes, pages[idx] || 1);
+    const pageWords = extractWordsFromPage(pageRes, reportAs[idx] || pages[idx] || 1);
     ocrWords = ocrWords.concat(pageWords);
   });
 
   return { pageTexts, ocrWords };
 }
 
+/** Downloads a stored invoice file; `timeoutMs` bounds the whole download (the processing queue's step deadline). */
+export async function fetchInvoiceFile(fileUrl: string, timeoutMs?: number): Promise<Buffer> {
+  try {
+    const response = await fetch(fileUrl, timeoutMs ? { signal: AbortSignal.timeout(Math.max(1_000, Math.floor(timeoutMs))) } : undefined);
+    if (!response.ok) {
+      throw new Error(`Failed to download invoice file. HTTP status: ${response.status}`);
+    }
+    return Buffer.from(await response.arrayBuffer());
+  } catch (e) {
+    console.error(`[Preprocessor] Error downloading invoice file from URL: ${fileUrl.split('?')[0]}`, e);
+    throw new Error(`Preprocessor failed to retrieve invoice file: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
+  }
+}
+
+function visionApiKey(): string {
+  const apiKey = process.env.GOOGLE_CLOUD_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey) {
+    throw new Error('Google Cloud Vision API key is not configured. Please set GOOGLE_CLOUD_API_KEY.');
+  }
+  return apiKey;
+}
+
+/** Loads a PDF for page-batched OCR; null when pdf-lib can't read it (Vision may still). */
+export async function loadPdf(fileBuffer: Buffer): Promise<PDFDocument | null> {
+  try {
+    return await PDFDocument.load(fileBuffer, { ignoreEncryption: true });
+  } catch (e) {
+    console.warn('[Preprocessor] Failed to read PDF pages with pdf-lib:', e);
+    return null;
+  }
+}
+
+/**
+ * OCRs the given 1-based pages of a PDF. Only those pages are sent: they are copied into a small
+ * PDF first, so a 10 MB / 25-page scan doesn't upload the whole file with every 5-page request.
+ * Without a parsed document (pdf-lib failed) the whole file is sent, as before.
+ */
+export async function ocrPdfPages(
+  fileBuffer: Buffer,
+  pdfDoc: PDFDocument | null,
+  pages: number[],
+  options: OcrCallOptions = {}
+): Promise<{ pageTexts: string[]; ocrWords: OcrWord[] }> {
+  const apiKey = visionApiKey();
+  if (!pdfDoc) {
+    return runOcrForPageRange(fileBuffer.toString('base64'), apiKey, pages, pages, options);
+  }
+  let subBytes: Buffer;
+  try {
+    const subDoc = await PDFDocument.create();
+    const copied = await subDoc.copyPages(pdfDoc, pages.map((p) => p - 1));
+    copied.forEach((page) => subDoc.addPage(page));
+    subBytes = Buffer.from(await subDoc.save());
+  } catch (e) {
+    // pdf-lib loaded the file but its objects are broken (e.g. 'Expected instance of PDFDict'):
+    // the file is damaged and retrying won't help (QA round 5 #3). Vision errors stay outside.
+    console.warn('[Preprocessor] Failed to copy PDF pages with pdf-lib:', e);
+    throw new UserFacingError(DAMAGED_PDF_MESSAGE);
+  }
+  return runOcrForPageRange(subBytes.toString('base64'), apiKey, pages.map((_, i) => i + 1), pages, options);
+}
+
+/** OCR of a single image (JPEG / PNG / WEBP...). */
+export async function ocrImage(fileBuffer: Buffer, options: OcrCallOptions = {}): Promise<{
+  rawOcrText: string;
+  ocrWords: OcrWord[];
+  pageCount: number;
+  confidence: number;
+  detectedLanguages: string[];
+}> {
+  const apiKey = visionApiKey();
+  const apiUrl = `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`;
+  const payload = {
+    requests: [
+      {
+        image: { content: fileBuffer.toString('base64') },
+        features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+        imageContext: { languageHints: ['he', 'en'] },
+      },
+    ],
+  };
+
+  const apiResponse = await postVision(apiUrl, payload, 'Image OCR', options);
+  const data = await apiResponse.json();
+  const imageResponse = data.responses?.[0];
+  let rawOcrText = '';
+  let ocrWords: OcrWord[] = [];
+  let pageCount = 1;
+  let confidence = 0.95;
+  const detectedLanguages = new Set<string>();
+
+  if (imageResponse) {
+    if (imageResponse.error) {
+      throw new Error(`Google Cloud Vision image OCR error: ${imageResponse.error.message}`);
+    }
+    const annotation = imageResponse.fullTextAnnotation;
+    if (annotation) {
+      rawOcrText = annotation.text || '';
+      ocrWords = extractWordsFromPage(imageResponse, 1);
+      if (annotation.pages) {
+        pageCount = annotation.pages.length;
+        let totalConfidence = 0;
+        let confidenceCount = 0;
+        for (const page of annotation.pages) {
+          if (page.confidence !== undefined) {
+            totalConfidence += page.confidence;
+            confidenceCount++;
+          }
+          for (const lang of page.property?.detectedLanguages ?? []) {
+            if (lang.languageCode) detectedLanguages.add(lang.languageCode);
+          }
+        }
+        if (confidenceCount > 0) confidence = totalConfidence / confidenceCount;
+      }
+    }
+  }
+
+  return { rawOcrText, ocrWords, pageCount, confidence, detectedLanguages: normalizeLanguages(Array.from(detectedLanguages)) };
+}
+
+export function normalizeLanguages(languages: string[]): string[] {
+  const normalized = languages.map((lang) => (lang === 'iw' ? 'he' : lang));
+  return normalized.length > 0 ? normalized : ['he'];
+}
+
+/**
+ * Whole-file OCR in one call (kept for callers outside the queue). The processing queue
+ * (src/lib/processingQueue.ts) uses ocrPdfPages / ocrImage directly, a few pages per tick.
+ */
 export async function preprocessInvoice(
   fileUrl: string,
   mimeType: string
@@ -169,187 +257,67 @@ export async function preprocessInvoice(
   rawOcrText: string;
   ocrMetadata: OcrMetadata;
   ocrOpCount: number;
-  splits?: { start_page: number; end_page: number }[];
   pageTexts?: string[];
   ocrWords?: OcrWord[];
 }> {
-  console.log(`[Preprocessor] 📄 Starting OCR preprocessing for file URL: ${fileUrl} (${mimeType})`);
-
-  const apiKey = process.env.GOOGLE_CLOUD_API_KEY || process.env.GOOGLE_API_KEY;
-  if (!apiKey) {
-    throw new Error('Google Cloud Vision API key is not configured. Please set GOOGLE_CLOUD_API_KEY.');
-  }
-
-  // 1. Fetch file content
-  let fileBuffer: Buffer;
-  try {
-    const response = await fetch(fileUrl);
-    if (!response.ok) {
-      throw new Error(`Failed to download invoice file. HTTP status: ${response.status}`);
-    }
-    const arrayBuffer = await response.arrayBuffer();
-    fileBuffer = Buffer.from(arrayBuffer);
-  } catch (e) {
-    console.error(`[Preprocessor] Error downloading invoice file from URL: ${fileUrl}`, e);
-    throw new Error(`Preprocessor failed to retrieve invoice file: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  const base64Data = fileBuffer.toString('base64');
+  console.log(`[Preprocessor] 📄 Starting OCR preprocessing for file URL: ${fileUrl.split('?')[0]} (${mimeType})`);
+  visionApiKey();
+  const fileBuffer = await fetchInvoiceFile(fileUrl);
   const isPdf = mimeType === 'application/pdf' || fileUrl.toLowerCase().split('?')[0].endsWith('.pdf');
 
-  let rawOcrText = '';
-  let pageCount = 1;
-  let confidence = 0.95;
-  const detectedLanguages = new Set<string>();
-  let splits: { start_page: number; end_page: number }[] = [];
-  let pageTexts: string[] = [];
-  let ocrWords: OcrWord[] = [];
-
-  if (isPdf) {
-    console.log(`[Preprocessor] Processing as PDF via files:annotate`);
-    
-    // Read PDF structure with pdf-lib to get actual page count
-    let pdfPageCount = 0;
-    try {
-      const pdfDoc = await PDFDocument.load(fileBuffer);
-      pdfPageCount = pdfDoc.getPageCount();
-    } catch (e) {
-      console.warn('[Preprocessor] Failed to read PDF pages with pdf-lib, falling back to Vision page count detection:', e);
-    }
-
-    if (pdfPageCount === 0) {
-      // Fallback: request first page only to get page count if pdf-lib failed
-      const ocrRes = await runOcrForPageRange(base64Data, apiKey, [1]);
-      rawOcrText = ocrRes.pageTexts[0] || '';
-      ocrWords = ocrRes.ocrWords;
-      pageCount = 1;
-      splits = [{ start_page: 1, end_page: 1 }];
-      pageTexts = [rawOcrText];
-    } else {
-      pageCount = pdfPageCount;
-      console.log(`[Preprocessor] 📊 PDF has ${pdfPageCount} pages. Running page-by-page OCR in batches...`);
-
-      // Run OCR in batches of 5 pages in parallel
-      const batchPromises: Promise<{ pageTexts: string[]; ocrWords: OcrWord[] }>[] = [];
-      const batchSize = 5;
-      for (let i = 0; i < pdfPageCount; i += batchSize) {
-        const pagesToRequest = [];
-        for (let j = i; j < Math.min(i + batchSize, pdfPageCount); j++) {
-          pagesToRequest.push(j + 1);
-        }
-        console.log(`[Preprocessor]   Scheduling OCR batch for pages: ${pagesToRequest.join('-')}`);
-        batchPromises.push(runOcrForPageRange(base64Data, apiKey, pagesToRequest));
-      }
-
-      const batchResults = await Promise.all(batchPromises);
-      const allPageTexts = batchResults.flatMap((r) => r.pageTexts);
-      ocrWords = batchResults.flatMap((r) => r.ocrWords);
-
-      rawOcrText = allPageTexts.join('\n\n');
-      pageTexts = allPageTexts;
-
-      // Run AI split detection if PDF is multi-page
-      if (pdfPageCount > 1) {
-        splits = await detectInvoiceSplits(allPageTexts);
-      } else {
-        splits = [{ start_page: 1, end_page: 1 }];
-      }
-    }
-  } else {
-    // Processing as Image
-    console.log(`[Preprocessor] Processing as Image via images:annotate`);
-    const apiUrl = `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`;
-    const payload = {
-      requests: [
-        {
-          image: {
-            content: base64Data,
-          },
-          features: [
-            {
-              type: 'DOCUMENT_TEXT_DETECTION',
-            },
-          ],
-          imageContext: {
-            languageHints: ['he', 'en'],
-          },
-        },
-      ],
+  if (!isPdf) {
+    const img = await ocrImage(fileBuffer);
+    return {
+      rawOcrText: img.rawOcrText,
+      ocrMetadata: { pageCount: img.pageCount, detectedLanguages: img.detectedLanguages, confidence: img.confidence },
+      ocrOpCount: Math.ceil(img.pageCount / 5),
+      pageTexts: [img.rawOcrText],
+      ocrWords: img.ocrWords,
     };
-
-    const apiResponse = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!apiResponse.ok) {
-      const errText = await apiResponse.text();
-      throw new Error(`Google Cloud Vision Image OCR request failed: ${apiResponse.statusText}. Details: ${errText}`);
-    }
-
-    const data = await apiResponse.json();
-    const imageResponse = data.responses?.[0];
-
-    if (imageResponse) {
-      if (imageResponse.error) {
-        throw new Error(`Google Cloud Vision image OCR error: ${imageResponse.error.message}`);
-      }
-      const annotation = imageResponse.fullTextAnnotation;
-      if (annotation) {
-        rawOcrText = annotation.text || '';
-        
-        // Extract words from image fullTextAnnotation
-        ocrWords = extractWordsFromPage(imageResponse, 1);
-
-        if (annotation.pages) {
-          pageCount = annotation.pages.length;
-          let totalConfidence = 0;
-          let confidenceCount = 0;
-
-          for (const page of annotation.pages) {
-            if (page.confidence !== undefined) {
-              totalConfidence += page.confidence;
-              confidenceCount++;
-            }
-            if (page.property?.detectedLanguages) {
-              for (const lang of page.property.detectedLanguages) {
-                if (lang.languageCode) {
-                  detectedLanguages.add(lang.languageCode);
-                }
-              }
-            }
-          }
-          if (confidenceCount > 0) {
-            confidence = totalConfidence / confidenceCount;
-          }
-        }
-      }
-    }
-    splits = [{ start_page: 1, end_page: 1 }];
-    pageTexts = [rawOcrText];
   }
 
-  const normalizedLanguages = Array.from(detectedLanguages).map((lang) => 
-    lang === 'iw' ? 'he' : lang
-  );
-
-  if (normalizedLanguages.length === 0) {
-    normalizedLanguages.push('he');
+  // A truncated file may still "load" with a wrong page count (QA round 5 #3)
+  if (sniffUploadMime(fileBuffer) === 'application/pdf' && !hasPdfStructure(fileBuffer)) {
+    throw new UserFacingError(DAMAGED_PDF_MESSAGE);
+  }
+  const pdfDoc = await loadPdf(fileBuffer);
+  // Loaded, but its page tree can't be read (QA round 4): no reader can use this file
+  const counted = pdfDoc ? readPdfPageCount(pdfDoc) : 0;
+  if (counted === null) throw new UserFacingError(DAMAGED_PDF_MESSAGE);
+  const pageCount = counted;
+  if (!pdfDoc || pageCount === 0) {
+    // pdf-lib couldn't read it: let Vision try the first page
+    let res: Awaited<ReturnType<typeof ocrPdfPages>>;
+    try {
+      res = await ocrPdfPages(fileBuffer, null, [1]);
+    } catch (err) {
+      // Vision rejects it too: the PDF is damaged (QA round 5 #3)
+      if (!pdfDoc && isUnreadableFileError(err)) throw new UserFacingError(DAMAGED_PDF_MESSAGE);
+      throw err;
+    }
+    const text = res.pageTexts[0] || '';
+    return {
+      rawOcrText: text,
+      ocrMetadata: { pageCount: 1, detectedLanguages: ['he'], confidence: 0.95 },
+      ocrOpCount: 1,
+      pageTexts: [text],
+      ocrWords: res.ocrWords,
+    };
   }
 
+  const batches: number[][] = [];
+  for (let i = 1; i <= pageCount; i += 5) {
+    const batch: number[] = [];
+    for (let p = i; p < i + 5 && p <= pageCount; p++) batch.push(p);
+    batches.push(batch);
+  }
+  const results = await Promise.all(batches.map((pages) => ocrPdfPages(fileBuffer, pdfDoc, pages)));
+  const pageTexts = results.flatMap((r) => r.pageTexts);
   return {
-    rawOcrText,
-    ocrMetadata: {
-      pageCount,
-      detectedLanguages: normalizedLanguages,
-      confidence,
-    },
+    rawOcrText: pageTexts.join('\n\n'),
+    ocrMetadata: { pageCount, detectedLanguages: ['he'], confidence: 0.95 },
     ocrOpCount: Math.ceil(pageCount / 5),
-    splits,
     pageTexts,
-    ocrWords,
+    ocrWords: results.flatMap((r) => r.ocrWords),
   };
 }

@@ -1,39 +1,41 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
+import { buildStoragePath } from '@/lib/ingestHelpers';
+import { requireClientAccess } from '@/lib/auth';
+import { checkUploadDeclaration } from '@/shared/uploadValidation';
 
-function sanitizeStorageFilename(fileName: string): string {
-  const lastDot = fileName.lastIndexOf('.');
-  const ext = lastDot !== -1 ? fileName.substring(lastDot) : '';
-  const nameWithoutExt = lastDot !== -1 ? fileName.substring(0, lastDot) : fileName;
-  
-  let sanitized = nameWithoutExt
-    .replace(/[^a-zA-Z0-9-.]/g, '_')
-    .replace(/__+/g, '_')
-    .replace(/--+/g, '-')
-    .replace(/^[_-]+|[_-]+$/g, '');
-    
-  if (!sanitized) {
-    sanitized = Buffer.from(nameWithoutExt).toString('hex').substring(0, 16);
-  }
-  
-  return `${sanitized}${ext}`;
-}
-
+/**
+ * Issues a signed Storage upload URL for one file. The declared name / type / size are checked
+ * first (PDF, JPG, PNG, WEBP up to 20 MB); the stored bytes are checked again by /api/invoices/upload.
+ */
 export async function POST(request: Request) {
+  let body: unknown;
   try {
-    const body = await request.json();
-    const { clientId, fileName, mimeType } = body as {
-      clientId: string;
-      fileName: string;
-      mimeType: string;
-    };
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'בקשה לא תקינה' }, { status: 400 });
+  }
+  const { clientId, fileName, mimeType, size } = (body && typeof body === 'object' ? body : {}) as {
+    clientId?: unknown;
+    fileName?: unknown;
+    mimeType?: unknown;
+    size?: unknown;
+  };
 
-    if (!clientId || !fileName) {
-      return NextResponse.json({ error: 'Missing clientId or fileName' }, { status: 400 });
-    }
+  if (typeof clientId !== 'string' || !clientId) {
+    return NextResponse.json({ error: 'לא נבחר לקוח' }, { status: 400 });
+  }
 
-    const sanitizedName = sanitizeStorageFilename(fileName);
-    const filePath = `${clientId}/${Date.now()}_${sanitizedName}`;
+  const access = await requireClientAccess(clientId);
+  if (!access.ok) return access.response;
+
+  const check = checkUploadDeclaration({ fileName, mimeType, size });
+  if (!check.ok) {
+    return NextResponse.json({ error: check.error }, { status: check.error.includes('20MB') ? 413 : 400 });
+  }
+
+  try {
+    const filePath = buildStoragePath(clientId, fileName as string);
 
     // Generate signed upload URL
     const { data, error } = await supabase.storage
@@ -42,10 +44,7 @@ export async function POST(request: Request) {
 
     if (error || !data?.signedUrl) {
       console.error('Failed to create signed upload URL:', error);
-      return NextResponse.json(
-        { error: `Failed to create signed upload URL: ${error?.message || 'Unknown error'}` },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: 'לא ניתן היה להכין את העלאת הקובץ. יש לנסות שוב' }, { status: 500 });
     }
 
     return NextResponse.json({
@@ -55,9 +54,6 @@ export async function POST(request: Request) {
     });
   } catch (err) {
     console.error('Upload URL handler crashed:', err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'לא ניתן היה להכין את העלאת הקובץ. יש לנסות שוב' }, { status: 500 });
   }
 }

@@ -1,5 +1,33 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
+import { requireClientAccess, requireInvoiceAccess } from '@/lib/auth';
+import { isMockMode } from '@/lib/supabaseConfig';
+import { discardCopies, invoiceObjectPath, relocateInvoiceFiles, removeUnusedOldFiles, type FileMoveDb } from '@/lib/invoiceFiles';
+import { dbErrorResponse, readJsonObject, transitionInvoice } from '@/lib/invoiceTransitions';
+import { canTransition, DELETABLE_STATUSES, isInvoiceStatus, STATUS_LABELS, transitionRefusedMessage } from '@/shared/invoiceStatus';
+import type { InvoiceStatus } from '@/shared/types';
+import { invoiceUpdateReleasesBankMatch, releaseBankMatchesForInvoice } from '@/lib/bankTransactions';
+
+/** Columns the client may not set through PATCH. */
+const PROTECTED_COLUMNS = [
+  'id',
+  'created_at',
+  // Accountant review loop audit trail: written only by POST /api/invoices/[id]/return and the pipeline.
+  'return_reason_code',
+  'return_reason',
+  'returned_at',
+  'returned_by',
+  'resubmitted_invoice_id',
+  'resubmission_of',
+  // Approval / export audit: written only by the approve and export routes.
+  'reviewed_at',
+  'exported_at',
+  'ai_confidence',
+  // Stored-file references: set only by ingest and split (QA round 5 #1 - repointing them would
+  // let the original of a finished invoice be deleted from storage).
+  'file_url',
+  'original_file_url',
+];
 
 export async function GET(
   request: Request,
@@ -7,23 +35,14 @@ export async function GET(
 ) {
   const { id } = await params;
 
+  const access = await requireInvoiceAccess<Record<string, unknown>>(id, '*');
+  if (!access.ok) return access.response;
+
   try {
-    const { data, error } = await supabase
-      .from('invoices')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (error) {
-      return NextResponse.json({ error: 'Invoice not found' }, { status: 404 });
-    }
-
-    return NextResponse.json(data);
+    return NextResponse.json(access.value.invoice);
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    console.error(`[invoices/${id}] GET failed:`, err);
+    return NextResponse.json({ error: 'שגיאה בטעינת החשבונית' }, { status: 500 });
   }
 }
 
@@ -33,27 +52,149 @@ export async function PATCH(
 ) {
   const { id } = await params;
 
-  try {
-    const body = await request.json();
-    const { data, error } = await supabase
-      .from('invoices')
-      .update({
-        ...body,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', id)
-      .select()
-      .single();
+  const access = await requireInvoiceAccess<{ id: string; client_id: string; status: InvoiceStatus; file_url: string | null; original_file_url: string | null }>(
+    id,
+    'id, client_id, status, file_url, original_file_url'
+  );
+  if (!access.ok) return access.response;
+  const current = access.value.invoice.status;
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+  const parsed = await readJsonObject(request);
+  if (!parsed.ok) return parsed.response;
+
+  try {
+    const body: Record<string, unknown> = { ...parsed.body };
+    for (const col of PROTECTED_COLUMNS) delete body[col];
+    if ('status' in body && body.status !== current) {
+      // 'returned' is set only through the flagged return route (reason + client notification).
+      if (body.status === 'returned') {
+        return NextResponse.json({ error: 'החזרה ללקוח מתבצעת דרך "החזר ללקוח" בלבד' }, { status: 400 });
+      }
+      // Every other status change goes through its own route (approve / export / retry / reopen);
+      // PATCH may only make the plain "reject" transition (src/shared/invoiceStatus.ts).
+      if (!canTransition(current, body.status, 'reject')) {
+        return NextResponse.json(
+          {
+            error: `לא ניתן לשנות את סטטוס החשבונית מ"${STATUS_LABELS[current] ?? current}" ל"${
+              isInvoiceStatus(body.status) ? STATUS_LABELS[body.status] : 'סטטוס לא מוכר'
+            }" בעדכון ישיר`,
+          },
+          { status: 409 }
+        );
+      }
+    } else {
+      delete body.status;
+    }
+    // An exported invoice was already posted to the books: its data is final until reopened.
+    if (current === 'exported' && ('validated_data' in body || 'extracted_data' in body || 'client_id' in body)) {
+      return NextResponse.json({ error: 'החשבונית כבר יוצאה להנהלת החשבונות ולא ניתן לשנות את נתוניה' }, { status: 409 });
+    }
+    // Approved data is validated by the approve route; it may not be replaced unchecked afterwards
+    // (reopen the invoice to review first).
+    if (current !== 'review' && ('validated_data' in body || 'extracted_data' in body)) {
+      return NextResponse.json(
+        { error: 'ניתן לערוך את נתוני החשבונית רק כשהיא ממתינה לבדיקה (יש לפתוח אותה מחדש לבדיקה)' },
+        { status: 409 }
+      );
+    }
+    if (Object.keys(body).length === 0) {
+      return NextResponse.json({ error: 'לא התקבלו שדות לעדכון' }, { status: 400 });
+    }
+    // Moving an invoice to another client requires access to that client too; its files move along
+    // to the new client's folder (readers only trust files of the invoice's own client).
+    let movedOldPaths: string[] = [];
+    let movedCopies: string[] = [];
+    if ('client_id' in body && body.client_id !== access.value.invoice.client_id) {
+      const target = await requireClientAccess(body.client_id, access.value.ctx);
+      if (!target.ok) return target.response;
+      const move = await relocateInvoiceFiles(supabase as unknown as FileMoveDb, access.value.invoice, target.value.clientId);
+      if (!move.ok) {
+        console.error(`[invoices/${id}] Moving the files to client ${target.value.clientId} failed:`, move.error);
+        return NextResponse.json({ error: 'העברת קובץ החשבונית ללקוח האחר נכשלה. יש לנסות שוב' }, { status: 500 });
+      }
+      Object.assign(body, move.update);
+      movedOldPaths = move.oldPaths;
+      movedCopies = move.created;
+    }
+
+    if ('status' in body) {
+      // A status change only applies if nobody changed the status meanwhile (conditional update).
+      const outcome = await transitionInvoice(supabase, id, [current], { ...body, status: body.status as InvoiceStatus });
+      if (!outcome.ok) {
+        await discardCopies(supabase as unknown as FileMoveDb, movedCopies);
+        return outcome.reason === 'conflict'
+          ? NextResponse.json({ error: 'החשבונית שונתה בינתיים - יש לרענן את הדף' }, { status: 409 })
+          : dbErrorResponse(outcome.error);
+      }
+    } else {
+      const { error } = await supabase
+        .from('invoices')
+        .update({ ...body, updated_at: new Date().toISOString() })
+        .eq('id', id);
+      if (error) {
+        await discardCopies(supabase as unknown as FileMoveDb, movedCopies);
+        return dbErrorResponse(error);
+      }
+    }
+
+    await removeUnusedOldFiles(supabase as unknown as FileMoveDb, movedOldPaths);
+
+    const { data, error } = await supabase.from('invoices').select('*').eq('id', id).single();
+    if (error || !data) return NextResponse.json({ error: 'שגיאה בטעינת החשבונית לאחר העדכון' }, { status: 500 });
+
+    // Moved to another client, or no longer approved/exported: its bank line is not a valid match
+    // any more (the DB trigger invoices_release_bank_matches does the same for other write paths).
+    if (invoiceUpdateReleasesBankMatch(access.value.invoice, data as { client_id?: unknown; status?: unknown })) {
+      await releaseBankMatchesForInvoice(supabase, id);
     }
 
     return NextResponse.json(data);
   } catch (err) {
+    console.error(`[invoices/${id}] PATCH failed:`, err);
+    return NextResponse.json({ error: 'שגיאה בעדכון החשבונית' }, { status: 500 });
+  }
+}
+
+/**
+ * Deletes a failed document (status 'error') together with its stored file. Reviewed, approved or
+ * exported invoices are never deleted (409): reject them instead.
+ */
+export async function DELETE(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+
+  const access = await requireInvoiceAccess<{ id: string; client_id: string; status: InvoiceStatus; file_url: string | null }>(
+    id,
+    'id, client_id, status, file_url'
+  );
+  if (!access.ok) return access.response;
+  const invoice = access.value.invoice;
+
+  if (!DELETABLE_STATUSES.includes(invoice.status)) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
+      { error: `${transitionRefusedMessage('delete', invoice.status)} - ניתן למחוק רק מסמכים שעיבודם נכשל`, status: invoice.status },
+      { status: 409 }
     );
+  }
+
+  try {
+    const { error } = await supabase.from('invoices').delete().eq('id', id).in('status', [...DELETABLE_STATUSES]);
+    if (error) return dbErrorResponse(error, 'שגיאה במחיקת החשבונית');
+
+    // Best effort: the row is gone either way; an orphaned file is only wasted storage.
+    // file_url: storage reference (QA #31) or a legacy signed / public URL of this client
+    if (invoice.file_url && !isMockMode()) {
+      const path = invoiceObjectPath(invoice.file_url, invoice.client_id);
+      if (path) {
+        const { error: storageErr } = await supabase.storage.from('raw-invoices').remove([path]);
+        if (storageErr) console.error(`[invoices/${id}] Failed to delete stored file ${path}:`, storageErr);
+      }
+    }
+    return NextResponse.json({ success: true });
+  } catch (err) {
+    console.error(`[invoices/${id}] DELETE failed:`, err);
+    return NextResponse.json({ error: 'שגיאה במחיקת החשבונית' }, { status: 500 });
   }
 }

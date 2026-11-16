@@ -1,4 +1,13 @@
 import { Shield, Mail } from 'lucide-react';
+import type { Metadata } from 'next';
+import { pageMetadata, SCAN_SITE } from '@/lib/seo';
+
+export const metadata: Metadata = pageMetadata({
+  title: 'מדיניות פרטיות | סריקה בעברית',
+  description: 'מדיניות הפרטיות של שירות סריקה בעברית: איזה מידע נאסף, איך משתמשים בו, ומה קורה לתמונות ולמסמכים שנמסרו לסריקה.',
+  path: '/privacy',
+  siteName: SCAN_SITE,
+});
 
 export default function PrivacyPage() {
   return (
@@ -24,14 +33,14 @@ export default function PrivacyPage() {
             <h2 className="text-xl font-semibold text-stone-900 mb-3">מי אנחנו</h2>
             <p className="text-stone-600 leading-relaxed">
               סריקה בעברית הוא שירות סריקת תמונות ומסמכים בעברית. 
-              האתר מופעל על ידי נדב שטיבל. ליצירת קשר: <a href="mailto:contact@nadav-shtibel.com" className="text-blue-600 hover:underline">contact@nadav-shtibel.com</a>
+              האתר מופעל על ידי נדב שטיבל. ליצירת קשר: <a href="mailto:contact@nadav-shtibel.com" dir="ltr" className="text-blue-600 hover:underline">contact@nadav-shtibel.com</a>
             </p>
           </section>
 
           <section>
             <h2 className="text-xl font-semibold text-stone-900 mb-3">מידע שאנו אוספים</h2>
             <p className="text-stone-600 leading-relaxed mb-3">
-              כאשר אתם פונים אלינו דרך טופס ההזמנה, אנו אוספים:
+              כאשר אתם פונים אלינו, אנו אוספים:
             </p>
             <ul className="list-disc list-inside text-stone-600 space-y-1">
               <li>שם מלא</li>
@@ -44,7 +53,7 @@ export default function PrivacyPage() {
           <section>
             <h2 className="text-xl font-semibold text-stone-900 mb-3">איך אנו משתמשים במידע</h2>
             <p className="text-stone-600 leading-relaxed">
-              המידע משמש אותנו אך ורק לצורך מתן הצעת מחיר ותיאום השירות. 
+              המידע משמש אותנו אך ורק לצורך מתן השירות ותיאומו.
               אנו לא מוכרים, משכירים, או משתפים את המידע שלכם עם צדדים שלישיים לצורכי שיווק.
             </p>
           </section>
@@ -70,7 +79,7 @@ export default function PrivacyPage() {
             <h2 className="text-xl font-semibold text-stone-900 mb-3">זכויותיכם</h2>
             <p className="text-stone-600 leading-relaxed">
               אתם יכולים לבקש לראות, לתקן, או למחוק את המידע האישי שלכם בכל עת. 
-              פנו אלינו בכתובת <a href="mailto:contact@nadav-shtibel.com" className="text-blue-600 hover:underline">contact@nadav-shtibel.com</a> ונטפל בבקשתכם.
+              פנו אלינו בכתובת <a href="mailto:contact@nadav-shtibel.com" dir="ltr" className="text-blue-600 hover:underline">contact@nadav-shtibel.com</a> ונטפל בבקשתכם.
             </p>
           </section>
 

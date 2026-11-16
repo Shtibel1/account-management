@@ -4,67 +4,152 @@ import { useEffect, useState } from 'react';
 import { createClient } from '@/utils/supabase/client';
 import { Client } from '@/shared/types';
 import Link from 'next/link';
-import { Plus, Building2, ChevronLeft, Users, Loader2 } from 'lucide-react';
+import { Plus, Building2, ChevronLeft, Users, Loader2, Plug, Archive, RotateCcw } from 'lucide-react';
+import { useSession } from '@/components/Auth/SessionContext';
+import { useToast } from '@/components/ui/Toast';
+import { ClientChannelsDialog, ClientChannelsSummary, useClientChannels } from '@/components/ClientChannels/ClientChannels';
+import { vatAccountError } from '@/shared/mappingValidation';
+import { ClientCardMenu, createClientRequest, deleteClientRequest, EditClientDialog, setClientArchivedRequest } from '@/components/Clients/ClientDialogs';
+import { useConfirm } from '@/components/ui/ConfirmDialog';
+import { countHe } from '@/shared/hebrewCount';
 
 export default function ClientsPage() {
   const supabase = createClient();
-  const [clients, setClients] = useState<Client[]>([]);
+  const { me, currentOrgId } = useSession();
+  const { toast } = useToast();
+  const askConfirm = useConfirm();
+  // All clients of the user's offices, archived ones included (shown in their own section).
+  const [allClients, setAllClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState('');
   const [vatAccount, setVatAccount] = useState('');
   const [saving, setSaving] = useState(false);
+  const [channelsClient, setChannelsClient] = useState<Client | null>(null);
+  // Server answer for the name field (e.g. 409 duplicate name), shown inline under the input.
+  const [nameServerError, setNameServerError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [editClient, setEditClient] = useState<Client | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const clients = allClients.filter((c) => !c.archived_at);
+  const archivedClients = allClients.filter((c) => !!c.archived_at);
+  // Deleting / archiving is for office owners (the API checks it too); not in the local mock.
+  const canDelete = (c: Client) =>
+    !!me && !me.mock && me.organizations.some((o) => o.id === c.org_id && o.role === 'owner');
+  // Reload channels whenever the client list changes (new clients get an inbound alias).
+  const { settings, channels, setContacts } = useClientChannels(clients.length);
 
   const load = async () => {
     const { data } = await supabase.from('clients').select('*').order('created_at', { ascending: false });
-    setClients(data ?? []);
+    setAllClients(data ?? []);
     setLoading(false);
+  };
+
+  const replaceClient = (saved: Client) =>
+    setAllClients((list) => list.map((c) => (c.id === saved.id ? { ...c, ...saved } : c)));
+
+  const archiveClient = async (c: Client) => {
+    setBusyId(c.id);
+    const result = await setClientArchivedRequest(c.id, true);
+    setBusyId(null);
+    if ('error' in result) return toast(result.error, 'error');
+    replaceClient(result.client);
+    toast(`הלקוח "${c.name}" הועבר לארכיון`, 'success');
+  };
+
+  const restoreClient = async (c: Client) => {
+    setBusyId(c.id);
+    const result = await setClientArchivedRequest(c.id, false);
+    setBusyId(null);
+    // e.g. 409: another active client took the name meanwhile (rename it first).
+    if ('error' in result) return toast(result.field === 'name' ? `${result.error} - שנו את שם אחד הלקוחות ונסו שוב` : result.error, 'error');
+    replaceClient(result.client);
+    toast(`הלקוח "${c.name}" שוחזר`, 'success');
+  };
+
+  // Delete (owners): in-app confirm with the client's name. When the server refuses (exported books,
+  // audit history, bank lines, invoices in progress) its Hebrew reason is shown with archiving offered
+  // as the fallback.
+  const handleDelete = async (c: Client) => {
+    const ok = await askConfirm({
+      title: 'מחיקת לקוח',
+      message: (
+        <>
+          למחוק את הלקוח <strong className="font-semibold text-slate-900">{c.name}</strong>?{'\n'}
+          הלקוח, המיפויים והקבצים שלו יימחקו לצמיתות.
+        </>
+      ),
+      confirmLabel: 'מחק לקוח',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    setBusyId(c.id);
+    const result = await deleteClientRequest(c.id);
+    setBusyId(null);
+    if (result.ok) {
+      setAllClients((list) => list.filter((x) => x.id !== c.id));
+      toast(`הלקוח "${c.name}" נמחק`, 'success');
+      return;
+    }
+    if (result.status !== 409) {
+      toast(result.error, 'error');
+      return;
+    }
+    const archive = await askConfirm({
+      title: 'לא ניתן למחוק את הלקוח',
+      message: (
+        <>
+          <span role="alert" className="block text-rose-700">{result.error}</span>{'\n'}
+          אפשר במקום זאת להעביר את <strong className="font-semibold text-slate-900">{c.name}</strong> לארכיון: הוא יוסתר מרשימת הלקוחות ומהבחירה בדפים האחרים, כל הנתונים שלו יישמרו וניתן לשחזר אותו בכל עת.
+        </>
+      ),
+      confirmLabel: 'העבר לארכיון',
+      cancelLabel: 'סגור',
+    });
+    if (archive) await archiveClient(c);
   };
 
   useEffect(() => { load(); }, []);
 
-  const DEFAULT_CATEGORY_MAPPINGS = [
-    { key: 'ציוד משרדי', account_code: '4001' },
-    { key: 'שכ"ד', account_code: '4010' },
-    { key: 'תקשורת', account_code: '4020' },
-    { key: 'שיווק ופרסום', account_code: '4030' },
-    { key: 'נסיעות', account_code: '4040' },
-    { key: 'אחזקה', account_code: '4050' },
-    { key: 'שירותים מקצועיים', account_code: '4060' },
-    { key: 'חשמל ומים', account_code: '4070' },
-    { key: 'אחר', account_code: '4099' },
-  ];
+  // Goes into the export's account column: digits only (see src/shared/mappingValidation.ts)
+  const vatAccountErr = vatAccountError(vatAccount);
 
-  const handleAdd = async () => {
-    if (!name.trim()) return;
-    setSaving(true);
-    const { data: newClient } = await supabase
-      .from('clients')
-      .insert({ name: name.trim(), vat_account: vatAccount.trim() })
-      .select('id')
-      .single();
-    if (newClient) {
-      await supabase.from('account_mappings').insert(
-        DEFAULT_CATEGORY_MAPPINGS.map((cat) => ({
-          client_id: newClient.id,
-          mapping_type: 'category',
-          key: cat.key,
-          account_code: cat.account_code,
-        }))
-      );
+  const closeForm = () => {
+    setShowForm(false); setNameServerError(null); setFormError(null);
+  };
+
+  const handleAdd = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!name.trim() || saving) return;
+    if (vatAccountErr) {
+      toast(vatAccountErr, 'error');
+      return;
     }
-    setName(''); setVatAccount(''); setShowForm(false); setSaving(false);
+    setSaving(true);
+    setNameServerError(null);
+    setFormError(null);
+    // The server creates the client and its default category mappings, and refuses a name already
+    // used in the office (409, QA round 8).
+    const result = await createClientRequest({ name, vatAccount, orgId: currentOrgId });
+    setSaving(false);
+    if ('error' in result) {
+      if (result.field === 'name') setNameServerError(result.error);
+      else setFormError(result.error);
+      return;
+    }
+    setName(''); setVatAccount(''); closeForm();
     load();
   };
 
   return (
     <div className="space-y-6 max-w-5xl">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">לקוחות המשרד</h2>
           <p className="text-sm text-slate-500 mt-1">
-            {loading ? 'טוען...' : `${clients.length} לקוחות פעילים`}
+            {loading ? 'טוען...' : countHe(clients.length, 'client', { one: 'פעיל', many: 'פעילים' })}
           </p>
         </div>
         <button
@@ -77,39 +162,57 @@ export default function ClientsPage() {
 
       {/* Add form */}
       {showForm && (
-        <div className="card p-6 space-y-4">
+        <form className="card p-4 sm:p-6 space-y-4" onSubmit={handleAdd} noValidate>
           <h3 className="font-semibold text-slate-900">הוספת לקוח חדש</h3>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">שם הלקוח *</label>
+              <label htmlFor="new-client-name" className="block text-sm font-medium text-slate-700 mb-1.5">שם הלקוח *</label>
               <input
-                value={name} onChange={(e) => setName(e.target.value)}
+                id="new-client-name"
+                required
+                value={name} onChange={(e) => { setName(e.target.value); setNameServerError(null); }}
                 placeholder='חברת ABC בע"מ'
-                className="input-base"
+                aria-invalid={!!nameServerError || undefined}
+                aria-describedby={nameServerError ? 'new-client-name-error' : undefined}
+                className={nameServerError ? 'input-base input-error' : 'input-base'}
                 autoFocus
               />
+              {nameServerError && (
+                <p id="new-client-name-error" role="alert" className="text-xs text-red-600 mt-1">{nameServerError}</p>
+              )}
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">קוד חשבון מע"מ תשומות</label>
+              <label htmlFor="new-client-vat-account" className="block text-sm font-medium text-slate-700 mb-1.5">קוד חשבון מע"מ תשומות</label>
               <input
+                id="new-client-vat-account"
                 value={vatAccount} onChange={(e) => setVatAccount(e.target.value)}
                 placeholder="1310"
-                className="input-base"
+                inputMode="numeric"
+                dir="ltr"
+                aria-invalid={!!vatAccountErr || undefined}
+                aria-describedby={vatAccountErr ? 'new-client-vat-account-error' : undefined}
+                className={vatAccountErr ? 'input-base input-error text-right' : 'input-base text-right'}
               />
+              {vatAccountErr && (
+                <p id="new-client-vat-account-error" role="alert" className="text-xs text-red-600 mt-1">{vatAccountErr}</p>
+              )}
             </div>
           </div>
+          {formError && (
+            <p role="alert" className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-3 py-2">{formError}</p>
+          )}
           <div className="flex gap-2 pt-1">
             <button
-              onClick={handleAdd} disabled={saving || !name.trim()}
+              type="submit" disabled={saving || !name.trim() || !!vatAccountErr || !!nameServerError}
               className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-5 py-2 rounded-xl text-sm font-semibold transition-colors"
             >
               {saving ? 'שומר...' : 'שמור לקוח'}
             </button>
-            <button onClick={() => setShowForm(false)} className="px-5 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors">
+            <button type="button" onClick={closeForm} className="px-5 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors">
               ביטול
             </button>
           </div>
-        </div>
+        </form>
       )}
 
       {/* Client grid */}
@@ -135,26 +238,112 @@ export default function ClientsPage() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {clients.map((c) => (
-            <Link key={c.id} href={`/upload?clientId=${c.id}`}>
-              <div className="card p-5 hover:shadow-card-md hover:border-blue-200 transition-all cursor-pointer group">
+            <div key={c.id} className="card hover:shadow-card-md hover:border-blue-200 transition-all group">
+              <div className="flex items-start">
+              <Link href={`/upload?clientId=${c.id}`} className="block flex-1 min-w-0 p-5 pl-2 cursor-pointer">
                 <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
                     <div className="bg-gradient-to-br from-blue-500 to-blue-700 rounded-xl p-2.5 shadow-sm">
                       <Building2 className="h-5 w-5 text-white" />
                     </div>
-                    <div>
-                      <p className="font-semibold text-slate-900 group-hover:text-blue-700 transition-colors">{c.name}</p>
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-900 group-hover:text-blue-700 transition-colors break-words">{c.name}</p>
                       <p className="text-xs text-slate-500 mt-0.5">
                         {c.vat_account ? `מע"מ: ${c.vat_account}` : 'קוד מע"מ לא הוגדר'}
                       </p>
                     </div>
                   </div>
-                  <ChevronLeft className="h-4 w-4 text-slate-400 group-hover:text-blue-500 transition-colors mt-1" />
+                  <ChevronLeft className="h-4 w-4 text-slate-400 group-hover:text-blue-500 transition-colors mt-1 shrink-0" />
                 </div>
+              </Link>
+              <div className="pt-4 pl-3">
+                {busyId === c.id ? (
+                  <Loader2 className="h-4 w-4 m-1.5 animate-spin text-slate-400" aria-label="מעדכן" />
+                ) : (
+                  <ClientCardMenu
+                    clientName={c.name}
+                    canDelete={canDelete(c)}
+                    onEdit={() => setEditClient(c)}
+                    onDelete={() => handleDelete(c)}
+                  />
+                )}
               </div>
-            </Link>
+              </div>
+              <ClientChannelsSummary
+                info={channels[c.id]}
+                settings={settings}
+                onManage={() => setChannelsClient(c)}
+              />
+              <Link
+                href={`/integrations?clientId=${c.id}`}
+                className="flex items-center gap-2 border-t border-slate-100 px-5 py-2.5 text-xs font-medium text-blue-600 hover:text-blue-700 hover:bg-slate-50 rounded-b-2xl transition-colors"
+              >
+                <Plug className="h-3.5 w-3.5" /> חיבור להנהלת חשבונות
+              </Link>
+            </div>
           ))}
         </div>
+      )}
+
+      {editClient && (
+        <EditClientDialog
+          client={editClient}
+          onClose={() => setEditClient(null)}
+          onSaved={(saved) => {
+            replaceClient(saved);
+            setEditClient(null);
+            toast('פרטי הלקוח עודכנו', 'success');
+          }}
+        />
+      )}
+
+      {/* Archived clients (QA round 8): hidden from the list and pickers, restorable by owners */}
+      {!loading && archivedClients.length > 0 && (
+        <section className="space-y-3">
+          <button
+            type="button"
+            onClick={() => setShowArchived((v) => !v)}
+            aria-expanded={showArchived}
+            className="flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-900"
+          >
+            <Archive className="h-4 w-4" />
+            {showArchived ? 'הסתר לקוחות בארכיון' : `לקוחות בארכיון (${archivedClients.length})`}
+          </button>
+          {showArchived && (
+            <ul className="card divide-y divide-slate-100">
+              {archivedClients.map((c) => (
+                <li key={c.id} className="flex items-center justify-between gap-3 px-5 py-3">
+                  <div className="min-w-0">
+                    <p className="font-medium text-slate-700 break-words">{c.name}</p>
+                    <p className="text-xs text-slate-500 mt-0.5">{c.vat_account ? `מע"מ: ${c.vat_account}` : 'קוד מע"מ לא הוגדר'}</p>
+                  </div>
+                  {canDelete(c) && (
+                    <button
+                      type="button"
+                      onClick={() => restoreClient(c)}
+                      disabled={busyId === c.id}
+                      aria-label={`שחזור הלקוח ${c.name}`}
+                      className="flex items-center gap-1.5 shrink-0 text-xs font-medium text-blue-600 hover:text-blue-700 disabled:opacity-50"
+                    >
+                      {busyId === c.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />} שחזור
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+
+      {channelsClient && (
+        <ClientChannelsDialog
+          clientId={channelsClient.id}
+          clientName={channelsClient.name}
+          info={channels[channelsClient.id]}
+          settings={settings}
+          onContactsChange={(contacts) => setContacts(channelsClient.id, contacts)}
+          onClose={() => setChannelsClient(null)}
+        />
       )}
     </div>
   );

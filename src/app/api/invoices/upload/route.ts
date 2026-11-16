@@ -1,116 +1,82 @@
 import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
-import { runOrchestrationPipeline } from '@/agents/supervisor';
+import { registerStoredDocument, schedulePipeline, type RegisterResult } from '@/lib/ingest';
+import { requireClientAccess } from '@/lib/auth';
+import { isOwnStoragePath } from '@/lib/ingestHelpers';
+import { checkUploadDeclaration, mimeFromFileName } from '@/shared/uploadValidation';
 
-function sanitizeStorageFilename(fileName: string): string {
-  const lastDot = fileName.lastIndexOf('.');
-  const ext = lastDot !== -1 ? fileName.substring(lastDot) : '';
-  const nameWithoutExt = lastDot !== -1 ? fileName.substring(0, lastDot) : fileName;
-  
-  let sanitized = nameWithoutExt
-    .replace(/[^a-zA-Z0-9-.]/g, '_')
-    .replace(/__+/g, '_')
-    .replace(/--+/g, '-')
-    .replace(/^[_-]+|[_-]+$/g, '');
-    
-  if (!sanitized) {
-    sanitized = Buffer.from(nameWithoutExt).toString('hex').substring(0, 16);
-  }
-  
-  return `${sanitized}${ext}`;
-}
+/** Max files registered in one request. */
+const MAX_FILES = 50;
+/** Registered rows queued in parallel. */
+const ENQUEUE_CONCURRENCY = 5;
 
+/**
+ * Registers files the browser already PUT into raw-invoices (see /api/invoices/upload-url).
+ * registerStoredDocument checks the stored bytes (size, empty, real PDF / image by magic bytes):
+ * a rejected file gets no invoice row and is reported per file with a Hebrew error.
+ * Each registered row is queued for processing here, on the server (`queued: true` per result), so
+ * processing never depends on the browser's /process call (QA round 3); the scheduled worker and the
+ * review screens drive the queued jobs.
+ */
 export async function POST(request: Request) {
+  let body: unknown;
   try {
-    const body = await request.json();
-    const { clientId, files } = body as {
-      clientId: string;
-      files: { filePath: string; fileName: string; mimeType: string }[];
-    };
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'בקשה לא תקינה' }, { status: 400 });
+  }
+  const { clientId, files } = (body && typeof body === 'object' ? body : {}) as {
+    clientId?: unknown;
+    files?: unknown;
+  };
 
-    if (!clientId) {
-      return NextResponse.json({ error: 'Missing clientId' }, { status: 400 });
-    }
+  if (typeof clientId !== 'string' || !clientId) {
+    return NextResponse.json({ error: 'לא נבחר לקוח' }, { status: 400 });
+  }
 
-    if (!files || files.length === 0) {
-      return NextResponse.json({ error: 'No files specified' }, { status: 400 });
-    }
+  const access = await requireClientAccess(clientId);
+  if (!access.ok) return access.response;
 
-    const results: { fileName: string; status: 'success' | 'error'; id?: string; error?: string; fileUrl?: string }[] = [];
+  if (!Array.isArray(files) || files.length === 0) {
+    return NextResponse.json({ error: 'לא נבחרו קבצים' }, { status: 400 });
+  }
+  if (files.length > MAX_FILES) {
+    return NextResponse.json({ error: `ניתן לרשום עד ${MAX_FILES} קבצים בבקשה אחת` }, { status: 400 });
+  }
 
-    for (const file of files) {
-      const { filePath, fileName, mimeType } = file;
+  // Only files under this client's folder (as issued by /api/invoices/upload-url) may be
+  // registered - otherwise a user could attach another tenant's stored document.
+  const typed = files as { filePath?: unknown; fileName?: unknown }[];
+  if (typed.some((f) => !f || typeof f.filePath !== 'string' || typeof f.fileName !== 'string' || !isOwnStoragePath(clientId, f.filePath))) {
+    return NextResponse.json({ error: 'נתיב הקובץ אינו שייך ללקוח זה' }, { status: 400 });
+  }
 
-      // 1. Generate signed URL valid for 1 year
-      const { data: signedData, error: signErr } = await supabase.storage
-        .from('raw-invoices')
-        .createSignedUrl(filePath, 60 * 60 * 24 * 365);
-
-      if (signErr || !signedData?.signedUrl) {
-        console.error('Signed URL generation failed:', signErr);
-        const errMsg = `Signed URL generation failed: ${signErr?.message || 'Unknown error'}`;
-
-        // Record failure in database
-        const { data: invoice, error: dbErr } = await supabase
-          .from('invoices')
-          .insert({
-            client_id: clientId,
-            file_url: '',
-            file_name: fileName,
-            status: 'error',
-            error_message: errMsg,
-          })
-          .select()
-          .single();
-
-        results.push({
-          fileName,
-          status: 'error',
-          id: invoice?.id,
-          error: errMsg + (dbErr ? `. Also DB insert failed: ${dbErr.message}` : ''),
-        });
+  try {
+    const results: RegisterResult[] = [];
+    for (const file of typed as { filePath: string; fileName: string }[]) {
+      const declared = checkUploadDeclaration({ fileName: file.fileName });
+      if (!declared.ok) {
+        results.push({ fileName: file.fileName, status: 'error', error: declared.error });
         continue;
       }
-
-      const fileUrl = signedData.signedUrl;
-
-      // 2. Insert Invoice record in database
-      const { data: invoice, error: dbErr } = await supabase
-        .from('invoices')
-        .insert({
-          client_id: clientId,
-          file_url: fileUrl,
-          file_name: fileName,
-          status: 'processing',
-        })
-        .select()
-        .single();
-
-      if (dbErr) {
-        console.error('Database insertion failed:', dbErr);
-        results.push({
-          fileName,
-          status: 'error',
-          error: `Database insertion failed: ${dbErr.message}`,
-        });
-        continue;
-      }
-
-      results.push({
-        fileName,
-        status: 'success',
-        id: invoice.id,
-        fileUrl,
-      });
+      // registerStoredDocument also fingerprints the stored bytes (invoices.file_hash) before
+      // returning, so the hash is in place before the job is queued.
+      results.push(await registerStoredDocument({ clientId, filePath: file.filePath, fileName: file.fileName, source: 'upload' }));
     }
 
-    return NextResponse.json({ results, count: results.length }, { status: 201 });
+    // Queue the registered rows after the loop, a few at a time (each enqueue is several DB round
+    // trips), so a large batch still answers well before Amplify's ~28 s cut. A row that could not be
+    // queued is queued by the worker's sweep (never-queued rows).
+    const registered = results.filter((r): r is Extract<RegisterResult, { status: 'success' }> => r.status === 'success');
+    for (let i = 0; i < registered.length; i += ENQUEUE_CONCURRENCY) {
+      await Promise.all(registered.slice(i, i + ENQUEUE_CONCURRENCY).map(async (r) => {
+        r.queued = await schedulePipeline(r.id, mimeFromFileName(r.fileName));
+      }));
+    }
 
+    const anySuccess = results.some((r) => r.status === 'success');
+    return NextResponse.json({ results, count: results.length }, { status: anySuccess ? 201 : 422 });
   } catch (err) {
     console.error('Upload handler crashed:', err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'רישום הקבצים נכשל. יש לנסות שוב' }, { status: 500 });
   }
 }
