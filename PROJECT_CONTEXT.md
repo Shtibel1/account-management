@@ -1,14 +1,16 @@
 # Project Context & AI Guidelines: Invoice Scan (Shtibel1)
 
+> **Coding agents: start with [AGENTS.md](AGENTS.md)** — commands, hard rules, and the skills in `.claude/skills/` (which must be kept current via the `self-improve` skill).
+
 Welcome! This document serves as the source of truth for the codebase architecture, design choices, tech stack, and development guidelines for the Shtibel1 Invoice Scan & Management project. Read this document and the detailed guides in the `docs/` folder before making any changes.
 
 ### 📚 Detailed Reference Guides
-- [Database Schema (docs/db_schema.md)](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/docs/db_schema.md): Detailed schemas, tables, relationships, and JSONB formats.
+- [Database Schema (docs/db_schema.md)](docs/db_schema.md): Detailed schemas, tables, relationships, and JSONB formats.
 - [Supplier Rules & Auto-Approve (docs/supplier_automation.md)](docs/supplier_automation.md): Per-supplier defaults, precedence, auto-approve eligibility and opt-in.
 - [Authentication & Tenancy (docs/auth.md)](docs/auth.md): Login, offices (organizations) + memberships, RLS model, route guards, inviting members.
 - [Feature Flags & Review Loop (docs/feature_flags.md)](docs/feature_flags.md): Per-office feature flags ("תכונות ניסיוניות") and the accountant "החזר ללקוח" flow (flag `accountant_review_loop`).
 - [Export Plugins & Integrations (docs/integrations.md)](docs/integrations.md): Bookkeeping export plugins, per-client encrypted config, idempotent export flow, logging HTTP client, integration logs + retention.
-- [Coding Standards & AI Guidelines (docs/coding_standards.md)](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/docs/coding_standards.md): Mandatory conventions, type-safety, import rules, and Git commit guidelines.
+- [Coding Standards & AI Guidelines (docs/coding_standards.md)](docs/coding_standards.md): Mandatory conventions, type-safety, import rules, and Git commit guidelines.
 
 ---
 
@@ -57,7 +59,7 @@ Supabase Auth with cookie sessions (`@supabase/ssr`). An **organization** is a b
 
 ## 🔄 The AI Agent Pipeline (LangGraph Flow)
 
-The processing pipeline is defined in [supervisor/index.ts](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/src/agents/supervisor/index.ts) and runs in the following order:
+The processing pipeline is defined in [supervisor/index.ts](src/agents/supervisor/index.ts) and runs in the following order:
 
 1. **`init_rules`:** Fetch client-specific dynamic rules from the database.
 2. **`preprocess`:** Run Google Vision OCR (per page). For multi-page PDFs the splitter agent detects document boundaries: a cheap heuristic pre-check (single page, unreadable pages, consistent "עמוד X מתוך N" markers) decides without the LLM where it can; otherwise Claude (tool `report_document_boundaries`) groups pages into documents with a confidence. Ranges are validated by the pure helpers in `src/shared/documentSplit.ts`.
@@ -86,7 +88,7 @@ Bank / credit-card statements are matched against approved invoices; unmatched d
 ## 🛠️ Formatting & Hebrew Encoding Rules (Critical)
 Older Israeli ERP systems (such as Move-in) require single-byte Windows-1255 encoding and **Visual Hebrew** (where letters are written backwards but numbers and English stay LTR).
 - When formatting text for export file generation:
-  - Reverse Hebrew strings using `toVisualHebrew(str)` from [encoding.ts](file:///c:/Users/nadavs.CITYSHOB/Desktop/invoice-scan/src/utils/encoding.ts).
+  - Reverse Hebrew strings using `toVisualHebrew(str)` from [encoding.ts](src/utils/encoding.ts).
   - Encode the output into Windows-1255 byte buffer using `encodeWindows1255(str)`.
 - **Do not** write raw Hebrew strings directly to the exported buffers without applying this formatting.
 
@@ -131,5 +133,5 @@ Feature flags / review loop (see [docs/feature_flags.md](docs/feature_flags.md))
 ---
 
 ## 🤖 AI Agent Protocol & Operational Rules
-1. **Self-Documenting Updates:** After any code change, feature addition, or architectural refactor, the agent **MUST** update this `PROJECT_CONTEXT.md` file if there are any new directories, rules, tech stack additions, or flow modifications. Keep this document up-to-date and accurate.
+1. **Self-Documenting Updates:** After any code change, feature addition, or architectural refactor, the agent **MUST** update this `PROJECT_CONTEXT.md` file if there are any new directories, rules, tech stack additions, or flow modifications, and run the `self-improve` skill loop so `.claude/skills/` stays accurate. Keep this document up-to-date and accurate.
 2. **Auto-Git Push & Versioning:** Once a task is completed, fully verified, and the user's requirements are met, the agent **MUST** run `npm run bump-version` to bump the project patch version and update the UI version display. After bumping, the agent must commit all changes (including the version files) and push them to GitHub.
